@@ -1,0 +1,11 @@
+# CODEOWNERS — required reviewers per path.
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customizations/customizing-your-repository/about-code-owners
+
+# Default: project owner reviews everything.
+*           @jacaudi
+
+# CI/CD wiring is sensitive — same owner, but call it out explicitly.
+/.github/   @jacaudi
+
+# Design and implementation specs.
+/docs/      @jacaudi
