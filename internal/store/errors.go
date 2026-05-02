@@ -16,12 +16,18 @@ var ErrNotFound = errors.New("store: not found")
 // (e.g., duplicate email, duplicate (user_id, label) on devices).
 var ErrConflict = errors.New("store: conflict")
 
-// isUniqueViolation reports whether err is a SQLite UNIQUE constraint
-// violation. SQLITE_CONSTRAINT_UNIQUE is extended result code 2067.
+// isUniqueViolation reports whether err is a SQLite uniqueness constraint
+// violation. It covers two extended result codes:
+//
+//   - SQLITE_CONSTRAINT_UNIQUE (2067): UNIQUE index violation.
+//   - SQLITE_CONSTRAINT_PRIMARYKEY (1555): PRIMARY KEY violation.
+//
+// Both indicate a duplicate-key conflict and are mapped to ErrConflict.
 func isUniqueViolation(err error) bool {
 	var sErr *sqlite.Error
 	if errors.As(err, &sErr) {
-		return sErr.Code() == 2067
+		code := sErr.Code()
+		return code == 2067 || code == 1555
 	}
 	return false
 }
