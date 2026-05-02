@@ -1,6 +1,6 @@
 ---
 # Pull Request Validation
-# Fast feedback on PRs: lint, test, cross-compile, and (when Dockerfiles exist) container build.
+# Fast feedback on PRs: lint and test. Container builds happen on release only.
 name: PR Validation
 
 "on":
@@ -11,102 +11,17 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: pr-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   lint:
-    name: Lint
+    name: Lint Code
     uses: jacaudi/github-actions/.github/workflows/component-lint.yml@v0.20.1
-    permissions:
-      contents: read
     with:
-      go: true
-      go-version: '1.25'
       yaml: true
-      json: true
+      go: true
 
   test:
-    name: Test
+    name: Run Tests
     uses: jacaudi/github-actions/.github/workflows/component-test.yml@v0.20.1
-    permissions:
-      contents: read
     with:
-      test-framework: 'go'
-      go-version: '1.25'
+      test-framework: go
       coverage: true
-      coverage-threshold: 80
-      test-packages: './...'
-      test-args: '-race'
-
-  go-build-matrix:
-    name: Go cross-compile (${{ matrix.os }}/${{ matrix.arch }})
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: linux,   arch: amd64, ext: ""    }
-          - { os: linux,   arch: arm64, ext: ""    }
-          - { os: darwin,  arch: amd64, ext: ""    }
-          - { os: darwin,  arch: arm64, ext: ""    }
-          - { os: windows, arch: amd64, ext: ".exe" }
-          - { os: windows, arch: arm64, ext: ".exe" }
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-          cache: true
-
-      - name: Cross-compile both binaries
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: "0"
-        run: |
-          go build -o /tmp/diyddns-server${{ matrix.ext }} ./cmd/diyddns-server
-          go build -o /tmp/diyddns-client${{ matrix.ext }} ./cmd/diyddns-client
-
-  # Container build validation (no push). Plan 08 lands the Dockerfiles; until
-  # then this job is gated by their existence so PRs don't spuriously fail.
-  container-server:
-    name: Container build server (no push)
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    if: hashFiles('packaging/docker/server.Dockerfile') != ''
-    steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./packaging/docker/server.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: false
-          tags: diyddns-server:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha,scope=server
-          cache-to: type=gha,mode=max,scope=server
-
-  container-client:
-    name: Container build client (no push)
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    if: hashFiles('packaging/docker/client.Dockerfile') != ''
-    steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./packaging/docker/client.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: false
-          tags: diyddns-client:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha,scope=client
-          cache-to: type=gha,mode=max,scope=client

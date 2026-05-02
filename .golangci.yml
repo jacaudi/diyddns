@@ -45,13 +45,15 @@ linters:
       excludes:
         - G104  # errcheck overlaps; covered separately
 
+  exclusions:
+    rules:
+      # Test files may use longer functions and embedded fixtures.
+      - path: _test\.go
+        linters: [gocyclo, dupl, gosec, errcheck]
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Test files may use longer functions and embedded fixtures.
-    - path: _test\.go
-      linters: [gocyclo, dupl, gosec, errcheck]
 
 formatters:
   enable:

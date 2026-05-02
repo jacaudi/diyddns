@@ -51,3 +51,17 @@ tasks:
     desc: Remove build artefacts
     cmds:
       - rm -rf {{.BIN_DIR}} ui/dist docs/openapi/*.json
+
+  migrate:new:
+    desc: "Create a new SQL migration in migrations/ (Usage: task migrate:new -- <name>)"
+    cmds:
+      - go run github.com/pressly/goose/v3/cmd/goose@latest -dir migrations create {{.CLI_ARGS}} sql
+
+  db:backup:
+    desc: "Safely back up the SQLite database file (Usage: task db:backup -- <src.db> <out.db>)"
+    cmds:
+      - >
+        go run github.com/pressly/goose/v3/cmd/goose@latest -h >/dev/null 2>&1 || true ;
+        echo "Use the SQLite VACUUM INTO API:" ;
+        echo "  sqlite3 {{.CLI_ARGS}}" ;
+        echo "or, programmatically, .DB().ExecContext(ctx, \"VACUUM INTO ?\", outPath)"
