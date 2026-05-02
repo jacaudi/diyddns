@@ -7,9 +7,9 @@ import (
 
 func TestStringFormat(t *testing.T) {
 	cases := []struct {
-		name    string
-		v       Info
-		want    string
+		name string
+		v    Info
+		want string
 	}{
 		{"all-set", Info{Version: "1.2.3", Commit: "abcdef0", Date: "2026-05-01"}, "1.2.3 (abcdef0, 2026-05-01)"},
 		{"only-version", Info{Version: "v0.0.0-dev"}, "v0.0.0-dev"},
