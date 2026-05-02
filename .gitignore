@@ -1,0 +1,43 @@
+# Build outputs
+/bin/
+/dist/
+/ui/dist/
+/docs/openapi/*.json
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Node / Vite
+node_modules/
+.npm/
+.pnp.*
+.yarn-integrity
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.DS_Store
+Thumbs.db
+
+# Local-only secrets
+*.pem
+*.key
+!testdata/**/*.pem
+!testdata/**/*.key
+
+# Goose state file when developing
+sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
