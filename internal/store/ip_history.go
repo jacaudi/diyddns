@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -204,9 +205,9 @@ func (r *IPHistoryRepo) Page(ctx context.Context, deviceID, cursor string, limit
 // If perDeviceMax <= 0 the per-device cap is treated as unlimited.
 // Returns the number of rows deleted.
 func (r *IPHistoryRepo) Prune(ctx context.Context, deviceID string, olderThan int64, perDeviceMax int) (int, error) {
-	cap := perDeviceMax
-	if cap <= 0 {
-		cap = 1<<31 - 1
+	keepN := perDeviceMax
+	if keepN <= 0 {
+		keepN = math.MaxInt32
 	}
 
 	res, err := r.db.ExecContext(ctx,
@@ -226,7 +227,7 @@ func (r *IPHistoryRepo) Prune(ctx context.Context, deviceID string, olderThan in
 		       )
 		     )
 		   )`,
-		deviceID, deviceID, olderThan, deviceID, cap,
+		deviceID, deviceID, olderThan, deviceID, keepN,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("ip_history.Prune: %w", err)

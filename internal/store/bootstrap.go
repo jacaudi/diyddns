@@ -33,10 +33,10 @@ func (r *BootstrapRepo) Get(ctx context.Context) (BootstrapState, error) {
 		`SELECT token_hash, created_at, consumed_at FROM bootstrap WHERE id = 1`,
 	).Scan(&tokenHash, &createdAt, &consumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return BootstrapState{}, fmt.Errorf("store: bootstrap get: %w", ErrNotFound)
+		return BootstrapState{}, fmt.Errorf("bootstrap.Get: %w", ErrNotFound)
 	}
 	if err != nil {
-		return BootstrapState{}, fmt.Errorf("store: bootstrap get: %w", err)
+		return BootstrapState{}, fmt.Errorf("bootstrap.Get: %w", err)
 	}
 	return BootstrapState{
 		TokenHash:  scanString(tokenHash),
@@ -54,7 +54,7 @@ func (r *BootstrapRepo) SetTokenHash(ctx context.Context, tokenHash string) erro
 		nullIfEmpty(tokenHash), NowUnix(),
 	)
 	if err != nil {
-		return fmt.Errorf("store: bootstrap set token hash: %w", err)
+		return fmt.Errorf("bootstrap.SetTokenHash: %w", err)
 	}
 	return nil
 }
@@ -70,14 +70,14 @@ func (r *BootstrapRepo) Consume(ctx context.Context) error {
 		NowUnix(),
 	)
 	if err != nil {
-		return fmt.Errorf("store: bootstrap consume: %w", err)
+		return fmt.Errorf("bootstrap.Consume: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("store: bootstrap rows affected: %w", err)
+		return fmt.Errorf("bootstrap.Consume rows_affected: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("store: bootstrap consume: %w", ErrNotFound)
+		return fmt.Errorf("bootstrap.Consume: %w", ErrNotFound)
 	}
 	return nil
 }

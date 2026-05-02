@@ -28,9 +28,9 @@ func (r *ReplayNonceRepo) Insert(ctx context.Context, signature string, expiresA
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return fmt.Errorf("store: replay_nonces insert: %w", ErrConflict)
+			return fmt.Errorf("replay_nonces.Insert: %w", ErrConflict)
 		}
-		return fmt.Errorf("store: replay_nonces insert: %w", err)
+		return fmt.Errorf("replay_nonces.Insert: %w", err)
 	}
 	return nil
 }
@@ -45,7 +45,7 @@ func (r *ReplayNonceRepo) Exists(ctx context.Context, signature string) (bool, e
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: replay_nonces exists: %w", err)
+		return false, fmt.Errorf("replay_nonces.Exists: %w", err)
 	}
 	return true, nil
 }
@@ -57,11 +57,11 @@ func (r *ReplayNonceRepo) PruneExpired(ctx context.Context, now int64) (int, err
 		`DELETE FROM replay_nonces WHERE expires_at < ?`, now,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("store: replay_nonces prune_expired: %w", err)
+		return 0, fmt.Errorf("replay_nonces.PruneExpired: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("store: replay_nonces prune_expired rows_affected: %w", err)
+		return 0, fmt.Errorf("replay_nonces.PruneExpired rows_affected: %w", err)
 	}
 	return int(n), nil
 }

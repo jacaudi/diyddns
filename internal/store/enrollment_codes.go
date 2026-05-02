@@ -101,14 +101,14 @@ func (r *EnrollmentCodeRepo) Consume(ctx context.Context, code, deviceID string,
 		now, deviceID, code, now,
 	)
 	if err != nil {
-		return EnrollmentCode{}, fmt.Errorf("store: enrollment_codes consume: %w", err)
+		return EnrollmentCode{}, fmt.Errorf("enrollment_codes.Consume: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return EnrollmentCode{}, fmt.Errorf("store: enrollment_codes rows affected: %w", err)
+		return EnrollmentCode{}, fmt.Errorf("enrollment_codes.Consume rows_affected: %w", err)
 	}
 	if rows == 0 {
-		return EnrollmentCode{}, fmt.Errorf("store: enrollment_codes consume: %w", ErrNotFound)
+		return EnrollmentCode{}, fmt.Errorf("enrollment_codes.Consume: %w", ErrNotFound)
 	}
 	return r.Get(ctx, code)
 }
