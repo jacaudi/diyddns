@@ -1,0 +1,53 @@
+version: "3"
+
+vars:
+  BIN_DIR: "{{.TASKFILE_DIR}}/bin"
+  LDFLAGS: '-X github.com/jacaudi/diyddns/internal/version.Version={{.VERSION | default "v0.0.0-dev"}} -X github.com/jacaudi/diyddns/internal/version.Commit={{.COMMIT | default ""}} -X github.com/jacaudi/diyddns/internal/version.Date={{.DATE | default ""}}'
+
+tasks:
+  default:
+    desc: List all tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build both binaries into ./bin/
+    deps: [build:server, build:client]
+
+  build:server:
+    desc: Build diyddns-server into ./bin/
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/diyddns-server ./cmd/diyddns-server
+
+  build:client:
+    desc: Build diyddns-client into ./bin/
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/diyddns-client ./cmd/diyddns-client
+
+  test:
+    desc: Run all tests with the race detector
+    cmds:
+      - go test ./... -race
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run
+
+  fmt:
+    desc: Format Go sources
+    cmds:
+      - gofmt -w .
+      - go run golang.org/x/tools/cmd/goimports@latest -w .
+
+  tidy:
+    desc: Run go mod tidy
+    cmds:
+      - go mod tidy
+
+  clean:
+    desc: Remove build artefacts
+    cmds:
+      - rm -rf {{.BIN_DIR}} ui/dist docs/openapi/*.json
