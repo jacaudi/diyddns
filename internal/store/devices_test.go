@@ -6,21 +6,6 @@ import (
 	"time"
 )
 
-// helper to create a minimal test user in the Users repo.
-func makeTestUser(t *testing.T, s *Store, ctx interface{ Deadline() (time.Time, bool) }, email string) User {
-	t.Helper()
-	return makeTestUserCtx(t, s, email)
-}
-
-// makeTestUserCtx creates a user using the context stored in the test store.
-// We use a bare context.Context here, obtained via newTestStore's return value.
-func makeTestUserCtx(t *testing.T, s *Store, email string) User {
-	t.Helper()
-	// We need an actual context.Context — use Background since newTestStore
-	// returns (Store, context.Context) and the ctx is available in-scope in tests.
-	return User{Email: email, Role: "user"}
-}
-
 // ---------- 1. Create + GetByID round-trip ----------
 
 func TestDeviceCreateAndGetByID(t *testing.T) {
