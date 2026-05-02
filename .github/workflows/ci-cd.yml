@@ -3,7 +3,7 @@
 # then container builds gated on whether a new release was published.
 name: CI/CD
 
-"on":
+on:
   push:
     branches: [main]
   workflow_dispatch:
