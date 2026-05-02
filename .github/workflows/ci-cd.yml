@@ -3,7 +3,7 @@
 # then container builds gated on whether a new release was published.
 name: CI/CD
 
-on:
+"on":
   push:
     branches: [main]
   workflow_dispatch:
@@ -60,10 +60,33 @@ jobs:
       app-id: ${{ secrets.APP_ID }}
       app-private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
+  detect-dockerfiles:
+    name: Detect Dockerfiles
+    needs: [release]
+    if: needs.release.outputs.new-release-published == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      has-server: ${{ steps.detect.outputs.has-server }}
+      has-client: ${{ steps.detect.outputs.has-client }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: detect
+        run: |
+          if [ -f packaging/docker/server.Dockerfile ]; then
+            echo "has-server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-server=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f packaging/docker/client.Dockerfile ]; then
+            echo "has-client=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-client=false" >> "$GITHUB_OUTPUT"
+          fi
+
   container-server:
     name: Container - server
-    needs: [release]
-    if: needs.release.outputs.new-release-published == 'true' && hashFiles('packaging/docker/server.Dockerfile') != ''
+    needs: [release, detect-dockerfiles]
+    if: needs.detect-dockerfiles.outputs.has-server == 'true'
     uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@v0.20.1
     permissions:
       contents: read
@@ -79,8 +102,8 @@ jobs:
 
   container-client:
     name: Container - client
-    needs: [release]
-    if: needs.release.outputs.new-release-published == 'true' && hashFiles('packaging/docker/client.Dockerfile') != ''
+    needs: [release, detect-dockerfiles]
+    if: needs.detect-dockerfiles.outputs.has-client == 'true'
     uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@v0.20.1
     permissions:
       contents: read

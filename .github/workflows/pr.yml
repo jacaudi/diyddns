@@ -2,7 +2,7 @@
 # Fast feedback on PRs: lint, test, cross-compile, and (when Dockerfiles exist) container build.
 name: PR Validation
 
-on:
+"on":
   pull_request:
     types: [opened, synchronize, reopened]
 
@@ -72,13 +72,37 @@ jobs:
           go build -o /tmp/diyddns-server${{ matrix.ext }} ./cmd/diyddns-server
           go build -o /tmp/diyddns-client${{ matrix.ext }} ./cmd/diyddns-client
 
+  # Detect which Dockerfiles exist so the container jobs only run when they do.
+  # hashFiles() is not allowed in a job-level `if:`; we resolve it in a step and
+  # publish booleans as outputs.
+  detect-dockerfiles:
+    name: Detect Dockerfiles
+    runs-on: ubuntu-latest
+    outputs:
+      has-server: ${{ steps.detect.outputs.has-server }}
+      has-client: ${{ steps.detect.outputs.has-client }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: detect
+        run: |
+          if [ -f packaging/docker/server.Dockerfile ]; then
+            echo "has-server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-server=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f packaging/docker/client.Dockerfile ]; then
+            echo "has-client=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-client=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Container build validation (no push). Plan 08 lands the Dockerfiles; until
-  # then this job is gated by their existence so PRs don't spuriously fail.
+  # then these jobs are gated by their existence so PRs don't spuriously fail.
   container-server:
     name: Container build server (no push)
-    needs: [lint, test]
+    needs: [lint, test, detect-dockerfiles]
     runs-on: ubuntu-latest
-    if: hashFiles('packaging/docker/server.Dockerfile') != ''
+    if: needs.detect-dockerfiles.outputs.has-server == 'true'
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
@@ -94,9 +118,9 @@ jobs:
 
   container-client:
     name: Container build client (no push)
-    needs: [lint, test]
+    needs: [lint, test, detect-dockerfiles]
     runs-on: ubuntu-latest
-    if: hashFiles('packaging/docker/client.Dockerfile') != ''
+    if: needs.detect-dockerfiles.outputs.has-client == 'true'
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
