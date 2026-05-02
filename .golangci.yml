@@ -1,0 +1,59 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gocritic
+    - bodyclose
+    - gosec
+    - misspell
+    - errorlint
+    - nolintlint
+    - ineffassign
+    - unused
+    - gocyclo
+    - dupl
+
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: package-comments
+        - name: exported
+        - name: error-return
+        - name: error-naming
+        - name: indent-error-flow
+        - name: unexported-return
+    gocyclo:
+      min-complexity: 15
+    errorlint:
+      asserts: true
+      comparison: true
+      errorf: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    gosec:
+      excludes:
+        - G104  # errcheck overlaps; covered separately
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Test files may use longer functions and embedded fixtures.
+    - path: _test\.go
+      linters: [gocyclo, dupl, gosec, errcheck]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
