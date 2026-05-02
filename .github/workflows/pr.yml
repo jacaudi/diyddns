@@ -1,0 +1,66 @@
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@main
+    with:
+      go: true
+      yaml: true
+      json: true
+      shell: true
+
+  test:
+    name: Test
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
+    with:
+      go: true
+    secrets: inherit
+
+  go-build-matrix:
+    name: Go build matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Cross-compile both binaries
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -o /tmp/diyddns-server ./cmd/diyddns-server
+          go build -o /tmp/diyddns-client ./cmd/diyddns-client
+
+  container-build-verify:
+    name: Container build (no push)
+    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@main
+    with:
+      push: false
+      images: |
+        diyddns-server:./packaging/docker/server.Dockerfile
+        diyddns-client:./packaging/docker/client.Dockerfile
+    secrets: inherit
+    # Note: Plan 08 lands the Dockerfiles. This job will fail until then; it is
+    # included now so wiring is correct, and is gated by the existence of those
+    # files. To temporarily skip prior to Plan 08, set the workflow `if:` below.
+    if: hashFiles('packaging/docker/server.Dockerfile', 'packaging/docker/client.Dockerfile') != ''
