@@ -1,11 +1,15 @@
-name: PR
+---
+# Pull Request Validation
+# Fast feedback on PRs: lint, test, cross-compile, and (when Dockerfiles exist) container build.
+name: PR Validation
 
-on:
+"on":
   pull_request:
-    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: pr-${{ github.ref }}
@@ -14,22 +18,31 @@ concurrency:
 jobs:
   lint:
     name: Lint
-    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@main
+    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@v0.20.1
+    permissions:
+      contents: read
     with:
       go: true
+      go-version: '1.25'
       yaml: true
       json: true
-      shell: true
 
   test:
     name: Test
-    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@v0.20.1
+    permissions:
+      contents: read
     with:
-      go: true
-    secrets: inherit
+      test-framework: 'go'
+      go-version: '1.25'
+      coverage: true
+      coverage-threshold: 80
+      test-packages: './...'
+      test-args: '-race'
 
   go-build-matrix:
-    name: Go build matrix
+    name: Go cross-compile (${{ matrix.os }}/${{ matrix.arch }})
+    needs: [lint, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,11 +55,15 @@ jobs:
           - { os: windows, arch: amd64, ext: ".exe" }
           - { os: windows, arch: arm64, ext: ".exe" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: '1.25'
           cache: true
+
       - name: Cross-compile both binaries
         env:
           GOOS: ${{ matrix.os }}
@@ -56,16 +73,40 @@ jobs:
           go build -o /tmp/diyddns-server${{ matrix.ext }} ./cmd/diyddns-server
           go build -o /tmp/diyddns-client${{ matrix.ext }} ./cmd/diyddns-client
 
-  container-build-verify:
-    name: Container build (no push)
-    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@main
-    with:
-      push: false
-      images: |
-        diyddns-server:./packaging/docker/server.Dockerfile
-        diyddns-client:./packaging/docker/client.Dockerfile
-    secrets: inherit
-    # Note: Plan 08 lands the Dockerfiles. This job will fail until then; it is
-    # included now so wiring is correct, and is gated by the existence of those
-    # files. To temporarily skip prior to Plan 08, set the workflow `if:` below.
-    if: hashFiles('packaging/docker/server.Dockerfile', 'packaging/docker/client.Dockerfile') != ''
+  # Container build validation (no push). Plan 08 lands the Dockerfiles; until
+  # then this job is gated by their existence so PRs don't spuriously fail.
+  container-server:
+    name: Container build server (no push)
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: hashFiles('packaging/docker/server.Dockerfile') != ''
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./packaging/docker/server.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: diyddns-server:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+  container-client:
+    name: Container build client (no push)
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: hashFiles('packaging/docker/client.Dockerfile') != ''
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./packaging/docker/client.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: diyddns-client:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha,scope=client
+          cache-to: type=gha,mode=max,scope=client
