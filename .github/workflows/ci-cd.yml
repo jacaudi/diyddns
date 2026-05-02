@@ -1,94 +1,128 @@
-# Three-Stage Go Pipeline: CI
-# See docs/pipeline-three-stage-go.md for the full design spec.
-#
-# Runs on push to main: lint, test, manual approval, then semantic-release (JS)
-# (tag, GitHub Release, changelog). The tag triggers release.yml.
-#
-# Required secrets:
-#   APP_ID          - GitHub App ID (tag must trigger release.yml)
-#   APP_PRIVATE_KEY - GitHub App private key
-#
-# Required repo variables (Settings > Variables > Actions):
-#   GO_VERSION          - Go toolchain version (default: stable)
-#   TEST_PACKAGES       - Go test package patterns (default: ./...)
-#   TEST_ARGS           - Extra go test flags (default: empty)
-#   COVERAGE_ENABLED    - Collect coverage (default: true)
-#   COVERAGE_THRESHOLD  - Minimum coverage % (default: 0 = no gate)
-#
-# Required environment:
-#   "release" with required reviewers (Settings > Environments)
-#
-# Required files:
-#   .releaserc.json - semantic-release config (changelog, git commit, plugins)
-name: CI
+---
+# CI/CD Pipeline for DIYDDNS
+# Runs linting, testing, semantic release, and multi-arch container builds
+# for both diyddns-server and diyddns-client. Modeled on jacaudi/dras.
+name: CI/CD
 
 "on":
   push:
     branches: [main]
+  workflow_dispatch:
 
-# Newer runs supersede older ones -- cancels pending approval gates
+# Only allow one release at a time - queue subsequent runs
 concurrency:
-  group: ci
+  group: release
   cancel-in-progress: true
 
 permissions:
   contents: write
+  packages: write
   issues: write
   pull-requests: write
 
 jobs:
-  # ── Lint (YAML, Helm, Go via reusable workflow) ────────────────────────────
   lint:
-    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@main
+    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@v0.20.1
     permissions:
       contents: read
     with:
       yaml: true
-      helm: true
       go: true
-      go-version: ${{ vars.GO_VERSION || 'stable' }}
-      helm-chart-path: 'chart'
+    secrets: inherit
 
-  # ── Test (Go via reusable workflow) ────────────────────────────────────────
   test:
-    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@v0.20.1
     permissions:
       contents: read
     with:
-      test-framework: 'go'
-      go-version: ${{ vars.GO_VERSION || 'stable' }}
-      coverage: ${{ vars.COVERAGE_ENABLED != 'false' }}
-      coverage-threshold: ${{ fromJSON(vars.COVERAGE_THRESHOLD || '0') }}
-      test-packages: ${{ vars.TEST_PACKAGES || './...' }}
-      test-args: ${{ vars.TEST_ARGS || '' }}
+      test-framework: go
+      coverage: true
+    secrets: inherit
 
-  # ── Manual Approval Gate ───────────────────────────────────────────────────
-  # Pauses after lint + test pass. A reviewer must approve before uplift runs.
-  # Configure the "release" environment in Settings > Environments with
-  # required reviewers.
-  approve:
-    name: Approve Release
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    environment: release
-    steps:
-      - name: Release approved
-        run: echo "Release approved, proceeding with uplift..."
-
-  # ── Semantic Release (via reusable workflow) ─────────────────────────────────
-  # Runs after approval. Calculates next semver from conventional commits,
-  # creates a git tag + GitHub Release, and commits the changelog.
-  # The tag triggers release.yml.
-  # Changelog, prerelease, and branch config are in .releaserc.json.
   release:
-    needs: [approve]
-    uses: jacaudi/github-actions/.github/workflows/component-semantic-release.yml@main
+    needs: [lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: jacaudi/github-actions/.github/workflows/component-semantic-release.yml@v0.20.1
     permissions:
       contents: write
       issues: write
       pull-requests: write
     with:
       use-github-app: true
+      go: true
+      goreleaser: true
+      extra-plugins: '@semantic-release/changelog @semantic-release/git @semantic-release/exec'
     secrets:
       app-id: ${{ secrets.APP_ID }}
       app-private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+  # Derive major and major.minor from the released semver so the container
+  # images get the full set of moving tags (v2, v2.3, v2.3.1).
+  version-parts:
+    needs: [release]
+    if: needs.release.outputs.new-release-published == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      major: ${{ steps.parse.outputs.major }}
+      minor: ${{ steps.parse.outputs.minor }}
+    steps:
+      - id: parse
+        env:
+          VERSION: ${{ needs.release.outputs.new-release-version }}
+        run: |
+          echo "major=${VERSION%%.*}" >> "$GITHUB_OUTPUT"
+          echo "minor=$(echo "$VERSION" | cut -d. -f1-2)" >> "$GITHUB_OUTPUT"
+
+  # Build and push multi-arch container images. Two parallel jobs, one per
+  # binary — same release version, same tag set, separate ghcr.io namespaces:
+  #   ghcr.io/<repo>-server
+  #   ghcr.io/<repo>-client
+  container-server:
+    needs: [release, version-parts]
+    if: needs.release.outputs.new-release-published == 'true'
+    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@v0.20.1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      registry: ghcr.io
+      image-name: ${{ github.repository }}-server
+      context: .
+      file: packaging/docker/server.Dockerfile
+      platforms: linux/amd64,linux/arm64
+      push: true
+      version: ${{ needs.release.outputs.new-release-version-v }}
+      tags: |
+        ghcr.io/${{ github.repository }}-server:latest
+        ghcr.io/${{ github.repository }}-server:${{ needs.release.outputs.new-release-version-v }}
+        ghcr.io/${{ github.repository }}-server:v${{ needs.version-parts.outputs.minor }}
+        ghcr.io/${{ github.repository }}-server:v${{ needs.version-parts.outputs.major }}
+    secrets: inherit
+
+  container-client:
+    needs: [release, version-parts]
+    if: needs.release.outputs.new-release-published == 'true'
+    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@v0.20.1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      registry: ghcr.io
+      image-name: ${{ github.repository }}-client
+      context: .
+      file: packaging/docker/client.Dockerfile
+      platforms: linux/amd64,linux/arm64
+      push: true
+      version: ${{ needs.release.outputs.new-release-version-v }}
+      tags: |
+        ghcr.io/${{ github.repository }}-client:latest
+        ghcr.io/${{ github.repository }}-client:${{ needs.release.outputs.new-release-version-v }}
+        ghcr.io/${{ github.repository }}-client:v${{ needs.version-parts.outputs.minor }}
+        ghcr.io/${{ github.repository }}-client:v${{ needs.version-parts.outputs.major }}
+    secrets: inherit
+
+  pipeline-summary:
+    if: always()
+    needs: [lint, test, release, container-server, container-client]
+    uses: jacaudi/github-actions/.github/workflows/component-pipeline-summary.yml@v0.20.1
+    secrets: inherit
