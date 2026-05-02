@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-main
+  cancel-in-progress: false  # never cancel a release in flight
+
+jobs:
+  lint:
+    name: Lint
+    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@main
+    with:
+      go: true
+      yaml: true
+      json: true
+      shell: true
+
+  test:
+    name: Test
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
+    with:
+      go: true
+    secrets: inherit
+
+  semantic-release:
+    name: Semantic Release
+    needs: [lint, test]
+    uses: jacaudi/github-actions/.github/workflows/component-semantic-release.yml@main
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
