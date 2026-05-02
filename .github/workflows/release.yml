@@ -1,0 +1,52 @@
+# Three-Stage Go Pipeline: Release
+# See docs/pipeline-three-stage-go.md for the full design spec.
+#
+# Triggered automatically by a v* tag (created by uplift in ci.yml).
+# Manual approval already happened in CI before the tag was created,
+# so this workflow runs without any gate.
+#
+# Builds multi-arch container images, publishes Helm chart, and
+# collects pipeline metadata.
+#
+# Required repo variables (Settings > Variables > Actions):
+#   HELM_CHART_NAME       - Chart name (default: repository name)
+#   HELM_CHART_PATH       - Path to chart directory (default: chart)
+#   HELM_CHART_REPOSITORY - OCI repository path (default: <owner>/charts)
+name: Release
+
+"on":
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── Container Build (multi-arch via reusable workflow) ─────────────────────
+  container:
+    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: ${{ github.repository }}
+      platforms: 'linux/amd64,linux/arm64'
+      version: ${{ github.ref_name }}
+
+  # ── Helm Publish (via reusable workflow) ───────────────────────────────────
+  helm:
+    uses: jacaudi/github-actions/.github/workflows/component-helm-publish.yml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      chart-name: ${{ vars.HELM_CHART_NAME || '' }}
+      chart-path: ${{ vars.HELM_CHART_PATH || 'chart' }}
+      repository: ${{ vars.HELM_CHART_REPOSITORY || '' }}
+
+  # ── Pipeline Summary (always last) ─────────────────────────────────────────
+  pipeline-summary:
+    needs: [container, helm]
+    if: always()
+    uses: jacaudi/github-actions/.github/workflows/component-pipeline-summary.yml@main

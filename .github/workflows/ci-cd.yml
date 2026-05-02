@@ -1,165 +1,94 @@
-# CI/CD Pipeline for DIYDDNS
-# Runs on push to main: lint, test, manual approval, semantic-release,
-# then container builds gated on whether a new release was published.
-name: CI/CD
+# Three-Stage Go Pipeline: CI
+# See docs/pipeline-three-stage-go.md for the full design spec.
+#
+# Runs on push to main: lint, test, manual approval, then semantic-release (JS)
+# (tag, GitHub Release, changelog). The tag triggers release.yml.
+#
+# Required secrets:
+#   APP_ID          - GitHub App ID (tag must trigger release.yml)
+#   APP_PRIVATE_KEY - GitHub App private key
+#
+# Required repo variables (Settings > Variables > Actions):
+#   GO_VERSION          - Go toolchain version (default: stable)
+#   TEST_PACKAGES       - Go test package patterns (default: ./...)
+#   TEST_ARGS           - Extra go test flags (default: empty)
+#   COVERAGE_ENABLED    - Collect coverage (default: true)
+#   COVERAGE_THRESHOLD  - Minimum coverage % (default: 0 = no gate)
+#
+# Required environment:
+#   "release" with required reviewers (Settings > Environments)
+#
+# Required files:
+#   .releaserc.json - semantic-release config (changelog, git commit, plugins)
+name: CI
 
 "on":
   push:
     branches: [main]
-  workflow_dispatch:
 
-# Only one release at a time - queue subsequent runs
+# Newer runs supersede older ones -- cancels pending approval gates
 concurrency:
-  group: release
-  cancel-in-progress: false
+  group: ci
+  cancel-in-progress: true
 
 permissions:
   contents: write
-  packages: write
   issues: write
   pull-requests: write
 
 jobs:
+  # ── Lint (YAML, Helm, Go via reusable workflow) ────────────────────────────
   lint:
-    name: Lint
-    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@v0.20.1
+    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@main
     permissions:
       contents: read
     with:
-      go: true
-      go-version: '1.25'
       yaml: true
-      json: true
+      helm: true
+      go: true
+      go-version: ${{ vars.GO_VERSION || 'stable' }}
+      helm-chart-path: 'chart'
 
+  # ── Test (Go via reusable workflow) ────────────────────────────────────────
   test:
-    name: Test
-    uses: jacaudi/github-actions/.github/workflows/component-test.yml@v0.20.1
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
     permissions:
       contents: read
     with:
       test-framework: 'go'
-      go-version: '1.25'
-      coverage: true
-      coverage-threshold: 80
-      test-packages: './...'
-      test-args: '-race'
+      go-version: ${{ vars.GO_VERSION || 'stable' }}
+      coverage: ${{ vars.COVERAGE_ENABLED != 'false' }}
+      coverage-threshold: ${{ fromJSON(vars.COVERAGE_THRESHOLD || '0') }}
+      test-packages: ${{ vars.TEST_PACKAGES || './...' }}
+      test-args: ${{ vars.TEST_ARGS || '' }}
 
-  release:
-    name: Semantic Release
+  # ── Manual Approval Gate ───────────────────────────────────────────────────
+  # Pauses after lint + test pass. A reviewer must approve before uplift runs.
+  # Configure the "release" environment in Settings > Environments with
+  # required reviewers.
+  approve:
+    name: Approve Release
     needs: [lint, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: jacaudi/github-actions/.github/workflows/component-semantic-release.yml@v0.20.1
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Release approved
+        run: echo "Release approved, proceeding with uplift..."
+
+  # ── Semantic Release (via reusable workflow) ─────────────────────────────────
+  # Runs after approval. Calculates next semver from conventional commits,
+  # creates a git tag + GitHub Release, and commits the changelog.
+  # The tag triggers release.yml.
+  # Changelog, prerelease, and branch config are in .releaserc.json.
+  release:
+    needs: [approve]
+    uses: jacaudi/github-actions/.github/workflows/component-semantic-release.yml@main
     permissions:
       contents: write
       issues: write
       pull-requests: write
     with:
       use-github-app: true
-      extra-plugins: '@semantic-release/changelog @semantic-release/git @semantic-release/exec'
     secrets:
       app-id: ${{ secrets.APP_ID }}
       app-private-key: ${{ secrets.APP_PRIVATE_KEY }}
-
-  detect-dockerfiles:
-    name: Detect Dockerfiles
-    needs: [release]
-    if: needs.release.outputs.new-release-published == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      has-server: ${{ steps.detect.outputs.has-server }}
-      has-client: ${{ steps.detect.outputs.has-client }}
-    steps:
-      - uses: actions/checkout@v6
-      - id: detect
-        run: |
-          if [ -f packaging/docker/server.Dockerfile ]; then
-            echo "has-server=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has-server=false" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -f packaging/docker/client.Dockerfile ]; then
-            echo "has-client=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has-client=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  container-server:
-    name: Container - server
-    needs: [release, detect-dockerfiles]
-    if: needs.detect-dockerfiles.outputs.has-server == 'true'
-    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@v0.20.1
-    permissions:
-      contents: read
-      packages: write
-    with:
-      image-name: ${{ github.repository_owner }}/diyddns-server
-      dockerfile: ./packaging/docker/server.Dockerfile
-      platforms: 'linux/amd64,linux/arm64'
-      version: ${{ needs.release.outputs.new-release-version }}
-      tags: |
-        ghcr.io/${{ github.repository_owner }}/diyddns-server:${{ needs.release.outputs.new-release-version-v }}
-        ghcr.io/${{ github.repository_owner }}/diyddns-server:latest
-
-  container-client:
-    name: Container - client
-    needs: [release, detect-dockerfiles]
-    if: needs.detect-dockerfiles.outputs.has-client == 'true'
-    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@v0.20.1
-    permissions:
-      contents: read
-      packages: write
-    with:
-      image-name: ${{ github.repository_owner }}/diyddns-client
-      dockerfile: ./packaging/docker/client.Dockerfile
-      platforms: 'linux/amd64,linux/arm64'
-      version: ${{ needs.release.outputs.new-release-version }}
-      tags: |
-        ghcr.io/${{ github.repository_owner }}/diyddns-client:${{ needs.release.outputs.new-release-version-v }}
-        ghcr.io/${{ github.repository_owner }}/diyddns-client:latest
-
-  binaries:
-    name: Cross-compile native binaries
-    needs: [release]
-    if: needs.release.outputs.new-release-published == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: linux,   arch: amd64, ext: ""    }
-          - { os: linux,   arch: arm64, ext: ""    }
-          - { os: darwin,  arch: amd64, ext: ""    }
-          - { os: darwin,  arch: arm64, ext: ""    }
-          - { os: windows, arch: amd64, ext: ".exe" }
-          - { os: windows, arch: arm64, ext: ".exe" }
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-          cache: true
-
-      - name: Build
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: "0"
-          VERSION: ${{ needs.release.outputs.new-release-version-v }}
-          COMMIT: ${{ github.sha }}
-          DATE: ${{ github.event.head_commit.timestamp }}
-        run: |
-          mkdir -p dist
-          LDFLAGS="-X github.com/jacaudi/diyddns/internal/version.Version=${VERSION} -X github.com/jacaudi/diyddns/internal/version.Commit=${COMMIT:0:7} -X github.com/jacaudi/diyddns/internal/version.Date=${DATE}"
-          go build -ldflags "$LDFLAGS" -o dist/diyddns-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/diyddns-server
-          go build -ldflags "$LDFLAGS" -o dist/diyddns-client-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/diyddns-client
-
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum * > SHA256SUMS-${{ matrix.os }}-${{ matrix.arch }}.txt
-
-      - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.release.outputs.new-release-version-v }}
-          files: dist/*

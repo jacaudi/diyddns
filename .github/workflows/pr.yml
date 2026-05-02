@@ -1,5 +1,15 @@
-# Pull Request Validation
-# Fast feedback on PRs: lint, test, cross-compile, and (when Dockerfiles exist) container build.
+# Three-Stage Go Pipeline: PR Validation
+# See docs/pipeline-three-stage-go.md for the full design spec.
+#
+# Runs on every pull request: lint, test, Helm verification, container builds.
+# Nothing is pushed -- builds verify the Dockerfile compiles on each arch.
+#
+# Required repo variables (Settings > Variables > Actions):
+#   GO_VERSION          - Go toolchain version (default: stable)
+#   TEST_PACKAGES       - Go test package patterns (default: ./...)
+#   TEST_ARGS           - Extra go test flags (default: empty)
+#   COVERAGE_ENABLED    - Collect coverage (default: true)
+#   COVERAGE_THRESHOLD  - Minimum coverage % (default: 0 = no gate)
 name: PR Validation
 
 "on":
@@ -10,126 +20,85 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: pr-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
+  # ── Lint (YAML, Helm, Go via reusable workflow) ────────────────────────────
   lint:
-    name: Lint
-    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@v0.20.1
+    uses: jacaudi/github-actions/.github/workflows/component-lint.yml@main
     permissions:
       contents: read
     with:
-      go: true
-      go-version: '1.25'
       yaml: true
-      json: true
+      helm: true
+      go: true
+      go-version: ${{ vars.GO_VERSION || 'stable' }}
+      helm-chart-path: 'chart'
 
+  # ── Test (Go via reusable workflow) ────────────────────────────────────────
   test:
-    name: Test
-    uses: jacaudi/github-actions/.github/workflows/component-test.yml@v0.20.1
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
     permissions:
       contents: read
     with:
       test-framework: 'go'
-      go-version: '1.25'
-      coverage: true
-      coverage-threshold: 80
-      test-packages: './...'
-      test-args: '-race'
+      go-version: ${{ vars.GO_VERSION || 'stable' }}
+      coverage: ${{ vars.COVERAGE_ENABLED != 'false' }}
+      coverage-threshold: ${{ fromJSON(vars.COVERAGE_THRESHOLD || '0') }}
+      test-packages: ${{ vars.TEST_PACKAGES || './...' }}
+      test-args: ${{ vars.TEST_ARGS || '' }}
 
-  go-build-matrix:
-    name: Go cross-compile (${{ matrix.os }}/${{ matrix.arch }})
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: linux,   arch: amd64, ext: ""    }
-          - { os: linux,   arch: arm64, ext: ""    }
-          - { os: darwin,  arch: amd64, ext: ""    }
-          - { os: darwin,  arch: arm64, ext: ""    }
-          - { os: windows, arch: amd64, ext: ".exe" }
-          - { os: windows, arch: arm64, ext: ".exe" }
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+  # ── Verify Helm RBAC Sync (via test reusable workflow) ──────────────────────
+  # Project-specific: regenerates RBAC from kubebuilder and diffs against Helm.
+  # Remove or adapt this job if your project doesn't use kubebuilder RBAC gen.
+  verify-helm-rbac:
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
+    permissions:
+      contents: read
+    with:
+      test-framework: 'custom'
+      setup-command: |
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+      test-command: |
+        ./hack/generate-helm-rbac.sh
+        if ! git diff --exit-code chart/templates/_values-rbac.tpl; then
+          echo "::error::Helm RBAC template is out of sync with config/rbac/role.yaml"
+          echo "Run 'task generate-helm-rbac' and commit the changes"
+          exit 1
+        fi
+        echo "Helm RBAC template is in sync"
+      artifact-name: ''
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-          cache: true
+  # ── Verify Helm CRD Sync (via test reusable workflow) ─────────────────────
+  # Project-specific: regenerates CRDs from Go types and diffs against Helm.
+  # Remove or adapt this job if your project doesn't use kubebuilder CRDs.
+  verify-helm-crds:
+    uses: jacaudi/github-actions/.github/workflows/component-test.yml@main
+    permissions:
+      contents: read
+    with:
+      test-framework: 'custom'
+      go-version: ${{ vars.GO_VERSION || 'stable' }}
+      setup-command: |
+        go install github.com/go-task/task/v3/cmd/task@latest
+        task manifests
+        task sync-helm-crds
+      test-command: |
+        if ! git diff --exit-code chart/crds/; then
+          echo "::error::Helm chart CRDs are out of sync with generated CRDs"
+          echo "Run 'task sync-helm-crds' and commit the changes"
+          exit 1
+        fi
+        echo "Helm chart CRDs are in sync"
+      artifact-name: ''
 
-      - name: Cross-compile both binaries
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: "0"
-        run: |
-          go build -o /tmp/diyddns-server${{ matrix.ext }} ./cmd/diyddns-server
-          go build -o /tmp/diyddns-client${{ matrix.ext }} ./cmd/diyddns-client
-
-  # Detect which Dockerfiles exist so the container jobs only run when they do.
-  # hashFiles() is not allowed in a job-level `if:`; we resolve it in a step and
-  # publish booleans as outputs.
-  detect-dockerfiles:
-    name: Detect Dockerfiles
-    runs-on: ubuntu-latest
-    outputs:
-      has-server: ${{ steps.detect.outputs.has-server }}
-      has-client: ${{ steps.detect.outputs.has-client }}
-    steps:
-      - uses: actions/checkout@v6
-      - id: detect
-        run: |
-          if [ -f packaging/docker/server.Dockerfile ]; then
-            echo "has-server=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has-server=false" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -f packaging/docker/client.Dockerfile ]; then
-            echo "has-client=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has-client=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Container build validation (no push). Plan 08 lands the Dockerfiles; until
-  # then these jobs are gated by their existence so PRs don't spuriously fail.
-  container-server:
-    name: Container build server (no push)
-    needs: [lint, test, detect-dockerfiles]
-    runs-on: ubuntu-latest
-    if: needs.detect-dockerfiles.outputs.has-server == 'true'
-    steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./packaging/docker/server.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: false
-          tags: diyddns-server:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha,scope=server
-          cache-to: type=gha,mode=max,scope=server
-
-  container-client:
-    name: Container build client (no push)
-    needs: [lint, test, detect-dockerfiles]
-    runs-on: ubuntu-latest
-    if: needs.detect-dockerfiles.outputs.has-client == 'true'
-    steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./packaging/docker/client.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: false
-          tags: diyddns-client:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha,scope=client
-          cache-to: type=gha,mode=max,scope=client
+  # ── Container Build: multi-arch, no push (via reusable workflow) ───────────
+  container:
+    needs: [lint, test, verify-helm-rbac, verify-helm-crds]
+    uses: jacaudi/github-actions/.github/workflows/component-container-build.yml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: ${{ github.repository }}
+      platforms: 'linux/amd64,linux/arm64'
+      push: false
