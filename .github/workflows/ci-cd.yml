@@ -45,21 +45,9 @@ jobs:
       test-packages: './...'
       test-args: '-race'
 
-  # Manual approval gate. Configure the "release" environment in
-  # Settings > Environments with required reviewers.
-  approve:
-    name: Approve Release
-    needs: [lint, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: release
-    steps:
-      - name: Release approved
-        run: echo "Release approved, proceeding with semantic-release..."
-
   release:
     name: Semantic Release
-    needs: [approve]
+    needs: [lint, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: jacaudi/github-actions/.github/workflows/component-semantic-release.yml@v0.20.1
     permissions:
