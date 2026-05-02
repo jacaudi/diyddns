@@ -4,6 +4,9 @@
 /ui/dist/
 /docs/openapi/*.json
 
+# Worktrees
+.worktrees/
+
 # Go
 *.test
 *.out
