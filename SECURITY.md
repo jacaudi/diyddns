@@ -12,8 +12,8 @@ security fixes.
 Use GitHub's private vulnerability reporting:
 <https://github.com/jacaudi/diyddns/security/advisories/new>
 
-If GitHub Security Advisories is unavailable, email
-**github.com/jacaudi** with subject prefix `[diyddns security]`.
+If GitHub Security Advisories is unavailable, contact
+[@jacaudi](https://github.com/jacaudi) directly via GitHub.
 
 You will receive an acknowledgement within 72 hours. We aim to issue a fix
 or mitigation within 30 days for high-severity issues; lower-severity issues
