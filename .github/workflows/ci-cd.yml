@@ -1,4 +1,3 @@
----
 # CI/CD Pipeline for DIYDDNS
 # Runs on push to main: lint, test, manual approval, semantic-release,
 # then container builds gated on whether a new release was published.

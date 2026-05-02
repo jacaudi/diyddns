@@ -1,4 +1,3 @@
----
 # Pull Request Validation
 # Fast feedback on PRs: lint, test, cross-compile, and (when Dockerfiles exist) container build.
 name: PR Validation
