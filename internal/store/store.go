@@ -8,10 +8,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Store is DIYDDNS's persistence handle. It wraps a single *sql.DB pool
+// configured with the runtime pragmas and migrations applied. Obtain one
+// via Open and release it via Close.
 type Store struct {
 	db *sql.DB
 }
 
+// Open opens the SQLite database at path, applies the runtime pragmas
+// (WAL, foreign_keys=ON, synchronous=NORMAL, busy_timeout=5000), and
+// runs all embedded migrations. path may be ":memory:" for in-process use.
 func Open(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -46,8 +52,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// DB returns the underlying *sql.DB. Prefer typed repository accessors
+// (Users, Sessions, etc.) over raw DB access; this exists for diagnostics
+// and tests.
 func (s *Store) DB() *sql.DB { return s.db }
 
+// Close releases the underlying database handle. Safe to call multiple times.
 func (s *Store) Close() error {
 	if s.db == nil {
 		return nil

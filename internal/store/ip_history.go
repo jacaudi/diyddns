@@ -174,7 +174,7 @@ func (r *IPHistoryRepo) Page(ctx context.Context, deviceID, cursor string, limit
 	if err != nil {
 		return HistoryPage{}, fmt.Errorf("ip_history.Page: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []IPHistory
 	for rows.Next() {

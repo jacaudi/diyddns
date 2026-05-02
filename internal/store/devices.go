@@ -169,7 +169,7 @@ func (r *DeviceRepo) ListByUser(ctx context.Context, userID string) ([]Device, e
 	if err != nil {
 		return nil, fmt.Errorf("devices.ListByUser: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var devices []Device
 	for rows.Next() {
@@ -193,7 +193,7 @@ func (r *DeviceRepo) ListAll(ctx context.Context) ([]Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("devices.ListAll: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var devices []Device
 	for rows.Next() {

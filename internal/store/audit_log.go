@@ -177,7 +177,7 @@ func (r *AuditLogRepo) ListPaginated(ctx context.Context, f AuditFilter, cursor 
 
 	query := `SELECT ` + auditLogColumns + ` FROM audit_log`
 	if len(clauses) > 0 {
-		query += ` WHERE ` + strings.Join(clauses, ` AND `)
+		query += ` WHERE ` + strings.Join(clauses, ` AND `) // #nosec G202 -- clauses are hardcoded SQL fragments; user input flows only through parameterized args.
 	}
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
@@ -186,7 +186,7 @@ func (r *AuditLogRepo) ListPaginated(ctx context.Context, f AuditFilter, cursor 
 	if err != nil {
 		return AuditPage{}, fmt.Errorf("audit_log.ListPaginated: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []AuditEntry
 	for rows.Next() {

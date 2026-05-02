@@ -199,13 +199,10 @@ func TestDeviceListAllOrdersByCreatedAtDesc(t *testing.T) {
 	}
 
 	labels := []string{"first", "second", "third"}
-	var ids []string
 	for _, label := range labels {
-		d, err := s.Devices().Create(ctx, Device{UserID: u.ID, Label: label, SecretHash: "h"})
-		if err != nil {
+		if _, err := s.Devices().Create(ctx, Device{UserID: u.ID, Label: label, SecretHash: "h"}); err != nil {
 			t.Fatalf("Create %q: %v", label, err)
 		}
-		ids = append(ids, d.ID)
 		// Sleep so created_at differs by at least 1 second between rows.
 		time.Sleep(time.Second)
 	}
