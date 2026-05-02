@@ -5,7 +5,10 @@
 // at build time. Defaults make development builds identifiable.
 package version
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 var (
 	// Version is the semver tag, e.g. "1.2.3", or "v0.0.0-dev" for development.
@@ -28,16 +31,28 @@ func Current() Info {
 	return Info{Version: Version, Commit: Commit, Date: Date}
 }
 
-// String renders an Info for human display.
-//   - all three fields set:    "VERSION (COMMIT, DATE)"
-//   - only Version set:        "VERSION"
-//   - all empty:               "unknown"
+// String renders an Info for human display. Empty fields are omitted from the
+// suffix; if Version itself is empty, the result is "unknown" regardless of
+// the other fields (a build with no version tag is treated as unidentified).
+//
+//   - Version + Commit + Date all set:  "VERSION (COMMIT, DATE)"
+//   - Version + Commit only:            "VERSION (COMMIT)"
+//   - Version + Date only:              "VERSION (DATE)"
+//   - Version only:                     "VERSION"
+//   - Version empty (any other state):  "unknown"
 func (i Info) String() string {
-	if i.Version == "" && i.Commit == "" && i.Date == "" {
+	if i.Version == "" {
 		return "unknown"
 	}
-	if i.Commit == "" && i.Date == "" {
+	var suffix []string
+	if i.Commit != "" {
+		suffix = append(suffix, i.Commit)
+	}
+	if i.Date != "" {
+		suffix = append(suffix, i.Date)
+	}
+	if len(suffix) == 0 {
 		return i.Version
 	}
-	return fmt.Sprintf("%s (%s, %s)", i.Version, i.Commit, i.Date)
+	return fmt.Sprintf("%s (%s)", i.Version, strings.Join(suffix, ", "))
 }

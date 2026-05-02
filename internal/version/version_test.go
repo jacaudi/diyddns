@@ -13,7 +13,12 @@ func TestStringFormat(t *testing.T) {
 	}{
 		{"all-set", Info{Version: "1.2.3", Commit: "abcdef0", Date: "2026-05-01"}, "1.2.3 (abcdef0, 2026-05-01)"},
 		{"only-version", Info{Version: "v0.0.0-dev"}, "v0.0.0-dev"},
+		{"version-and-commit", Info{Version: "1.0.0", Commit: "abc1234"}, "1.0.0 (abc1234)"},
+		{"version-and-date", Info{Version: "1.0.0", Date: "2026-05-01"}, "1.0.0 (2026-05-01)"},
 		{"empty", Info{}, "unknown"},
+		{"only-commit", Info{Commit: "abc1234"}, "unknown"},
+		{"only-date", Info{Date: "2026-05-01"}, "unknown"},
+		{"commit-and-date-no-version", Info{Commit: "abc1234", Date: "2026-05-01"}, "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
