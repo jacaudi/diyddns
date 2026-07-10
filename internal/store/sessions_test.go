@@ -13,7 +13,6 @@ func TestSessionCreateAndGetByIDRoundTrip(t *testing.T) {
 	}
 	repo := s.Sessions()
 
-	//nolint:gosec // G101 false positive: CSRFToken is a session field name, not a credential; the literal is a test fixture value.
 	created, err := repo.Create(ctx, Session{
 		UserID:    user.ID,
 		CSRFToken: "csrf-token-1",
