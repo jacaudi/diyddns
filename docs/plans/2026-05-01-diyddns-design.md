@@ -188,7 +188,7 @@ CREATE TABLE enrollment_codes (
   label           TEXT NOT NULL,               -- proposed device label
   expires_at      INTEGER NOT NULL,
   used_at         INTEGER,                     -- non-null = consumed
-  device_id       TEXT REFERENCES devices(id)
+  device_id       TEXT REFERENCES devices(id) ON DELETE SET NULL -- code survives device deletion for audit
 );
 CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at);
 

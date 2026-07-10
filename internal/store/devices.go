@@ -267,8 +267,11 @@ func (r *DeviceRepo) SetDisabled(ctx context.Context, id string, disabled bool) 
 	return nil
 }
 
-// Delete removes the device with the given id. Foreign-key cascades remove
-// the device's ip_history rows. Returns ErrNotFound if no row matches.
+// Delete removes the device with the given id. Foreign-key actions cascade
+// the device's ip_history rows (ON DELETE CASCADE) and null out the
+// device_id of any consumed enrollment_codes that referenced it (ON DELETE
+// SET NULL) — those code rows themselves survive for audit. Returns
+// ErrNotFound if no row matches.
 func (r *DeviceRepo) Delete(ctx context.Context, id string) error {
 	res, err := r.db.ExecContext(ctx, `DELETE FROM devices WHERE id = ?`, id)
 	if err != nil {

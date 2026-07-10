@@ -451,3 +451,90 @@ func TestDeviceUserDeleteCascadesToDevices(t *testing.T) {
 		t.Fatalf("GetByID after cascading user delete: err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestDeviceDeleteWithConsumedEnrollmentCodeSucceeds is the regression test
+// for the FK bug: enrollment_codes.device_id had no ON DELETE action, so a
+// consumed code (which sets device_id to the enrolled device) blocked the
+// device delete with a raw FK constraint failure. With ON DELETE SET NULL,
+// the device delete must succeed and the consumed code must survive for
+// audit with its device link cleared (design §3: consumed codes are kept
+// until the parent user is deleted).
+func TestDeviceDeleteWithConsumedEnrollmentCodeSucceeds(t *testing.T) {
+	s, ctx := newTestStore(t)
+	user, err := s.Users().Create(ctx, User{Email: "delete-with-code@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	device, err := s.Devices().Create(ctx, Device{UserID: user.ID, Label: "laptop", SecretHash: "hash"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	if _, err := s.EnrollmentCodes().Create(ctx, EnrollmentCode{
+		Code: "delete-with-code", UserID: user.ID, Label: "laptop", ExpiresAt: NowUnix() + 3600,
+	}); err != nil {
+		t.Fatalf("create enrollment code: %v", err)
+	}
+	if _, err := s.EnrollmentCodes().Consume(ctx, "delete-with-code", device.ID, NowUnix()); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+
+	if err := s.Devices().Delete(ctx, device.ID); err != nil {
+		t.Fatalf("Delete device with consumed enrollment code: %v", err)
+	}
+
+	code, err := s.EnrollmentCodes().Get(ctx, "delete-with-code")
+	if err != nil {
+		t.Fatalf("Get enrollment code after device delete: %v, want the code to survive for audit", err)
+	}
+	if code.DeviceID != "" {
+		t.Fatalf("enrollment code after device delete: DeviceID = %q, want %q (link cleared)", code.DeviceID, "")
+	}
+
+	_, err = s.Devices().GetByID(ctx, device.ID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetByID after delete: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeviceUserDeleteCascadesWithConsumedEnrollmentCode pins the existing
+// user-delete cascade: even with a device that has a consumed enrollment
+// code and ip_history rows, deleting the parent user must still remove the
+// device, the code, and the ip_history rows. This must keep passing
+// unchanged by the enrollment_codes.device_id ON DELETE SET NULL fix, since
+// that FK is unrelated to the user_id cascades on devices/enrollment_codes.
+func TestDeviceUserDeleteCascadesWithConsumedEnrollmentCode(t *testing.T) {
+	s, ctx := newTestStore(t)
+	user, err := s.Users().Create(ctx, User{Email: "user-delete-with-code@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	device, err := s.Devices().Create(ctx, Device{UserID: user.ID, Label: "laptop", SecretHash: "hash"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	if _, err := s.EnrollmentCodes().Create(ctx, EnrollmentCode{
+		Code: "user-delete-with-code", UserID: user.ID, Label: "laptop", ExpiresAt: NowUnix() + 3600,
+	}); err != nil {
+		t.Fatalf("create enrollment code: %v", err)
+	}
+	if _, err := s.EnrollmentCodes().Consume(ctx, "user-delete-with-code", device.ID, NowUnix()); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if _, err := s.IPHistory().Append(ctx, IPHistory{DeviceID: device.ID, ObservedAt: 100}); err != nil {
+		t.Fatalf("Append ip_history: %v", err)
+	}
+
+	if err := s.Users().Delete(ctx, user.ID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+
+	if _, err := s.Devices().GetByID(ctx, device.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetByID device after user delete: err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.EnrollmentCodes().Get(ctx, "user-delete-with-code"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get enrollment code after user delete: err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.IPHistory().Latest(ctx, device.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Latest ip_history after user delete: err = %v, want ErrNotFound", err)
+	}
+}
