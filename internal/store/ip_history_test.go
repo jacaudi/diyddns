@@ -314,6 +314,80 @@ func TestIPHistoryPruneByPerDeviceMaxKeepsOnlyNewest(t *testing.T) {
 	}
 }
 
+// TestIPHistoryPrunePerDeviceMaxZeroDisablesCountCap proves the real
+// contract on a MULTI-row device: perDeviceMax=0 DISABLES the per-device
+// count cap ("0 = unlimited" per the design's retention convention). With
+// the age branch also disabled (olderThan=0), Prune must delete nothing —
+// perDeviceMax=0 is NOT "keep only the latest".
+func TestIPHistoryPrunePerDeviceMaxZeroDisablesCountCap(t *testing.T) {
+	s, ctx := newTestStore(t)
+	device := newTestDevice(t, ctx, s, "prune-cap-zero@example.com", "laptop")
+	repo := s.IPHistory()
+
+	for _, observedAt := range []int64{100, 200, 300, 400, 500} {
+		if _, err := repo.Append(ctx, IPHistory{DeviceID: device.ID, ObservedAt: observedAt}); err != nil {
+			t.Fatalf("Append(observed_at=%d): %v", observedAt, err)
+		}
+	}
+
+	// olderThan=0 disables age pruning; perDeviceMax=0 disables the count cap.
+	// Both limits off → nothing to delete on a 5-row device.
+	n, err := repo.Prune(ctx, device.ID, 0, 0)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("Prune(olderThan=0, perDeviceMax=0) deleted %d rows, want 0 (count cap must be disabled, not keep-only-latest)", n)
+	}
+
+	page, err := repo.Page(ctx, device.ID, "", 50)
+	if err != nil {
+		t.Fatalf("Page after Prune: %v", err)
+	}
+	if len(page.Rows) != 5 {
+		t.Fatalf("Page after Prune(perDeviceMax=0) returned %d rows, want 5 (all retained)", len(page.Rows))
+	}
+}
+
+// TestIPHistoryPruneAgeIndependentOfDisabledCountCap proves age pruning works
+// even when the count cap is disabled (perDeviceMax=0): with an aggressive
+// future cutoff every row is "older", so all-but-latest are deleted via the
+// age branch while MAX(id) stays protected. This isolates the age branch from
+// the count cap.
+func TestIPHistoryPruneAgeIndependentOfDisabledCountCap(t *testing.T) {
+	s, ctx := newTestStore(t)
+	device := newTestDevice(t, ctx, s, "prune-age-cap-zero@example.com", "laptop")
+	repo := s.IPHistory()
+
+	var ids []int64
+	for _, observedAt := range []int64{100, 200, 300, 400, 500} {
+		row, err := repo.Append(ctx, IPHistory{DeviceID: device.ID, ObservedAt: observedAt})
+		if err != nil {
+			t.Fatalf("Append(observed_at=%d): %v", observedAt, err)
+		}
+		ids = append(ids, row.ID)
+	}
+	newestID := ids[len(ids)-1]
+
+	// perDeviceMax=0 disables the count cap; the aggressive future cutoff makes
+	// every row "older", so the age branch deletes all but the protected latest.
+	n, err := repo.Prune(ctx, device.ID, NowUnix()+100000, 0)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 4 {
+		t.Fatalf("Prune(aggressive age, perDeviceMax=0) deleted %d rows, want 4 (all but latest via age branch)", n)
+	}
+
+	got, err := repo.Latest(ctx, device.ID)
+	if err != nil {
+		t.Fatalf("Latest after Prune: %v", err)
+	}
+	if got.ID != newestID {
+		t.Fatalf("Latest after Prune = id %d, want %d (newest must survive)", got.ID, newestID)
+	}
+}
+
 // TestIPHistoryPruneScopesToDevice proves Prune only touches the target
 // device's rows; another device's history is untouched.
 func TestIPHistoryPruneScopesToDevice(t *testing.T) {

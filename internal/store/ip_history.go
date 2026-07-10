@@ -211,16 +211,31 @@ func (r *IPHistoryRepo) Page(ctx context.Context, deviceID, cursor string, limit
 
 // Prune deletes ip_history rows for deviceID that are either older than
 // olderThan or beyond the perDeviceMax newest (by id), except it never
-// deletes the device's single most-recent row (always_keep_latest). Returns
-// the number of rows deleted.
+// deletes the device's most-recent row (always_keep_latest). Returns the
+// number of rows deleted.
 //
-// Note: per SQLite's LIMIT semantics, a negative perDeviceMax is treated as
-// "no limit" by the cap subquery (not zero rows), so the per-device cap
-// would not fire for a negative value; callers should pass perDeviceMax >= 0.
+// Two retention limits combine (a row is deleted if it trips either one, and
+// the always-keep-latest protection always wins):
+//
+//   - Age: rows with observed_at < olderThan are pruned. Pass olderThan = 0 to
+//     disable age-based pruning (no row has observed_at < 0).
+//   - Count: rows beyond the perDeviceMax newest (by id) are pruned. A
+//     perDeviceMax <= 0 DISABLES the per-device count cap (unlimited retained
+//     by count) — matching the design's "0 = unlimited" retention convention
+//     (design §8). A perDeviceMax >= 1 keeps the N newest rows (always
+//     including the latest). Mechanically the cap contributes nothing when
+//     perDeviceMax <= 0: LIMIT 0 yields an empty subquery so MIN(id) is NULL,
+//     and a negative LIMIT means "no limit" so MIN(id) is the smallest id —
+//     either way `id < (that)` is never true. When the cap is disabled,
+//     age-based pruning and the always-keep-latest guarantee still apply.
 func (r *IPHistoryRepo) Prune(ctx context.Context, deviceID string, olderThan int64, perDeviceMax int) (int, error) {
 	res, err := r.db.ExecContext(ctx, `
 		DELETE FROM ip_history
 		WHERE device_id = ?
+		  -- always_keep_latest: MAX(id) per device_id is design §3's mandated
+		  -- "latest" row and is monotonic with observed_at in v1 (the only
+		  -- append path, checkin, sets ObservedAt = NowUnix()), so MAX(id) is
+		  -- also the (observed_at DESC, id DESC) newest that Latest/Page return.
 		  AND id NOT IN (
 		    SELECT MAX(id) FROM ip_history WHERE device_id = ?
 		  )
