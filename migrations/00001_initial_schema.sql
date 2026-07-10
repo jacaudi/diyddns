@@ -61,7 +61,7 @@ CREATE TABLE enrollment_codes (
     label           TEXT NOT NULL,
     expires_at      INTEGER NOT NULL,
     used_at         INTEGER,
-    device_id       TEXT REFERENCES devices(id)
+    device_id       TEXT REFERENCES devices(id) ON DELETE SET NULL
 );
 CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at);
 
