@@ -51,3 +51,19 @@ tasks:
     desc: Remove build artefacts
     cmds:
       - rm -rf {{.BIN_DIR}} ui/dist docs/openapi/*.json
+
+  migrate:new:
+    desc: "Create a new SQL migration in migrations/ (Usage: task migrate:new -- <name>)"
+    cmds:
+      - go run github.com/pressly/goose/v3/cmd/goose@latest -dir migrations create {{.CLI_ARGS}} sql
+
+  db:backup:
+    desc: Show how to safely back up the SQLite DB (wired programmatically in Plan 03+)
+    cmds:
+      # WAL-safe backup is a single VACUUM INTO. Until the server exposes this
+      # via a subcommand (Plan 03), document the one-liner rather than ship a
+      # brittle wrapper. Usage hint: task db:backup -- /var/lib/diyddns/diyddns.db backup.db
+      - |
+        echo "Safe SQLite backup (consistent under WAL) uses VACUUM INTO:"
+        echo "  sqlite3 <src.db> \"VACUUM INTO '<out.db>'\""
+        echo "The server will expose this programmatically in Plan 03+."
