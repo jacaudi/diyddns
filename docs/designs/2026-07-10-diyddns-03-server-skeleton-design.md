@@ -79,9 +79,13 @@ No custom docs HTML handler is required. This satisfies the spec's Scalar requir
 
 ### 2.2 Package layout
 
-Follows the parent spec's intended boundaries (§2, §11). Every package below is
-**server-only** — none is imported by `cmd/diyddns-client` or `internal/client/*`,
-keeping the client binary free of huma/cobra/viper (spec §2).
+Follows the parent spec's intended boundaries (§2, §11). `internal/server/*` and its
+huma dependency are **server-only** — never imported by `cmd/diyddns-client` or
+`internal/client/*`, keeping the client binary free of the API framework (spec §2:
+"server-only deps — huma, sqlite, OIDC, embedded UI"). `cobra` and `viper` are **shared**
+between both binaries per spec (§6 client subcommands, §8 client viper config); in Plan 03
+they happen to appear only in the server graph because no client config/CLI work exists
+yet, but they are not forbidden in the client.
 
 ```
 cmd/diyddns-server/main.go        cobra root + `serve` + `version`
@@ -286,8 +290,9 @@ Stdlib `testing` only, table-driven where inputs enumerate, `-race` in CI (spec 
 6. SIGINT/SIGTERM drains in-flight requests and closes the store cleanly.
 7. `diyddns-server version` prints build identity.
 8. `go test ./... -race` passes; `golangci-lint run` is clean.
-9. **The client binary does not import huma, cobra, or viper** (verified by an
-   import-graph check, e.g. `go list -deps ./cmd/diyddns-client`).
+9. **The client binary does not import huma** (the durably server-only API framework),
+   verified by an import-graph check (`go list -deps ./cmd/diyddns-client`). `cobra`/`viper`
+   are shared and intentionally not part of this check.
 
 ---
 
