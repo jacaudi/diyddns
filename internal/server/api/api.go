@@ -40,7 +40,3 @@ func groupConfig(title, prefix, ver string) huma.Config {
 	cfg.DocsRenderer = huma.DocsRendererScalar
 	return cfg
 }
-
-// RegisterHealth is a TEMPORARY no-op stub that keeps Build compiling before
-// health.go exists. It is replaced by the real implementation in Task 4.
-func RegisterHealth(_ *http.ServeMux, _ *slog.Logger, _ *store.Store) {}
