@@ -4,6 +4,7 @@ go 1.25.7
 
 require (
 	github.com/danielgtaylor/huma/v2 v2.38.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/spf13/cobra v1.10.2
