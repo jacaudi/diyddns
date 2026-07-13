@@ -35,6 +35,26 @@
 
 ---
 
+## Test Harness Reference (authoritative — use these EXACT names)
+
+Every task's tests MUST use the real helpers below. Do NOT invent `newTestStore` in the wrong package, `buildTestAPIHandler`, `testLogger`, `getJSON`, `postRaw`, or `pollUntilDevice` — they do not exist. Match each package's existing test form:
+
+| Package | Test package form | Store helper | Logger helper | Other |
+|---|---|---|---|---|
+| `internal/auth` | `package auth` (in-package) | — | — | call `SealWithAAD` unqualified |
+| `internal/store` | `package store` (in-package) | `newTestStore(t) (*Store, context.Context)` — **returns store AND ctx** | — | use returned `ctx`; types unqualified (`OIDCDeviceFlow`, `ErrNotFound`) |
+| `internal/config` | `package config_test` | — | — | build `*viper.Viper`, call `config.Load` |
+| `internal/oidc` | `package oidc_test` | — | define `testLogger(t)` in `manager_test.go` (Task 6) | `oidctest.New(t, ...)` |
+| `internal/server/service` | `package service` (in-package) | `openTestStore(t) *store.Store` | `discardLogger() *slog.Logger` | `testPasswordCfg() config.PasswordCfg`; call `NewOIDCService`/`NewBootstrapService` **unqualified** |
+| `internal/server` (pruner/server) | `package server` (in-package) | `openTestStore(t) *store.Store` | `discardLog() *slog.Logger` | — |
+| `internal/server/api` | `package api_test` | `memStore(t) *store.Store` | `discardLogger() *slog.Logger` | `newFullHarness(t) fullHarness` (assembles ALL ServerDeps → the place to add OIDC wiring); `postJSON(t, url, body) (status int, respBody []byte)` — **3-arg**; `doJSON(t, method, url, body, cookie, csrf) (status, header, respBody)`; `findCookie(header, name) *http.Cookie` |
+
+**Devices repo method is `GetByID(ctx, id)`, not `Get`.**
+
+**API integration tests (Tasks 12–14) extend `newFullHarness`** (`internal/server/api/devices_test.go:33`) — it is the single place `api.Build(ServerDeps{...})` is assembled for tests, and its comment says so. Add the OIDC wiring there (construct an `oidc.Manager` discovered against an `oidctest.IdP`, an `service.OIDCService`, and set `OIDC`/`OIDCMgr`/`HMACKey` on the `ServerDeps` literal, reusing the harness's existing `key := make([]byte, 32){byte(i)}`). Have `newFullHarness` accept an optional `*oidc.Manager` (or add a `newOIDCHarness(t, idp)` sibling that calls the same assembly with OIDC fields set) — do NOT invent a parallel `buildTestAPIHandler`.
+
+---
+
 ## Task Dependency Order
 
 ```
@@ -71,11 +91,11 @@ T15 Server assembly + client-isolation     — needs all
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `internal/server/service/bootstrap_test.go` (follow the existing test setup in that file for constructing a `BootstrapService` against a `:memory:` store; reuse its helpers):
+Add to `internal/server/service/bootstrap_test.go` — **in-package `package service`**, using the package's real helpers `openTestStore(t)`, `testPasswordCfg()`, `discardLogger()`, and unqualified `NewBootstrapService`/`NewAuditWriter`:
 
 ```go
 func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
-	st := newTestStore(t) // existing helper: migrated :memory: store
+	st := openTestStore(t) // service package's helper: migrated :memory: store
 	// Seed a non-admin user (simulating an OIDC signup) so len(users) > 0
 	// but AdminExists == false.
 	if _, err := st.Users().Create(t.Context(), store.User{
@@ -85,7 +105,7 @@ func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
 	}
 
 	var emitted string
-	svc := service.NewBootstrapService(st, config.BootstrapCfg{}, testPasswordCfg(), testLogger(), service.NewAuditWriter(st), func(tok string) { emitted = tok })
+	svc := NewBootstrapService(st, config.BootstrapCfg{}, testPasswordCfg(), discardLogger(), NewAuditWriter(st), func(tok string) { emitted = tok })
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("Startup: %v", err)
@@ -95,8 +115,6 @@ func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
 	}
 }
 ```
-
-(If `newTestStore`/`testPasswordCfg`/`testLogger` helper names differ in the existing file, use whatever that file already defines — do not invent new helpers.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -298,9 +316,8 @@ import (
 )
 
 func TestOIDCDeviceFlows_CreateGetTryPoll(t *testing.T) {
-	st := newTestStore(t)
+	st, ctx := newTestStore(t) // store package helper: returns (*Store, context.Context)
 	r := st.OIDCDeviceFlows()
-	ctx := t.Context()
 
 	f := OIDCDeviceFlow{FlowID: "flow-1", DeviceCode: "dc-1", Interval: 5, ExpiresAt: 1000, CreatedAt: 100}
 	if _, err := r.Create(ctx, f); err != nil {
@@ -335,9 +352,8 @@ func TestOIDCDeviceFlows_CreateGetTryPoll(t *testing.T) {
 }
 
 func TestOIDCDeviceFlows_DeleteAndPrune(t *testing.T) {
-	st := newTestStore(t)
+	st, ctx := newTestStore(t) // store package helper: returns (*Store, context.Context)
 	r := st.OIDCDeviceFlows()
-	ctx := t.Context()
 	_, _ = r.Create(ctx, OIDCDeviceFlow{FlowID: "a", DeviceCode: "x", Interval: 5, ExpiresAt: 500, CreatedAt: 1})
 	_, _ = r.Create(ctx, OIDCDeviceFlow{FlowID: "b", DeviceCode: "y", Interval: 5, ExpiresAt: 5000, CreatedAt: 1})
 
@@ -689,7 +705,8 @@ git commit -m "feat(config): auth.oidc section with enabled/issuer/scopes valida
   - `type IdP struct { Issuer string; ... }` with:
     - `func (i *IdP) SignIDToken(claims Claims) string` — a signed RS256 JWT verifiable against the served JWKS.
     - `type Claims struct { Subject, Email, Nonce, Audience string; EmailVerified bool; ExpiresIn int64 }`
-    - device-flow controls: `func (i *IdP) StageDevice(userCode string)`, `func (i *IdP) ApproveDevice(deviceCode string, claims Claims)` (test drives pending→success), and the endpoints wired into discovery.
+    - `func (i *IdP) SetAuthCodeClaims(c Claims)` — claims the next auth-code `/token` mints.
+    - `func (i *IdP) ApproveDevice(deviceCode string, claims Claims)` — flips a device flow from `authorization_pending` to success (test drives pending→complete).
 
 **Why:** Every OIDC test needs an issuer whose discovery `issuer` equals its own base URL (go-oidc requires the match), a JWKS backing the signatures, and controllable token/device endpoints. Making it a normal package (not `_test.go`) lets both `internal/oidc` and `internal/server/api` tests import it.
 
@@ -1176,10 +1193,15 @@ func (m *Manager) Discover(ctx context.Context) error {
 }
 
 // Enabled reports whether OIDC is configured AND discovery has succeeded.
-func (m *Manager) Enabled() bool { return m.cfg.Enabled && m.st.Load() != nil }
+// Nil-receiver-safe: a nil Manager (never constructed) reports false, so the
+// api layer can call it unconditionally without a nil check.
+func (m *Manager) Enabled() bool { return m != nil && m.cfg.Enabled && m.st.Load() != nil }
 
-// DeviceEnabled reports whether the device-code flow is available.
+// DeviceEnabled reports whether the device-code flow is available. Nil-safe.
 func (m *Manager) DeviceEnabled() bool {
+	if m == nil {
+		return false
+	}
 	s := m.st.Load()
 	return m.cfg.Enabled && s != nil && s.deviceAuthURL != ""
 }
@@ -1504,17 +1526,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"golang.org/x/oauth2"
+	"time"
 )
 
 // DeviceAuth is the device-authorization response handed (in part) to the agent.
+// ExpiresAt is an ABSOLUTE unix expiry (the api layer stores it directly and
+// derives the agent-facing expires_in = ExpiresAt - now).
 type DeviceAuth struct {
 	DeviceCode              string
 	UserCode                string
 	VerificationURI         string
 	VerificationURIComplete string
-	ExpiresIn               int64
+	ExpiresAt               int64
 	Interval                int64
 }
 
@@ -1522,9 +1545,10 @@ type DeviceAuth struct {
 type PollStatus int
 
 const (
-	PollPending PollStatus = iota
-	PollSlowDown
-	PollComplete
+	PollPending  PollStatus = iota
+	PollSlowDown            // caller should back off and keep polling
+	PollComplete           // tokens obtained; Claims populated
+	PollDenied             // terminal: user denied or the device code expired — stop polling
 )
 
 // PollResult carries the poll status and, when complete, the verified claims.
@@ -1549,15 +1573,30 @@ func (m *Manager) DeviceStart(ctx context.Context) (DeviceAuth, error) {
 	if err != nil {
 		return DeviceAuth{}, fmt.Errorf("oidc.DeviceStart: %w", err)
 	}
+	// oauth2 populates resp.Expiry (absolute) from the IdP's expires_in. Guard a
+	// zero Expiry (some servers omit it) with a conservative 10-minute default so
+	// the stored expires_at is never a huge negative value.
+	expiry := resp.Expiry
+	if expiry.IsZero() {
+		expiry = timeNow().Add(10 * time.Minute)
+	}
 	return DeviceAuth{
 		DeviceCode:              resp.DeviceCode,
 		UserCode:                resp.UserCode,
 		VerificationURI:         resp.VerificationURI,
 		VerificationURIComplete: resp.VerificationURIComplete,
-		ExpiresIn:               int64(resp.Expiry.Unix()), // absolute expiry; caller stores as needed
+		ExpiresAt:               expiry.Unix(),
 		Interval:                int64(resp.Interval),
 	}, nil
 }
+
+// timeNow is indirected so the zero-expiry fallback is testable; production is time.Now.
+var timeNow = time.Now
+```
+
+(add `"time"` to `internal/oidc/device.go` imports.)
+
+```go
 
 // deviceTokenResponse is the subset of the token-endpoint JSON we read.
 type deviceTokenResponse struct {
@@ -1609,6 +1648,9 @@ func (m *Manager) DevicePoll(ctx context.Context, deviceCode string) (PollResult
 		return PollResult{Status: PollPending}, nil
 	case "slow_down":
 		return PollResult{Status: PollSlowDown}, nil
+	case "access_denied", "expired_token":
+		// Terminal per RFC 8628 §3.5 — the caller must stop polling and drop the flow.
+		return PollResult{Status: PollDenied}, nil
 	case "":
 		// success path below
 	default:
@@ -1628,11 +1670,9 @@ func (m *Manager) DevicePoll(ctx context.Context, deviceCode string) (PollResult
 	}
 	return PollResult{Status: PollComplete, Claims: claims}, nil
 }
-
-var _ = oauth2.DeviceAuthResponse{} // keep oauth2 import obvious for readers
 ```
 
-> **Implementer note:** `resp.Expiry` on `*oauth2.DeviceAuthResponse` is an absolute `time.Time`. If it is zero (some servers only send `expires_in`), fall back to `time.Now().Add(...)` using the response — but oauth2 populates `Expiry` from `expires_in`, so the above is correct for the mock and standard IdPs. The API layer (Task 13) computes the stored `expires_at`; `DeviceStart` returning the absolute unix expiry is sufficient. Remove the `var _ =` line if the linter objects — it is only a readability aid.
+> **Implementer note:** `s.oauth2` (an `oauth2.Config` stored on `state`) is accessed via the field, so `device.go` does not import the `oauth2` package directly — only `internal/oidc/manager.go` does. `DevicePoll` reaches the token URL via `s.oauth2.Endpoint.TokenURL`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1790,20 +1830,20 @@ git commit -m "feat(oidc): background RetryLoop with injectable backoff"
 - Consumes: `oidc.Claims` (Subject/Email/EmailVerified), `config.OIDCCfg`, `*store.Store`, `*auth.SessionManager`, `service.AuditSink`.
 - Produces:
   - `type OIDCService struct { ... }`
-  - `func NewOIDCService(st *store.Store, sessions *auth.SessionManager, cfg config.OIDCCfg, audit AuditSink) *OIDCService`
-  - `var ErrOIDCRejected = errors.New("service: oidc login rejected")` — the single generic rejection.
+  - `func NewOIDCService(st *store.Store, sessions *auth.SessionManager, cfg config.OIDCCfg, audit AuditSink, log *slog.Logger) *OIDCService`
+  - `var ErrOIDCRejected = errors.New("service: oidc login rejected")` — the single generic rejection. Every reject path logs the *specific* reason server-side (design §9) before returning this sentinel.
   - `func (s *OIDCService) LoginOrLink(ctx, issuer, subject, email string, emailVerified bool) (store.User, error)` — the shared resolve/link/signup policy; emits `user.created` (signup) and `user.oidc.linked` (link) audits. Returns `ErrOIDCRejected` for every policy reject.
   - `func (s *OIDCService) BrowserLogin(ctx, issuer, subject, email string, emailVerified bool, ip, ua string) (store.Session, error)` — calls `LoginOrLink`, then `sessions.Create`, then audits `user.login.oidc`.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `internal/server/service/oidc_test.go`. Cover: existing-subject login, verified-email link (non-admin), admin-not-linked, unverified-email-conflict reject, empty-email reject, signup, signup-disabled, disabled-user:
+Create `internal/server/service/oidc_test.go` — **in-package `package service`** (like the other service tests), so drop all `service.` qualifiers and use the package's own `openTestStore(t)` (returns `*store.Store`) and `discardLogger()`. Cover: existing-subject login, verified-email link (non-admin), admin-not-linked, unverified-email-conflict reject, empty-email reject, signup, signup-disabled, disabled-user:
 
 ```go
 func TestOIDCLoginOrLink(t *testing.T) {
-	newSvc := func(t *testing.T, st *store.Store, cfg config.OIDCCfg) *service.OIDCService {
+	newSvc := func(t *testing.T, st *store.Store, cfg config.OIDCCfg) *OIDCService {
 		sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-		return service.NewOIDCService(st, sm, cfg, service.NewAuditWriter(st))
+		return NewOIDCService(st, sm, cfg, NewAuditWriter(st), discardLogger())
 	}
 	baseCfg := config.OIDCCfg{AutoLinkByEmail: true, AllowOIDCSignup: true}
 	const iss = "https://idp.example.com"
@@ -1879,9 +1919,9 @@ func TestOIDCLoginOrLink(t *testing.T) {
 }
 
 func TestOIDCBrowserLogin_CreatesSession(t *testing.T) {
-	st := newTestStore(t)
+	st := openTestStore(t)
 	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-	svc := service.NewOIDCService(st, sm, config.OIDCCfg{AutoLinkByEmail: true, AllowOIDCSignup: true}, service.NewAuditWriter(st))
+	svc := NewOIDCService(st, sm, config.OIDCCfg{AutoLinkByEmail: true, AllowOIDCSignup: true}, NewAuditWriter(st), discardLogger())
 	sess, err := svc.BrowserLogin(t.Context(), "https://idp.example.com", "s9", "e@x.com", true, "1.2.3.4", "ua")
 	if err != nil || sess.ID == "" || sess.CSRFToken == "" {
 		t.Fatalf("BrowserLogin: sess=%+v err=%v", sess, err)
@@ -1889,7 +1929,7 @@ func TestOIDCBrowserLogin_CreatesSession(t *testing.T) {
 }
 ```
 
-(Reuse the service package's existing `newTestStore` helper.)
+> **Helpers (per the Test Harness Reference):** this file is `package service`. Every `st := newTestStore(t)` above must be `st := openTestStore(t)` (the service package's single-value helper), and all `service.`/`store.User{}` etc. stay unqualified for `service` symbols. `errors.Is(err, ErrOIDCRejected)` — unqualified.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1907,6 +1947,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -1926,11 +1967,19 @@ type OIDCService struct {
 	sessions *auth.SessionManager
 	cfg      config.OIDCCfg
 	audit    AuditSink
+	log      *slog.Logger
 }
 
 // NewOIDCService constructs an OIDCService.
-func NewOIDCService(st *store.Store, sessions *auth.SessionManager, cfg config.OIDCCfg, audit AuditSink) *OIDCService {
-	return &OIDCService{st: st, sessions: sessions, cfg: cfg, audit: audit}
+func NewOIDCService(st *store.Store, sessions *auth.SessionManager, cfg config.OIDCCfg, audit AuditSink, log *slog.Logger) *OIDCService {
+	return &OIDCService{st: st, sessions: sessions, cfg: cfg, audit: audit, log: log}
+}
+
+// reject logs the specific policy-rejection reason server-side (so operators can
+// see WHY a login failed, design §9) and returns the single generic sentinel.
+func (s *OIDCService) reject(ctx context.Context, reason string) error {
+	s.log.LogAttrs(ctx, slog.LevelInfo, "oidc login rejected", slog.String("reason", reason))
+	return ErrOIDCRejected
 }
 
 // LoginOrLink resolves an authenticated OIDC identity to a local user. Order:
@@ -1944,7 +1993,7 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 	u, err := s.st.Users().GetByOIDC(ctx, issuer, subject)
 	if err == nil {
 		if u.Disabled {
-			return store.User{}, ErrOIDCRejected
+			return store.User{}, s.reject(ctx, "linked user disabled")
 		}
 		return u, nil
 	}
@@ -1954,14 +2003,14 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 
 	// 2. Verified-email auto-link.
 	if email == "" {
-		return store.User{}, ErrOIDCRejected // cannot link or sign up without an email
+		return store.User{}, s.reject(ctx, "no email claim") // cannot link or sign up without an email
 	}
 	if emailVerified && s.cfg.AutoLinkByEmail {
 		existing, err := s.st.Users().GetByEmail(ctx, email)
 		switch {
 		case err == nil:
 			if existing.Role == "admin" || existing.OIDCSubject != "" {
-				return store.User{}, ErrOIDCRejected // never auto-link admins or already-linked accounts
+				return store.User{}, s.reject(ctx, "email matches admin or already-linked account") // never auto-link admins or already-linked accounts
 			}
 			existing.OIDCProvider = issuer
 			existing.OIDCSubject = subject
@@ -1979,7 +2028,7 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 
 	// 3. Signup.
 	if !s.cfg.AllowOIDCSignup {
-		return store.User{}, ErrOIDCRejected
+		return store.User{}, s.reject(ctx, "signup disabled")
 	}
 	created, err := s.st.Users().Create(ctx, store.User{
 		Email: email, Role: "user", OIDCProvider: issuer, OIDCSubject: subject,
@@ -1988,7 +2037,7 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 		if errors.Is(err, store.ErrConflict) {
 			// Email already exists but wasn't linkable above (unverified, auto-link off,
 			// or already linked). Reject uniformly — never leak existence, never 500.
-			return store.User{}, ErrOIDCRejected
+			return store.User{}, s.reject(ctx, "email exists but not linkable (unverified / auto-link off / already linked)")
 		}
 		return store.User{}, fmt.Errorf("service.LoginOrLink: create: %w", err)
 	}
@@ -2140,21 +2189,21 @@ func TestOIDCBrowserFlow_EndToEnd(t *testing.T) {
 	st := newTestStore(t)            // api package test helper: migrated :memory: store
 	key := make([]byte, 32)
 
-	mgr := oidc.NewManager(config.OIDCCfg{
+	cfg := config.OIDCCfg{
 		Enabled: true, Issuer: idp.Issuer, ClientID: "test-client", ClientSecret: "secret",
 		Scopes: []string{"openid", "profile", "email"}, AutoLinkByEmail: true, AllowOIDCSignup: true,
-	}, "http://server.example", testLogger(t))
+	}
+	mgr := oidc.NewManager(cfg, "http://server.example", discardLogger())
 	if err := mgr.Discover(t.Context()); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-	oidcSvc := service.NewOIDCService(st, sm, mgr /*cfg*/ .Config(), service.NewAuditWriter(st))
-	// (mgr.Config() is not part of the API; pass the same config.OIDCCfg value used above.)
-
-	handler := buildTestAPIHandler(t, api.ServerDeps{ /* Log, Store, Sessions, OIDC, OIDCMgr, HMACKey, Cfg ... */ })
-
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
+	// Wire the full server WITH OIDC. Extend newFullHarness (or add newOIDCHarness)
+	// to set OIDC/OIDCMgr/HMACKey on the ServerDeps it already assembles, reusing
+	// its `key`. cfg.OIDC in ServerDeps.Cfg must carry `cfg` so the callback reads
+	// the right issuer. See the Test Harness Reference section — do NOT invent a
+	// separate buildTestAPIHandler.
+	h := newOIDCHarness(t, st, mgr, cfg) // returns { srv *httptest.Server; ... }
+	srv := h.srv
 
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -2312,7 +2361,7 @@ func registerOIDCOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodGet,
 		Path:          "/api/v1/auth/oidc/callback",
 		DefaultStatus: http.StatusFound,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(), oidcFlowMiddleware()},
 	}, func(ctx context.Context, in *struct {
 		Code  string `query:"code"`
 		State string `query:"state"`
@@ -2326,12 +2375,14 @@ func registerOIDCOps(a huma.API, deps ServerDeps) {
 			return &oidcRedirectOutput{Status: http.StatusFound, Location: "/login?error=no_account", SetCookie: clear}, nil
 		}
 
-		r, _ := humago.Unwrap(huma.WithContext(a, ctx)) // see note below
-		c, err := r.Cookie(oidcFlowCookie)
-		if err != nil {
+		// The flow cookie's raw value was captured from *http.Request by
+		// oidcFlowMiddleware (huma business handlers get a plain context.Context,
+		// never the request — mirror loginMetaMiddleware's humago.Unwrap pattern).
+		sealed, ok := oidcFlowCookieFrom(ctx)
+		if !ok {
 			return &oidcRedirectOutput{Status: http.StatusFound, Location: "/login?error=no_account", SetCookie: clear}, nil
 		}
-		raw, err := auth.OpenWithAAD(deps.HMACKey, c.Value, oidcFlowAAD)
+		raw, err := auth.OpenWithAAD(deps.HMACKey, sealed, oidcFlowAAD)
 		if err != nil {
 			return &oidcRedirectOutput{Status: http.StatusFound, Location: "/login?error=no_account", SetCookie: clear}, nil
 		}
@@ -2371,12 +2422,37 @@ func oidcFlowSetCookie(deps ServerDeps, value string, maxAge int, tlsActive bool
 		MaxAge:   maxAge,
 	}
 }
+
+// oidcFlowKey is the context key for the raw (sealed) flow-cookie value.
+type oidcFlowKey struct{}
+
+// oidcFlowMiddleware reads the diyddns_oidc_flow cookie off the raw request
+// (huma business handlers receive a plain context.Context, never *http.Request)
+// and stashes its raw sealed value for the callback handler — the same
+// humago.Unwrap → huma.WithValue pattern loginMetaMiddleware uses.
+func oidcFlowMiddleware() func(huma.Context, func(huma.Context)) {
+	return func(ctx huma.Context, next func(huma.Context)) {
+		r, _ := humago.Unwrap(ctx)
+		if c, err := r.Cookie(oidcFlowCookie); err == nil {
+			ctx = huma.WithValue(ctx, oidcFlowKey{}, c.Value)
+		}
+		next(ctx)
+	}
+}
+
+// oidcFlowCookieFrom returns the raw sealed flow-cookie value stashed by
+// oidcFlowMiddleware, and whether it was present.
+func oidcFlowCookieFrom(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(oidcFlowKey{}).(string)
+	return v, ok && v != ""
+}
 ```
 
 > **Implementer notes (resolve during coding):**
 > 1. **Two `Set-Cookie` headers on success.** huma serializes one `http.Cookie` per `header:"Set-Cookie"` field. To emit BOTH the session cookie and the flow-cookie-clear on the success path, either (a) give `oidcRedirectOutput` a `SetCookies []http.Cookie` with a `header:"Set-Cookie"` tag (huma emits one header per slice element), or (b) rely on the flow cookie's short `MaxAge` and `Path` scoping and only set the session cookie on success (the flow cookie expires on its own in ≤10 min). Prefer (a) for cleanliness; (b) is acceptable. Update the struct accordingly and keep the failing-path `clear` cookie.
-> 2. **Reading the request in the handler.** The `humago.Unwrap(...)` line is illustrative — the correct, tested pattern is to read the flow cookie inside `loginMetaMiddleware` (or a sibling middleware) via `humago.Unwrap(huma.Context)` and stash the parsed `oidcFlowState` (and cookie presence) into context, exactly as `loginMetaMiddleware` stashes ip/ua. Do NOT call `humago.Unwrap` on a plain `context.Context`. Mirror `authmw.go`'s middleware signature `func(huma.Context, func(huma.Context))`.
+> 2. **Reading the request cookie is DONE** via `oidcFlowMiddleware` (above), which mirrors `loginMetaMiddleware`'s `humago.Unwrap`→`huma.WithValue` pattern and is attached to the callback op. The handler reads the raw sealed value with `oidcFlowCookieFrom(ctx)`. Never call `humago.Unwrap` on a plain `context.Context`.
 > 3. `subtleMismatch(a, b)` is `subtle.ConstantTimeCompare([]byte(a), []byte(b)) != 1` — add it as a small helper (import `crypto/subtle`).
+> 4. **`safeNext` needs its own test** (open-redirect defense): table cases `"//evil.com"→"/"`, `"/\\evil"→"/"`, `"https://evil"→"/"`, `"/devices"→"/devices"`, `""→"/"`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -2454,7 +2530,9 @@ func TestOIDCDeviceStart_501WhenUnsupported(t *testing.T) {
 }
 ```
 
-> **Note:** the pacing guard uses store time (`store.NowUnix()`), so a real test either sets the flow's `interval` to 0 (mock IdP `pollInterval` is 1; construct the flow with a small interval) or the `pollUntilDevice` helper retries across the ~1s interval. Keep the mock's interval at 1s and have `pollUntilDevice` retry for up to ~3s. Prefer injecting a clock into the poll handler if the api package already parameterizes `nowUnix` (Plan 04's `authmw.go` has a package `nowUnix` var — reuse it so the test can pin time).
+> **Helpers (Test Harness Reference):** this is `package api_test`. Use the OIDC-wired `newOIDCHarness` (from Task 12), the existing 3-arg `postJSON(t, url, body) (status, respBody)` (decode `respBody` yourself), and `doJSON` — do NOT call a 4-arg `postJSON` or invent `getJSON`/`postRaw`/`pollUntilDevice`/`buildTestAPIHandler`. Write `pollUntilDevice` as a small local loop over `postJSON` if you want one.
+>
+> **Pacing/time:** the guard uses store time (`store.NowUnix()`). Plan 04's `authmw.go` exposes a package `nowUnix` var — the enroll_oidc handlers should use `store.NowUnix()` directly (not that var), so to pin time either set the flow `interval` low and have the local poll loop retry across the mock's 1s interval, or (cleaner) drive `store`'s injectable clock if available. Keep the mock IdP `pollInterval` at 1 and retry for up to ~3s.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -2537,11 +2615,15 @@ func registerEnrollOIDCOps(a huma.API, deps ServerDeps) {
 			return nil, huma.Error500InternalServerError("internal error")
 		}
 		now := store.NowUnix()
+		interval := da.Interval
+		if interval < 5 {
+			interval = 5 // design §6 default; also prevents a 0-interval disabling the pacing guard
+		}
 		if _, err := deps.Store.OIDCDeviceFlows().Create(ctx, store.OIDCDeviceFlow{
 			FlowID:     flowID,
 			DeviceCode: da.DeviceCode,
-			Interval:   da.Interval,
-			ExpiresAt:  da.ExpiresIn, // absolute unix expiry from DeviceStart
+			Interval:   interval,
+			ExpiresAt:  da.ExpiresAt, // absolute unix expiry from DeviceStart
 			CreatedAt:  now,
 		}); err != nil {
 			deps.Log.LogAttrs(ctx, slog.LevelError, "oidc flow persist failed", slog.Any("error", err))
@@ -2552,8 +2634,8 @@ func registerEnrollOIDCOps(a huma.API, deps ServerDeps) {
 		out.Body.UserCode = da.UserCode
 		out.Body.VerificationURI = da.VerificationURI
 		out.Body.VerificationURIComplete = da.VerificationURIComplete
-		out.Body.ExpiresIn = da.ExpiresIn - now
-		out.Body.Interval = da.Interval
+		out.Body.ExpiresIn = da.ExpiresAt - now
+		out.Body.Interval = interval
 		return out, nil
 	})
 
@@ -2586,8 +2668,13 @@ func registerEnrollOIDCOps(a huma.API, deps ServerDeps) {
 			_ = deps.Store.OIDCDeviceFlows().BumpInterval(ctx, flow.FlowID, slowDownBumpSeconds)
 			out.Body.Status = "slow_down"
 			return out, nil
+		case oidc.PollDenied:
+			// Terminal: user denied or the IdP device_code expired. Drop the flow
+			// and tell the agent to stop polling.
+			_ = deps.Store.OIDCDeviceFlows().Delete(ctx, flow.FlowID)
+			return nil, huma.Error410Gone("device authorization denied or expired")
 		case oidc.PollComplete:
-			// resolve user, mint device, delete the flow
+			// resolve user, mint device, delete the flow (below)
 		}
 
 		user, err := deps.OIDC.LoginOrLink(ctx, deps.Cfg.OIDC.Issuer, res.Claims.Subject, res.Claims.Email, res.Claims.EmailVerified)
@@ -2699,7 +2786,7 @@ In `internal/server/api/api.go`, change the call in `Build`:
 ```
 (from `registerCapabilities(agentAPI, deps.Info)`.)
 
-> **Guard:** `deps.OIDCMgr` MUST be non-nil for every server (Task 15 always constructs it). This test's disabled case verifies no nil-panic.
+> **Guard:** `Enabled()`/`DeviceEnabled()` are nil-receiver-safe (Task 6), so the existing `newAPIServer` harness (`api_test.go`, which sets no `OIDCMgr`) keeps working and reports both flags `false` — the existing `TestCapabilities_Response` assertion `got.OIDCEnabled == false` still holds. No harness change needed for the disabled case; the enabled case uses the OIDC-wired harness (Test Harness Reference).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2728,8 +2815,10 @@ git commit -m "feat(api): dynamic oidc_enabled/oidc_device_enabled capabilities"
 
 - [ ] **Step 1: Write the failing tests**
 
-Extend the client isolation guard in `cmd/diyddns-client/deps_test.go`:
+**Replace** the existing `TestClientExcludesHuma` in `cmd/diyddns-client/deps_test.go` with an extended version (don't add a second test that re-checks huma — rename or broaden the existing one):
 ```go
+// TestClientExcludesServerOnlyDeps asserts the client binary's transitive
+// imports include none of the server-only dependencies.
 func TestClientExcludesServerOnlyDeps(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
 	if err != nil {
@@ -2750,11 +2839,12 @@ func TestClientExcludesServerOnlyDeps(t *testing.T) {
 
 Add a pruner sweep test in `internal/server/pruner_test.go` (follow the existing pruner test if present; otherwise a small one):
 ```go
+// package server (in-package): openTestStore + discardLog are the real helpers (pruner_test.go).
 func TestPrune_SweepsOIDCDeviceFlows(t *testing.T) {
-	st := newServerTestStore(t) // migrated :memory: store helper used by server tests
+	st := openTestStore(t)
 	ctx := t.Context()
 	_, _ = st.OIDCDeviceFlows().Create(ctx, store.OIDCDeviceFlow{FlowID: "old", DeviceCode: "d", Interval: 5, ExpiresAt: 1, CreatedAt: 1})
-	prune(ctx, st, testLogger(t))
+	prune(ctx, st, discardLog())
 	if _, err := st.OIDCDeviceFlows().Get(ctx, "old"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected expired flow pruned, got %v", err)
 	}
@@ -2770,12 +2860,12 @@ Expected: FAIL — deps not yet imported by server wiring / pruner sweep absent.
 
 - [ ] **Step 3: Wire the server**
 
-In `internal/server/server.go`, `Handler`:
+In `internal/server/server.go`, rename the current `Handler` to unexported `handler` returning the manager too (the exported `Handler` wrapper is added in the concrete-wiring block below):
 ```go
-func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, error) {
+func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
-		return nil, fmt.Errorf("server: %w", err)
+		return nil, nil, fmt.Errorf("server: %w", err)
 	}
 	// ... existing verifier/sessions/audit/authSvc ...
 
@@ -2786,11 +2876,11 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		dctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := oidcMgr.Discover(dctx); err != nil {
-			return nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
+			return nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
 		}
 	}
 
-	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit)
+	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
 
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{
@@ -2799,23 +2889,37 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		OIDCMgr: oidcMgr,
 		HMACKey: key,
 	})
-	// stash the manager so Run can launch its RetryLoop
-	// (add an *oidc.Manager field to Server; set it in New via a small refactor,
-	//  OR return it from Handler. Simplest: have New build the manager. See note.)
-	return middleware.Chain(mux, middleware.RequestID, middleware.AccessLog(log), middleware.Recover(log)), nil
+	handler := middleware.Chain(mux, middleware.RequestID, middleware.AccessLog(log), middleware.Recover(log))
+	return handler, oidcMgr, nil
 }
 ```
 
-> **Wiring note:** `Run` needs the manager to launch `go oidcMgr.RetryLoop(ctx)` next to `go runPruner(...)`. Cleanest refactor: build the manager in `New` (not `Handler`), store it on the `Server` struct, pass it into `Handler` (add a param) or have `New` assemble deps. Keep `Handler`'s black-box testability: give `Handler` an overload/param that accepts a prebuilt `*oidc.Manager`, or expose the manager via the `Server` struct. Pick the minimal change that lets `Run` do:
-> ```go
-> go runPruner(ctx, s.st, s.log)
-> if s.oidcMgr != nil && !s.oidcMgr.Required() { // degrade path
-> 	go s.oidcMgr.RetryLoop(ctx)
-> }
-> ```
-> Add a `Required()` accessor on `Manager` returning `m.cfg.Enabled && m.cfg.Required`, so `Run` skips RetryLoop when discovery already ran synchronously in `Handler`. (When `Required` and enabled, `Handler` already discovered; RetryLoop would be a no-op anyway since `Enabled()` is true — so launching it unconditionally is also safe. Prefer unconditional launch for simplicity: RetryLoop returns immediately when `Enabled()`.)
-
-Simplify to: always `go s.oidcMgr.RetryLoop(ctx)` in `Run` — it is a no-op when disabled or already ready.
+**Concrete wiring (do exactly this — no overloads, Go has none):**
+1. Rename the current exported `Handler` to an **unexported** `func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error)` — the body above (returns the handler AND the constructed manager).
+2. Keep an **exported thin wrapper** so the existing black-box test (`server_test.go` calls `server.Handler(cfg, st, log)` and expects `(http.Handler, error)`) still compiles unchanged:
+   ```go
+   // Handler builds the fully-wrapped HTTP handler. (The OIDC manager it
+   // constructs is only needed by New/Run, so this wrapper discards it.)
+   func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, error) {
+       h, _, err := handler(cfg, st, log)
+       return h, err
+   }
+   ```
+3. Add an `oidcMgr *oidc.Manager` field to the `Server` struct. In `New`, call `handler(...)` (not the wrapper), store the manager:
+   ```go
+   func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) {
+       h, mgr, err := handler(cfg, st, log)
+       if err != nil {
+           return nil, err
+       }
+       return &Server{httpServer: &http.Server{Addr: cfg.Server.Listen, Handler: h, ReadHeaderTimeout: 10 * time.Second}, log: log, st: st, oidcMgr: mgr}, nil
+   }
+   ```
+4. In `Run`, next to `go runPruner(ctx, s.st, s.log)`, add **unconditionally**:
+   ```go
+   go s.oidcMgr.RetryLoop(ctx)
+   ```
+   `RetryLoop` is a no-op when OIDC is disabled or already ready (from the `required` sync path), so no guard is needed.
 
 In `internal/server/pruner.go`, add to `prune`:
 ```go
@@ -2871,4 +2975,20 @@ git commit -m "feat(server): wire OIDC manager, degrade/required startup, flow p
 1. huma emitting two `Set-Cookie` headers on the OIDC success path (T12 note 1).
 2. Reading the flow cookie inside a huma middleware via `humago.Unwrap`, not on a bare context (T12 note 2).
 3. `oauth2.DeviceAuthResponse.Expiry`/`Interval` field types + `S256ChallengeOption`/`VerifierOption`/`oidc.Nonce` availability at the pinned versions (T7/T8) — verified present per the design's Context7 check; re-confirm on `go get`.
-4. `server.Run` obtaining the `*oidc.Manager` to launch `RetryLoop` (T15 wiring note).
+4. `server.Run` obtaining the `*oidc.Manager` to launch `RetryLoop` — now spelled out concretely in T15 (unexported `handler` returns the manager; exported `Handler` wraps).
+
+---
+
+## Review provenance
+
+- **Self-review** (2026-07-13): spec coverage, placeholder scan, type consistency (above).
+- **sr-go-engineer review** (Fable, 2026-07-13, verdict AMEND-BEFORE-EXECUTION): all Critical + Important folded in —
+  - **C1** nil-receiver-safe `Manager.Enabled/DeviceEnabled` (T6) so the existing `newAPIServer` harness doesn't nil-panic (T14).
+  - **C2/C3** every test now names the REAL helpers per package (added the **Test Harness Reference** table): store `newTestStore` returns `(*Store, ctx)`; service/server/auth tests are in-package using `openTestStore`/`discardLogger`/`discardLog`/`testPasswordCfg`; api tests use `postJSON`(3-arg)/`doJSON`/`findCookie` and extend `newFullHarness`; devices method is `GetByID`.
+  - **C4** replaced the non-existent `huma.WithContext` with a real `oidcFlowMiddleware` (humago.Unwrap→huma.WithValue) + `oidcFlowCookieFrom`; fixed the `mgr.Config()` test line.
+  - **I1** `access_denied`/`expired_token` → terminal `PollDenied` (T8) → T13 deletes the flow + `410`.
+  - **I2** `OIDCService` gained a logger; every policy reject logs its specific reason (design §9).
+  - **I3** device-flow `interval` floored at 5 (T13) so a 0-interval can't disable the pacing guard.
+  - **I4** one concrete `handler`/`Handler`/`New`/`Run` wiring for the manager + `RetryLoop` (T15).
+  - Minors: `DeviceAuth.ExpiresAt` (absolute) + zero-expiry fallback; dropped dead `oauth2` import/`var _`; removed the unimplemented `StageDevice`/`deviceUser`; extend the existing client-isolation test rather than duplicate it; `safeNext` gets its own table test.
+  - Confirmed solid by the reviewer: library-API composition (go-oidc `Endpoint().DeviceAuthURL`, oauth2 PKCE helpers, huma error/cookie helpers), `TryPoll` SQL + pacing math, the issue-#13 fix, the AAD test, T10 policy, and the T1–T13 compile-order/dep-add sequencing.
