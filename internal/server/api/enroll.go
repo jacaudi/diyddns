@@ -77,4 +77,6 @@ func registerEnrollOps(a huma.API, deps ServerDeps) {
 			Secret:   base64.StdEncoding.EncodeToString(res.Secret),
 		}}, nil
 	})
+
+	registerEnrollOIDCOps(a, deps)
 }

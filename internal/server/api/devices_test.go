@@ -11,6 +11,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -27,10 +28,13 @@ type fullHarness struct {
 	st  *store.Store
 }
 
-// newFullHarness assembles the full server: agent HMAC surface (enroll,
-// checkin, self), browser auth surface (login, logout, me, password,
-// bootstrap), and the device management surface under test here.
-func newFullHarness(t *testing.T) fullHarness {
+// buildServerDeps assembles every ServerDeps field common to the full-server
+// harness (agent HMAC surface, browser auth surface, device management) onto
+// a fresh :memory: store, WITHOUT registering it onto a mux. It is the single
+// place that "how the full server's non-OIDC deps are wired" lives, so both
+// newFullHarness and newOIDCHarness build from the same deps rather than each
+// hand-duplicating the ~10-field ServerDeps literal.
+func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	t.Helper()
 	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
@@ -64,8 +68,7 @@ func newFullHarness(t *testing.T) fullHarness {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil)
 
-	mux := http.NewServeMux()
-	api.Build(mux, api.ServerDeps{
+	return st, api.ServerDeps{
 		Log:       log,
 		Store:     st,
 		Verifier:  verifier,
@@ -77,9 +80,53 @@ func newFullHarness(t *testing.T) fullHarness {
 		Bootstrap: bootstrapSvc,
 		Cfg:       cfg,
 		Info:      version.Info{Version: "v1.2.3"},
-	})
+		HMACKey:   key,
+	}
+}
+
+// newFullHarness assembles the full server: agent HMAC surface (enroll,
+// checkin, self), browser auth surface (login, logout, me, password,
+// bootstrap), and the device management surface under test here. OIDC is
+// left unset (disabled) — see newOIDCHarness for the OIDC-enabled variant.
+func newFullHarness(t *testing.T) fullHarness {
+	t.Helper()
+	st, deps := buildServerDeps(t)
+
+	mux := http.NewServeMux()
+	api.Build(mux, deps)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+
+	return fullHarness{srv: srv, st: st}
+}
+
+// newOIDCHarness builds on buildServerDeps, additionally wiring an OIDC
+// Manager (discovered against cfgOIDC.Issuer) and OIDCService into
+// ServerDeps. The httptest.Server's URL is only known once the server is
+// started, so it starts the server FIRST (its mux gets the OIDC routes added
+// immediately after, before any request is made) and only then constructs the
+// Manager with that URL as its redirect base — otherwise the Manager's
+// baked-in oauth2 RedirectURL could never match the server it's registered
+// against, and the mock IdP's /authorize would redirect the test client
+// nowhere reachable.
+func newOIDCHarness(t *testing.T, cfgOIDC config.OIDCCfg) fullHarness {
+	t.Helper()
+	st, deps := buildServerDeps(t)
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mgr := oidc.NewManager(cfgOIDC, srv.URL, deps.Log)
+	if err := mgr.Discover(t.Context()); err != nil {
+		t.Fatalf("oidc manager discover: %v", err)
+	}
+
+	deps.Cfg.OIDC = cfgOIDC
+	deps.OIDCMgr = mgr
+	deps.OIDC = service.NewOIDCService(st, deps.Sessions, cfgOIDC, service.NewAuditWriter(st), deps.Log)
+
+	api.Build(mux, deps)
 
 	return fullHarness{srv: srv, st: st}
 }

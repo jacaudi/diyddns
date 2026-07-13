@@ -12,12 +12,17 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
+
+// oidcDiscoverTimeout bounds the synchronous discovery attempt made at
+// startup when OIDC is enabled AND required (fail-closed).
+const oidcDiscoverTimeout = 15 * time.Second
 
 const shutdownTimeout = 15 * time.Second
 
@@ -30,21 +35,24 @@ type Server struct {
 	httpServer *http.Server
 	log        *slog.Logger
 	st         *store.Store
+	oidcMgr    *oidc.Manager
 }
 
-// Handler builds the fully-wrapped http.Handler: the mux (health + two huma
+// handler builds the fully-wrapped http.Handler: the mux (health + two huma
 // APIs) inside the RequestID → AccessLog → Recover middleware chain, wired to
-// the real HMAC verifier, session manager, and service layer. Exported for
-// black-box testing via httptest.
+// the real HMAC verifier, session manager, and service layer. It also
+// constructs the OIDC manager and returns it, so New/Run can launch its
+// background RetryLoop.
 //
 // FAILS CLOSED: cfg.Auth.HMAC.SecretKey must decode to a 32-byte AEAD key or
-// Handler returns an error and builds nothing. A server that can enroll
+// handler returns an error and builds nothing. A server that can enroll
 // devices but can never verify their signed requests is worse than one that
-// refuses to start.
-func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, error) {
+// refuses to start. Likewise, if OIDC is enabled AND required, a failed
+// discovery attempt at startup also fails closed.
+func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
-		return nil, fmt.Errorf("server: %w", err)
+		return nil, nil, fmt.Errorf("server: %w", err)
 	}
 
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
@@ -53,8 +61,20 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	audit := service.NewAuditWriter(st)
 	authSvc, err := service.NewAuthService(st, sessions, cfg.Auth.Password, audit)
 	if err != nil {
-		return nil, fmt.Errorf("server: %w", err)
+		return nil, nil, fmt.Errorf("server: %w", err)
 	}
+
+	oidcMgr := oidc.NewManager(cfg.Auth.OIDC, cfg.Server.BaseURL, log)
+	if cfg.Auth.OIDC.Enabled && cfg.Auth.OIDC.Required {
+		// Fail-closed: an operator who marked OIDC required wants the server to
+		// refuse to start if the IdP is unreachable (mirrors the HMAC-key path).
+		dctx, cancel := context.WithTimeout(context.Background(), oidcDiscoverTimeout)
+		defer cancel()
+		if err := oidcMgr.Discover(dctx); err != nil {
+			return nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
+		}
+	}
+	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
 
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{
@@ -67,32 +87,46 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil),
+		OIDC:      oidcSvc,
+		OIDCMgr:   oidcMgr,
+		HMACKey:   key,
 		Cfg:       cfg.Auth,
 		Info:      version.Current(),
 	})
-	return middleware.Chain(mux,
+	chain := middleware.Chain(mux,
 		middleware.RequestID,
 		middleware.AccessLog(log),
 		middleware.Recover(log),
-	), nil
+	)
+	return chain, oidcMgr, nil
 }
 
-// New constructs a Server bound to cfg.Server.Listen, wiring the full auth
-// and service dependency graph via Handler. Returns an error if
-// cfg.Auth.HMAC.SecretKey is missing or invalid (fail-closed).
+// Handler builds the fully-wrapped http.Handler (see handler). Exported for
+// black-box testing via httptest; the OIDC manager it constructs is only
+// needed by New/Run to launch RetryLoop, so this wrapper discards it.
+func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, error) {
+	h, _, err := handler(cfg, st, log)
+	return h, err
+}
+
+// New constructs a Server bound to cfg.Server.Listen, wiring the full auth,
+// OIDC, and service dependency graph via handler. Returns an error if
+// cfg.Auth.HMAC.SecretKey is missing or invalid, or OIDC is required but
+// unreachable (fail-closed).
 func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) {
-	handler, err := Handler(cfg, st, log)
+	h, mgr, err := handler(cfg, st, log)
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.Server.Listen,
-			Handler:           handler,
+			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log: log,
-		st:  st,
+		log:     log,
+		st:      st,
+		oidcMgr: mgr,
 	}, nil
 }
 
@@ -107,6 +141,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 	go runPruner(ctx, s.st, s.log)
+	go s.oidcMgr.RetryLoop(ctx)
 
 	select {
 	case err := <-errCh:

@@ -221,4 +221,6 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 		}
 		return &emptyOutput{}, nil
 	})
+
+	registerOIDCOps(a, deps)
 }

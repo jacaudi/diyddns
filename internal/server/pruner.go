@@ -48,10 +48,15 @@ func prune(ctx context.Context, st *store.Store, log *slog.Logger) {
 	if err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "prune enrollment_codes failed", slog.Any("error", err))
 	}
+	flows, err := st.OIDCDeviceFlows().PruneExpired(ctx, now)
+	if err != nil {
+		log.LogAttrs(ctx, slog.LevelWarn, "prune oidc_device_flows failed", slog.Any("error", err))
+	}
 
 	log.LogAttrs(ctx, slog.LevelDebug, "pruned expired records",
 		slog.Int("replay_nonces", nonces),
 		slog.Int("sessions", sessions),
 		slog.Int("enrollment_codes", codes),
+		slog.Int("oidc_device_flows", flows),
 	)
 }

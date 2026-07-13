@@ -206,6 +206,71 @@ func TestLoad_BootstrapAdminEmailEnvAlias(t *testing.T) {
 	}
 }
 
+func TestLoad_OIDCValidation(t *testing.T) {
+	base := func(v *viper.Viper) {
+		v.Set("database.path", ":memory:")
+		v.Set("auth.hmac.secret_key", "") // not required unless server starts
+	}
+
+	// enabled but missing issuer → error
+	t.Run("missing issuer", func(t *testing.T) {
+		v := viper.New()
+		base(v)
+		v.Set("auth.oidc.enabled", true)
+		v.Set("server.base_url", "https://ddns.example.com")
+		v.Set("auth.oidc.client_id", "cid")
+		v.Set("auth.oidc.client_secret", "csecret")
+		if _, err := config.Load(v, ""); err == nil {
+			t.Fatal("expected error for enabled OIDC without issuer")
+		}
+	})
+
+	// enabled but scopes lack openid → error
+	t.Run("missing openid scope", func(t *testing.T) {
+		v := viper.New()
+		base(v)
+		v.Set("auth.oidc.enabled", true)
+		v.Set("server.base_url", "https://ddns.example.com")
+		v.Set("auth.oidc.issuer", "https://idp.example.com")
+		v.Set("auth.oidc.client_id", "cid")
+		v.Set("auth.oidc.client_secret", "csecret")
+		v.Set("auth.oidc.scopes", []string{"profile", "email"})
+		if _, err := config.Load(v, ""); err == nil {
+			t.Fatal("expected error for OIDC scopes missing 'openid'")
+		}
+	})
+
+	// enabled + valid → defaults present
+	t.Run("valid", func(t *testing.T) {
+		v := viper.New()
+		base(v)
+		v.Set("auth.oidc.enabled", true)
+		v.Set("server.base_url", "https://ddns.example.com")
+		v.Set("auth.oidc.issuer", "https://idp.example.com")
+		v.Set("auth.oidc.client_id", "cid")
+		v.Set("auth.oidc.client_secret", "csecret")
+		cfg, err := config.Load(v, "")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Auth.OIDC.AutoLinkByEmail || !cfg.Auth.OIDC.AllowOIDCSignup {
+			t.Fatalf("expected auto_link/signup defaults true, got %+v", cfg.Auth.OIDC)
+		}
+		if len(cfg.Auth.OIDC.Scopes) == 0 || cfg.Auth.OIDC.Scopes[0] != "openid" {
+			t.Fatalf("expected default scopes with openid first, got %v", cfg.Auth.OIDC.Scopes)
+		}
+	})
+
+	// disabled → no validation, loads clean
+	t.Run("disabled", func(t *testing.T) {
+		v := viper.New()
+		base(v)
+		if _, err := config.Load(v, ""); err != nil {
+			t.Fatalf("Load with OIDC disabled: %v", err)
+		}
+	})
+}
+
 func TestSecretKeyBytes_Requires32(t *testing.T) {
 	if _, err := config.DecodeSecretKey(base64.StdEncoding.EncodeToString(make([]byte, 16))); err == nil {
 		t.Fatal("16-byte key must be rejected")
