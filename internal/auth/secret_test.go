@@ -104,3 +104,34 @@ func TestSealOpen_WrongKeyLength(t *testing.T) { // exercises newGCM's len!=32 g
 		t.Fatal("Open: expected 16-byte key rejection")
 	}
 }
+
+func TestSealWithAAD_RoundTripAndDomainSeparation(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	pt := []byte(`{"state":"abc","nonce":"xyz"}`)
+	aad := []byte("diyddns/oidc-flow-v1")
+
+	sealed, err := SealWithAAD(key, pt, aad)
+	if err != nil {
+		t.Fatalf("SealWithAAD: %v", err)
+	}
+
+	got, err := OpenWithAAD(key, sealed, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD: %v", err)
+	}
+	if !bytes.Equal(got, pt) {
+		t.Fatalf("round-trip mismatch: %q != %q", got, pt)
+	}
+
+	// Wrong AAD must fail (domain separation).
+	if _, err := OpenWithAAD(key, sealed, []byte("other-context")); err == nil {
+		t.Fatal("OpenWithAAD with wrong AAD must fail, but succeeded")
+	}
+	// A blob sealed WITH aad must not open via the no-AAD SealSecret path.
+	if _, err := OpenSecret(key, sealed); err == nil {
+		t.Fatal("OpenSecret must reject an AAD-sealed blob, but succeeded")
+	}
+}
