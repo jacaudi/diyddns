@@ -160,6 +160,11 @@ func completeOIDCDevice(ctx context.Context, deps ServerDeps, flow store.OIDCDev
 	enr, err := deps.Enroll.EnrollForUser(ctx, user.ID, "device.enroll.oidc", service.ClientMeta{})
 	if err != nil {
 		deps.Log.LogAttrs(ctx, slog.LevelError, "oidc device mint failed", slog.Any("error", err))
+		// A mint failure is terminal for this flow: the IdP device_code is
+		// already spent, so the row must not linger for the pruner. Delete
+		// it here to complete the "delete on every terminal outcome" invariant
+		// (mirrors the reject branch above).
+		_ = deps.Store.OIDCDeviceFlows().Delete(ctx, flow.FlowID)
 		return nil, huma.Error500InternalServerError("internal error")
 	}
 	_ = deps.Store.OIDCDeviceFlows().Delete(ctx, flow.FlowID)

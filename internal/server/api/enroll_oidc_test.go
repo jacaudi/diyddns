@@ -146,6 +146,38 @@ func TestOIDCDeviceEnroll_RejectDeletesFlowAnd401(t *testing.T) {
 	}
 }
 
+// TestOIDCDeviceEnroll_MintFailureDeletesFlowAnd500 drives the terminal
+// mint-failure path: the device is approved and LoginOrLink succeeds
+// (signup enabled), but device minting is forced to fail by dropping the
+// devices table out from under the store after the harness is built. The
+// handler must return 500 AND delete the flow — a spent IdP device_code
+// must never leave an orphan row for the pruner.
+func TestOIDCDeviceEnroll_MintFailureDeletesFlowAnd500(t *testing.T) {
+	idp := oidctest.New(t, oidctest.Options{SupportDevice: true})
+	h := newOIDCHarness(t, oidcTestCfg(idp)) // AllowOIDCSignup=true → LoginOrLink creates the user
+
+	start := startDeviceFlow(t, h.srv.URL)
+	idp.ApproveDevice("test-device-code", oidctest.Claims{
+		Subject: "mint-sub", Email: "mint@x.com", EmailVerified: true, Audience: "test-client",
+	})
+
+	// Force EnrollForUser's Devices().Create to fail while leaving users and
+	// oidc_device_flows intact, so LoginOrLink and the flow Delete still work.
+	if _, err := h.st.DB().ExecContext(t.Context(), `DROP TABLE devices`); err != nil {
+		t.Fatalf("drop devices table: %v", err)
+	}
+
+	status, body := postJSON(t, h.srv.URL+"/agent/v1/enroll/oidc/poll", map[string]string{"flow_id": start.FlowID})
+	if status != http.StatusInternalServerError {
+		t.Fatalf("poll status = %d, want 500, body=%s", status, body)
+	}
+
+	// The mint-failure path must delete the flow — no orphaned spent device_code.
+	if _, err := h.st.OIDCDeviceFlows().Get(t.Context(), start.FlowID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("flow Get after mint failure: err = %v, want store.ErrNotFound", err)
+	}
+}
+
 // TestOIDCDeviceStart_501WhenUnsupported drives /start against an IdP that
 // does not advertise a device_authorization_endpoint.
 func TestOIDCDeviceStart_501WhenUnsupported(t *testing.T) {
