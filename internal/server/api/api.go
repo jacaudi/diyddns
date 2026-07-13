@@ -13,6 +13,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -33,6 +34,9 @@ type ServerDeps struct {
 	Checkin   *service.CheckinService
 	Auth      *service.AuthService
 	Bootstrap *service.BootstrapService
+	OIDC      *service.OIDCService
+	OIDCMgr   *oidc.Manager
+	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
 	Cfg       config.Auth
 	Info      version.Info
 }
