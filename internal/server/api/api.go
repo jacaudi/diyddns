@@ -45,7 +45,7 @@ type ServerDeps struct {
 // onto mux.
 func Build(mux *http.ServeMux, deps ServerDeps) {
 	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent", deps.Info.Version))
-	registerCapabilities(agentAPI, deps.Info)
+	registerCapabilities(agentAPI, deps)
 	registerAgentOps(agentAPI, deps)
 
 	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api", deps.Info.Version))
