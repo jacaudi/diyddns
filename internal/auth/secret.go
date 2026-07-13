@@ -8,10 +8,14 @@ import (
 	"fmt"
 )
 
+// randRead is the source of cryptographic randomness, indirected so tests can
+// exercise the RNG-failure branches. Production always uses crypto/rand.Read.
+var randRead = rand.Read
+
 // GenerateSecret returns 32 cryptographically-random bytes — a device's HMAC secret.
 func GenerateSecret() ([]byte, error) {
 	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := randRead(b); err != nil {
 		return nil, fmt.Errorf("auth.GenerateSecret: %w", err)
 	}
 	return b, nil
@@ -25,7 +29,7 @@ func SealSecret(key, secret []byte) (string, error) {
 		return "", err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
+	if _, err := randRead(nonce); err != nil {
 		return "", fmt.Errorf("auth.SealSecret: nonce: %w", err)
 	}
 	ct := gcm.Seal(nonce, nonce, secret, nil)

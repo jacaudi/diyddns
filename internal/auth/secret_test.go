@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"testing"
 )
 
@@ -69,6 +70,29 @@ func TestOpen_CiphertextTooShort(t *testing.T) {
 	short := base64.StdEncoding.EncodeToString([]byte{0x01, 0x02}) // < GCM nonce size
 	if _, err := OpenSecret(testKey(), short); err == nil {
 		t.Fatal("expected ciphertext-too-short error")
+	}
+}
+
+func TestSeal_NonceReadError(t *testing.T) { // covers SealSecret's nonce-read error branch
+	sentinel := errors.New("rng failure")
+	orig := randRead
+	t.Cleanup(func() { randRead = orig })
+	randRead = func([]byte) (int, error) { return 0, sentinel }
+
+	_, err := SealSecret(testKey(), []byte("0123456789abcdef0123456789abcdef"))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped rng failure, got %v", err)
+	}
+}
+
+func TestGenerateSecret_ReadError(t *testing.T) { // covers GenerateSecret's read error branch
+	sentinel := errors.New("rng failure")
+	orig := randRead
+	t.Cleanup(func() { randRead = orig })
+	randRead = func([]byte) (int, error) { return 0, sentinel }
+
+	if _, err := GenerateSecret(); !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped rng failure, got %v", err)
 	}
 }
 
