@@ -267,6 +267,24 @@ func TestPassword_RequiresCookieAndMatchingCSRFToken(t *testing.T) {
 		}
 	})
 
+	t.Run("wrong old password with matching csrf returns 422 uniformly", func(t *testing.T) {
+		status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/auth/password", map[string]string{
+			"old_password": "not the right old password", "new_password": "new password long enough",
+		}, cookie, me.CSRF)
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422, body=%s", status, body)
+		}
+	})
+
+	t.Run("too-short new password with matching csrf returns 422 uniformly", func(t *testing.T) {
+		status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/auth/password", map[string]string{
+			"old_password": "correct horse battery staple", "new_password": "short",
+		}, cookie, me.CSRF)
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422, body=%s", status, body)
+		}
+	})
+
 	t.Run("matching cookie and csrf token succeeds and new password works", func(t *testing.T) {
 		status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/auth/password", map[string]string{
 			"old_password": "correct horse battery staple", "new_password": "new password long enough",

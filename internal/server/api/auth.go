@@ -22,8 +22,10 @@ const errLoginUnauthorized = "invalid email or password"
 
 // errPasswordChangeInvalid is the single message returned for every
 // ChangePassword failure — wrong old password or a new password that
-// fails the minimum-length policy. service.errInvalidCreds is unexported,
-// so this package cannot (and, per the design's uniform-failure
+// fails the minimum-length policy — mapped to a uniform 422 (design §8's
+// canonical code for the analogous "don't leak which" validation case,
+// matching the bootstrap-default path). service.errInvalidCreds is
+// unexported, so this package cannot (and, per the design's uniform-failure
 // philosophy used by login/enroll, should not) distinguish the two.
 const errPasswordChangeInvalid = "invalid old password or new password"
 
@@ -197,7 +199,7 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 	}, func(ctx context.Context, in *passwordInput) (*emptyOutput, error) {
 		u := UserFrom(ctx)
 		if err := deps.Auth.ChangePassword(ctx, u.ID, in.Body.OldPassword, in.Body.NewPassword); err != nil {
-			return nil, huma.Error400BadRequest(errPasswordChangeInvalid)
+			return nil, huma.Error422UnprocessableEntity(errPasswordChangeInvalid)
 		}
 		return &emptyOutput{}, nil
 	})
