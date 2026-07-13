@@ -46,11 +46,12 @@ type Manager struct {
 	log     *slog.Logger
 	hc      *http.Client
 	st      atomic.Pointer[state]
+	sleep   func(ctx context.Context, d time.Duration) bool // returns false if ctx cancelled during the wait
 }
 
 // NewManager constructs a Manager. It performs no network I/O.
 func NewManager(cfg config.OIDCCfg, baseURL string, log *slog.Logger) *Manager {
-	return &Manager{
+	m := &Manager{
 		cfg:     cfg,
 		baseURL: baseURL,
 		log:     log,
@@ -59,6 +60,17 @@ func NewManager(cfg config.OIDCCfg, baseURL string, log *slog.Logger) *Manager {
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
 		},
 	}
+	m.sleep = func(ctx context.Context, d time.Duration) bool {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return true
+		}
+	}
+	return m
 }
 
 // clientCtx returns a context carrying the Manager's bounded HTTP client for
@@ -106,4 +118,29 @@ func (m *Manager) DeviceEnabled() bool {
 	}
 	s := m.st.Load()
 	return m.cfg.Enabled && s != nil && s.deviceAuthURL != ""
+}
+
+// retryBackoff is the capped backoff schedule for discovery retries.
+var retryBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute}
+
+// RetryLoop retries Discover with backoff until it succeeds or ctx is done,
+// then returns. It is a no-op if OIDC is disabled or already ready. Intended to
+// run as a goroutine (server.Run), so an IdP that is down at startup does not
+// block the server; once discovery succeeds, go-oidc's key set self-refreshes.
+func (m *Manager) RetryLoop(ctx context.Context) {
+	if !m.cfg.Enabled || m.Enabled() {
+		return
+	}
+	for i := 0; ; i++ {
+		if err := m.Discover(ctx); err != nil {
+			m.log.LogAttrs(ctx, slog.LevelWarn, "oidc discovery failed; retrying", slog.String("issuer", m.cfg.Issuer), slog.Any("error", err))
+		} else if m.Enabled() {
+			m.log.LogAttrs(ctx, slog.LevelInfo, "oidc provider ready", slog.String("issuer", m.cfg.Issuer))
+			return
+		}
+		d := retryBackoff[min(i, len(retryBackoff)-1)]
+		if !m.sleep(ctx, d) {
+			return // ctx cancelled
+		}
+	}
 }

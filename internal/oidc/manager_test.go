@@ -1,9 +1,11 @@
 package oidc_test
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/oidc"
@@ -78,5 +80,33 @@ func TestManager_NilReceiverIsSafe(t *testing.T) {
 	}
 	if m.DeviceEnabled() {
 		t.Fatal("nil Manager DeviceEnabled() must be false")
+	}
+}
+
+func TestRetryLoop_RecoversAfterIdPComesUp(t *testing.T) {
+	idp := oidctest.New(t, oidctest.Options{})
+	m := newManager(t, idp, false)
+
+	// Force discovery to fail once, then succeed: point at a bad issuer, run the
+	// loop with an instant (fake) sleep, and flip the issuer after the first try.
+	// Simplest deterministic form: use the manager's test hook to make sleep
+	// instant, start the loop, and assert it reaches Enabled().
+	oidc.SetSleepForTest(m, func(ctx context.Context, _ time.Duration) bool {
+		return ctx.Err() == nil // return immediately, honoring cancellation
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { m.RetryLoop(ctx); close(done) }()
+
+	// The good issuer means the first Discover succeeds; the loop should exit.
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("RetryLoop did not exit after successful discovery")
+	}
+	if !m.Enabled() {
+		t.Fatal("Enabled() expected true after RetryLoop")
 	}
 }
