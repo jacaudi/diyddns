@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -101,6 +102,8 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 		u := UserFrom(ctx)
 		code, expiresAt, err := deps.Enroll.CreateCode(ctx, u.ID, in.Body.Label)
 		if err != nil {
+			deps.Log.LogAttrs(ctx, slog.LevelError, "mint enrollment code failed",
+				slog.String("user_id", u.ID), slog.Any("error", err))
 			return nil, huma.Error500InternalServerError("failed to mint enrollment code")
 		}
 		return &mintCodeOutput{Body: mintCodeResponse{Code: code, ExpiresAt: expiresAt}}, nil
@@ -114,6 +117,8 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 		u := UserFrom(ctx)
 		devices, err := deps.Devices.List(ctx, u.ID)
 		if err != nil {
+			deps.Log.LogAttrs(ctx, slog.LevelError, "list devices failed",
+				slog.String("user_id", u.ID), slog.Any("error", err))
 			return nil, huma.Error500InternalServerError("failed to list devices")
 		}
 		views := make([]deviceView, len(devices))
@@ -134,6 +139,8 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 			if errors.Is(err, store.ErrNotFound) {
 				return nil, huma.Error404NotFound("device not found")
 			}
+			deps.Log.LogAttrs(ctx, slog.LevelError, "get device failed",
+				slog.String("user_id", u.ID), slog.String("device_id", in.ID), slog.Any("error", err))
 			return nil, huma.Error500InternalServerError("failed to get device")
 		}
 		return &getDeviceOutput{Body: newDeviceView(dev)}, nil
