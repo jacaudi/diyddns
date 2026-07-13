@@ -140,6 +140,92 @@ func TestCheckin_ChangedIP_AppendsNewHistoryRow(t *testing.T) {
 	}
 }
 
+func TestCheckin_OmittedFamily_PreservesStoredValue(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+	svc := NewCheckinService(st, discardAudit{})
+
+	// Establish a dual-stack device: both families stored.
+	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4", IPv6: "2001:db8::1"}); err != nil {
+		t.Fatalf("seed dual-stack Checkin: %v", err)
+	}
+
+	// A client that confirms only IPv4 omits IPv6 (sends ""). The stored
+	// IPv6 must be preserved, not clobbered to NULL.
+	res, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "5.6.7.8"})
+	if err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if !res.Stored {
+		t.Fatal("Checkin: Stored = false, want true (ipv4 changed)")
+	}
+	if res.CurrentIPv4 != "5.6.7.8" {
+		t.Fatalf("Checkin result CurrentIPv4 = %q, want 5.6.7.8", res.CurrentIPv4)
+	}
+	if res.CurrentIPv6 != "2001:db8::1" {
+		t.Fatalf("Checkin result CurrentIPv6 = %q, want preserved 2001:db8::1", res.CurrentIPv6)
+	}
+
+	updated, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatalf("Devices.GetByID: %v", err)
+	}
+	if updated.CurrentIPv4 != "5.6.7.8" {
+		t.Fatalf("device CurrentIPv4 = %q, want 5.6.7.8", updated.CurrentIPv4)
+	}
+	if updated.CurrentIPv6 != "2001:db8::1" {
+		t.Fatalf("device CurrentIPv6 = %q, want preserved 2001:db8::1 (omitted family must not clobber)", updated.CurrentIPv6)
+	}
+
+	page, err := st.IPHistory().Page(t.Context(), dev.ID, "", 50)
+	if err != nil {
+		t.Fatalf("IPHistory.Page: %v", err)
+	}
+	if len(page.Rows) != 2 {
+		t.Fatalf("ip_history rows = %d, want 2", len(page.Rows))
+	}
+	// Newest row (Page is newest-first) must carry the preserved ipv6.
+	if page.Rows[0].IPv6 != "2001:db8::1" {
+		t.Fatalf("newest ip_history row IPv6 = %q, want preserved 2001:db8::1", page.Rows[0].IPv6)
+	}
+	if page.Rows[0].IPv4 != "5.6.7.8" {
+		t.Fatalf("newest ip_history row IPv4 = %q, want 5.6.7.8", page.Rows[0].IPv4)
+	}
+}
+
+func TestCheckin_OmittedFamilyMatchingStored_IsNoOp(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+	svc := NewCheckinService(st, discardAudit{})
+
+	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4", IPv6: "2001:db8::1"}); err != nil {
+		t.Fatalf("seed dual-stack Checkin: %v", err)
+	}
+
+	// Client re-asserts only IPv4 (unchanged) and omits IPv6. Effective
+	// values equal the stored values → no-op, no new row.
+	res, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4"})
+	if err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if res.Stored {
+		t.Fatal("Checkin: Stored = true, want false (effective values unchanged)")
+	}
+	if res.CurrentIPv6 != "2001:db8::1" {
+		t.Fatalf("Checkin result CurrentIPv6 = %q, want 2001:db8::1", res.CurrentIPv6)
+	}
+
+	page, err := st.IPHistory().Page(t.Context(), dev.ID, "", 50)
+	if err != nil {
+		t.Fatalf("IPHistory.Page: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("ip_history rows = %d, want 1 (no new row on effective no-op)", len(page.Rows))
+	}
+}
+
 func TestCheckinService_Self_ReturnsDevice(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")

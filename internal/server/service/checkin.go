@@ -36,10 +36,19 @@ func NewCheckinService(st *store.Store, audit AuditSink) *CheckinService {
 	return &CheckinService{st: st, audit: audit}
 }
 
-// Checkin records a device's reported IP addresses. If r.IPv4/r.IPv6 match
-// the device's currently-stored addresses, nothing is written and
-// CheckinResult.Stored is false. Otherwise the device's IP/metadata fields
-// (and last_seen_at) are updated and a new ip_history row is appended.
+// Checkin records a device's reported IP addresses using merge-on-empty
+// semantics: an omitted family (empty IPv4 or IPv6 in the report) means "not
+// asserted this cycle" and preserves the device's stored value — it does not
+// clear it. Change detection runs on these merged effective values; if they
+// match what's already stored, nothing is written and CheckinResult.Stored
+// is false. Otherwise the device's IP/metadata fields (and last_seen_at) are
+// updated to the effective values and a new ip_history row is appended.
+//
+// The merge is load-bearing for a DDNS tracker: the /checkin IP fields are
+// optional (design §5A, "omit if unconfirmed"), and Devices.UpdateIP maps
+// empty→NULL, so writing raw report values would clobber a stored family a
+// single-stack client simply didn't confirm this cycle — silent data loss.
+//
 // Routine check-ins are not audited — auditing is reserved for security-
 // relevant events, and a routine IP report is not one of them.
 func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r CheckinReport) (CheckinResult, error) {
@@ -48,7 +57,17 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
 	}
 
-	if r.IPv4 == dev.CurrentIPv4 && r.IPv6 == dev.CurrentIPv6 {
+	// An omitted family preserves the stored value rather than clearing it.
+	effV4 := r.IPv4
+	if effV4 == "" {
+		effV4 = dev.CurrentIPv4
+	}
+	effV6 := r.IPv6
+	if effV6 == "" {
+		effV6 = dev.CurrentIPv6
+	}
+
+	if effV4 == dev.CurrentIPv4 && effV6 == dev.CurrentIPv6 {
 		return CheckinResult{
 			DeviceID:    dev.ID,
 			CurrentIPv4: dev.CurrentIPv4,
@@ -57,13 +76,13 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 		}, nil
 	}
 
-	if err := s.st.Devices().UpdateIP(ctx, dev.ID, r.IPv4, r.IPv6, r.ClientVersion, r.Hostname, r.OS, store.NowUnix()); err != nil {
+	if err := s.st.Devices().UpdateIP(ctx, dev.ID, effV4, effV6, r.ClientVersion, r.Hostname, r.OS, store.NowUnix()); err != nil {
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
 	}
 	if _, err := s.st.IPHistory().Append(ctx, store.IPHistory{
 		DeviceID:      dev.ID,
-		IPv4:          r.IPv4,
-		IPv6:          r.IPv6,
+		IPv4:          effV4,
+		IPv6:          effV6,
 		ObservedAt:    store.NowUnix(),
 		ClientVersion: r.ClientVersion,
 	}); err != nil {
@@ -72,8 +91,8 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 
 	return CheckinResult{
 		DeviceID:    dev.ID,
-		CurrentIPv4: r.IPv4,
-		CurrentIPv6: r.IPv6,
+		CurrentIPv4: effV4,
+		CurrentIPv6: effV6,
 		Stored:      true,
 	}, nil
 }
