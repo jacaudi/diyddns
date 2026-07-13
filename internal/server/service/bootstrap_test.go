@@ -222,6 +222,27 @@ func TestBootstrapService_Consume_AtomicGate_SecondConsumeFailsExactlyOneAdmin(t
 	}
 }
 
+func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
+	st := openTestStore(t) // service package's helper: migrated :memory: store
+	// Seed a non-admin user (simulating an OIDC signup) so len(users) > 0
+	// but AdminExists == false.
+	if _, err := st.Users().Create(t.Context(), store.User{
+		Email: "oidc-user@example.com", Role: "user", OIDCProvider: "https://idp", OIDCSubject: "sub-1",
+	}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	var emitted string
+	svc := NewBootstrapService(st, config.BootstrapCfg{}, testPasswordCfg(), discardLogger(), NewAuditWriter(st), func(tok string) { emitted = tok })
+
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	if emitted == "" {
+		t.Fatal("expected a bootstrap token to be emitted when users exist but no admin does; got none")
+	}
+}
+
 func TestBootstrapService_AdminExists(t *testing.T) {
 	st := openTestStore(t)
 	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, nil)

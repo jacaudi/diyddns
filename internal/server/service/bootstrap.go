@@ -83,18 +83,18 @@ func (s *BootstrapService) AdminExists(ctx context.Context) (bool, error) {
 }
 
 // Startup runs once at process start, before the server begins listening.
-// If any user already exists, it is a no-op (repeated calls across restarts
+// If an admin already exists, it is a no-op (repeated calls across restarts
 // must not re-bootstrap). Otherwise it creates the admin from env-supplied
 // credentials if both are set (headless path), or mints a single-use
 // bootstrap token and delivers it via emitToken (interactive path). If an
 // unconsumed token already exists from a prior run, it is left as-is — the
 // plaintext cannot be reprinted, so Startup only logs a pending reminder.
 func (s *BootstrapService) Startup(ctx context.Context) error {
-	users, err := s.st.Users().List(ctx)
+	hasAdmin, err := s.AdminExists(ctx)
 	if err != nil {
 		return fmt.Errorf("service.Startup: %w", err)
 	}
-	if len(users) > 0 {
+	if hasAdmin {
 		return nil
 	}
 
