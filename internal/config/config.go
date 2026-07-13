@@ -8,6 +8,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ type Auth struct {
 	HMAC      HMACCfg
 	Password  PasswordCfg
 	Bootstrap BootstrapCfg
+	OIDC      OIDCCfg
 }
 
 // SessionCfg holds browser session cookie settings.
@@ -82,6 +84,19 @@ type BootstrapCfg struct {
 	AdminPassword string `mapstructure:"admin_password"`
 }
 
+// OIDCCfg holds single-provider OpenID Connect settings. client_secret is
+// supplied via DIYDDNS_AUTH_OIDC_CLIENT_SECRET and is never logged.
+type OIDCCfg struct {
+	Enabled         bool
+	Required        bool // fail-closed startup if discovery fails (default false)
+	Issuer          string
+	ClientID        string `mapstructure:"client_id"`
+	ClientSecret    string `mapstructure:"client_secret"`
+	Scopes          []string
+	AutoLinkByEmail bool `mapstructure:"auto_link_by_email"`
+	AllowOIDCSignup bool `mapstructure:"allow_oidc_signup"`
+}
+
 // keyDefaults enumerates every config key, its default, and its env var. Keys
 // with a corresponding CLI flag (server.listen) still carry a SetDefault here;
 // viper ranks SetDefault above an unchanged flag's default, so a changed flag
@@ -110,6 +125,17 @@ var keyDefaults = map[string]any{
 	"auth.password.min_length":         12,
 	"auth.bootstrap.admin_email":       "",
 	"auth.bootstrap.admin_password":    "",
+	"auth.oidc.enabled":                false,
+	"auth.oidc.required":               false,
+	"auth.oidc.issuer":                 "",
+	"auth.oidc.client_id":              "",
+	"auth.oidc.client_secret":          "",
+	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
+	// (viper delivers env values as a single string, not []string). Configure
+	// scopes via YAML or flags; the default covers the common case.
+	"auth.oidc.scopes":             []string{"openid", "profile", "email"},
+	"auth.oidc.auto_link_by_email": true,
+	"auth.oidc.allow_oidc_signup":  true,
 }
 
 // Load resolves configuration into a Server. Callers may pre-configure v (e.g.
@@ -151,7 +177,29 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, fmt.Errorf("config: auth.hmac.nonce_ttl (%s) must be >= auth.hmac.skew_window (%s)",
 			cfg.Auth.HMAC.NonceTTL, cfg.Auth.HMAC.SkewWindow)
 	}
+	if err := validateOIDC(cfg); err != nil {
+		return Server{}, err
+	}
 	return cfg, nil
+}
+
+// validateOIDC enforces the auth.oidc.* invariants when OIDC is enabled.
+// Extracted from Load to keep Load's cyclomatic complexity under the
+// project's gocyclo threshold (.golangci.yml, min-complexity: 15).
+func validateOIDC(cfg Server) error {
+	if !cfg.Auth.OIDC.Enabled {
+		return nil
+	}
+	if cfg.Auth.OIDC.Issuer == "" || cfg.Auth.OIDC.ClientID == "" || cfg.Auth.OIDC.ClientSecret == "" {
+		return fmt.Errorf("config: auth.oidc.enabled requires issuer, client_id, and client_secret")
+	}
+	if cfg.Server.BaseURL == "" {
+		return fmt.Errorf("config: auth.oidc.enabled requires server.base_url (for the OIDC redirect_uri)")
+	}
+	if !slices.Contains(cfg.Auth.OIDC.Scopes, "openid") {
+		return fmt.Errorf("config: auth.oidc.scopes must include \"openid\"")
+	}
+	return nil
 }
 
 // DecodeSecretKey decodes the base64 AEAD master key and requires exactly 32
