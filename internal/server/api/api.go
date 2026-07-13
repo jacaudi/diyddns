@@ -60,10 +60,6 @@ func registerAgentOps(a huma.API, deps ServerDeps) {
 	registerCheckinOps(a, deps)
 }
 
-// registerDeviceOps registers the device management operations onto apiAPI.
-// Empty stub — filled in by Task 14.
-func registerDeviceOps(_ huma.API, _ ServerDeps) {}
-
 // groupConfig returns a huma.Config whose OpenAPI, Docs, and Schemas paths are
 // all prefixed under prefix. Distinct SchemasPath per group is REQUIRED: both
 // APIs share one ServeMux, and two APIs left at the default "/schemas" would
