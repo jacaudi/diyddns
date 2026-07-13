@@ -151,12 +151,12 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_user ON sessions(user_id);
 CREATE INDEX sessions_expires ON sessions(expires_at);
 
--- devices: per-user; HMAC secret stored as argon2id hash for cold-storage protection
+-- devices: per-user; HMAC secret stored AES-256-GCM-sealed for cold-storage protection (see §5A; Plan 04 D1)
 CREATE TABLE devices (
   id              TEXT PRIMARY KEY,            -- UUIDv7
   user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   label           TEXT NOT NULL,               -- user-supplied
-  secret_hash     TEXT NOT NULL,               -- argon2id of HMAC secret
+  secret_hash     TEXT NOT NULL,               -- base64(AES-256-GCM(nonce||ct)) of the HMAC secret, under auth.hmac.secret_key
   current_ipv4    TEXT,
   current_ipv6    TEXT,
   hostname        TEXT,                        -- client-reported
@@ -225,8 +225,10 @@ CREATE TABLE bootstrap (
 
 ### Notes on data model
 
-- HMAC secret is **never stored in plaintext** — only the argon2id hash. The
-  secret is shown to the client exactly once at enrollment.
+- HMAC secret is **never stored in plaintext** — only AES-256-GCM-sealed under
+  the server master key `auth.hmac.secret_key` (Plan 04 D1; argon2id cannot be
+  used here because HMAC verification needs the recoverable secret bytes and
+  argon2id is one-way). The secret is shown to the client exactly once at enrollment.
 - `ip_history` is append-only on change; retention pruning respects "always keep
   latest" by excluding `MAX(id) per device_id` from delete.
 - `replay_nonces` self-prunes via a periodic background job (entries expire within
@@ -376,17 +378,24 @@ SHA256(BODY)        ← lowercase hex; empty body → SHA256("")
    with `expires_at = timestamp + 120s`.
 4. Verify HMAC. To keep the hot path fast, the server maintains an in-memory
    per-process cache `device_id → HMAC secret bytes`. The cache is populated
-   lazily after a one-time argon2id verify on cold-start or first use; entries
-   are evicted on secret rotation, device disable, and cache eviction events.
+   lazily by **AES-256-GCM-decrypting the stored `secret_hash`** under
+   `auth.hmac.secret_key` on cold-start or first use (this repopulates cleanly
+   after a restart — Plan 04 D1/D2); entries are evicted on secret rotation and
+   device disable. (Plan 04 note: nonce insertion happens **after** a successful
+   constant-time signature compare, so forged requests never write `replay_nonces` — D3.)
 5. Constant-time compare. On success: update `last_seen_at`; append `ip_history`
-   row only if v4 or v6 changed.
+   row only if v4 or v6 changed. (A reported family that is empty/omitted is
+   treated as "unconfirmed" and preserves the stored value — it never clears it.)
 
 **Why this scheme:**
 
 - Replay-resistant (timestamp + nonce, both bounded by skew window).
-- Cold-storage of the secret is protected (argon2id at rest).
+- Cold-storage of the secret is protected (AES-256-GCM at rest; a DB copy
+  without `auth.hmac.secret_key` yields nothing).
 - Hot path is HMAC-SHA256 only — fast even at scale.
-- Loss of the secret = re-enrollment; no recoverable plaintext.
+- Loss of a device's secret = re-enrollment. Loss of the server master key
+  `auth.hmac.secret_key` = all devices must re-enroll; key rotation (re-sealing
+  every stored secret) is out-of-scope future work.
 
 ### B. Browser → server (cookie sessions + CSRF, on `/api/v1/*`)
 
@@ -708,7 +717,8 @@ auth:
     ttl: 720h                   # 30 days, sliding
   hmac:
     skew_window: 120s
-    nonce_ttl: 120s
+    nonce_ttl: 120s              # must be >= skew_window (validated at startup)
+    secret_key: ""              # base64 of 32 bytes (AES-256 master key sealing device secrets); required — server fails closed if empty/invalid. Use ${file:} / ${env:}. (Plan 04 D1/D4)
   password:
     argon2id:
       time: 3
@@ -1048,8 +1058,11 @@ follows Conventional Commits strictly (already specified in Section 13).
 
 ## 10. Security Considerations
 
-- **HMAC at rest:** secrets stored as argon2id only; in-memory cache populated
-  lazily, evicted on rotation/disable.
+- **HMAC at rest:** device secrets stored AES-256-GCM-sealed under the server
+  master key `auth.hmac.secret_key` (never argon2id — HMAC verification needs the
+  recoverable secret bytes; Plan 04 D1). In-memory cache populated lazily by
+  decrypting the stored ciphertext, evicted on rotation/disable. The server fails
+  closed at startup if the master key is missing or not 32 bytes.
 - **Replay defense:** timestamp skew window (120 s) + per-signature nonce table
   (also 120 s) on `/agent/v1/*` authenticated routes.
 - **Password hashing:** argon2id with explicit parameters; minimum length 12;
