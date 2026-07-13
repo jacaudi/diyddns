@@ -28,9 +28,17 @@ type Server struct {
 // Handler builds the fully-wrapped http.Handler: the mux (health + two huma
 // APIs) inside the RequestID → AccessLog → Recover middleware chain. Exported
 // for black-box testing via httptest.
+//
+// ServerDeps is populated with only Log/Store/Info here — the verifier and
+// service layer are wired by Task 15, so every operation-facing field is left
+// at its zero value until then.
 func Handler(log *slog.Logger, st *store.Store) http.Handler {
 	mux := http.NewServeMux()
-	api.Build(mux, log, st, version.Current())
+	api.Build(mux, api.ServerDeps{
+		Log:   log,
+		Store: st,
+		Info:  version.Current(),
+	})
 	return middleware.Chain(mux,
 		middleware.RequestID,
 		middleware.AccessLog(log),

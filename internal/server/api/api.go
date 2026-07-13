@@ -11,22 +11,57 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
+	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
 
-// Build registers both huma APIs and the health handlers onto mux.
-func Build(mux *http.ServeMux, log *slog.Logger, st *store.Store, info version.Info) {
-	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent", info.Version))
-	registerCapabilities(agentAPI, info)
-
-	// UI-facing API: no operations yet (added by later plans). Registering it
-	// now serves an (empty) /api/openapi.json + Scalar docs and reserves the
-	// route-group seam.
-	humago.New(mux, groupConfig("DIYDDNS UI API", "/api", info.Version))
-
-	RegisterHealth(mux, log, st)
+// ServerDeps carries every dependency the API operations need: the store and
+// logger (always populated), the auth verifier/session manager and the
+// service layer (wired by Task 15), and the resolved auth config. Build and
+// the register* op functions read from deps rather than taking individual
+// parameters, so adding an operation never changes Build's signature.
+type ServerDeps struct {
+	Log       *slog.Logger
+	Store     *store.Store
+	Verifier  *auth.Verifier
+	Sessions  *auth.SessionManager
+	Enroll    *service.EnrollmentService
+	Devices   *service.DeviceService
+	Checkin   *service.CheckinService
+	Auth      *service.AuthService
+	Bootstrap *service.BootstrapService
+	Cfg       config.Auth
+	Info      version.Info
 }
+
+// Build registers both huma APIs, their operations, and the health handlers
+// onto mux.
+func Build(mux *http.ServeMux, deps ServerDeps) {
+	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent", deps.Info.Version))
+	registerCapabilities(agentAPI, deps.Info)
+	registerAgentOps(agentAPI, deps)
+
+	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api", deps.Info.Version))
+	registerAuthOps(apiAPI, deps)
+	registerDeviceOps(apiAPI, deps)
+
+	RegisterHealth(mux, deps.Log, deps.Store)
+}
+
+// registerAgentOps registers the agent-facing operations (enroll, checkin,
+// self) onto agentAPI. Empty stub — filled in by Task 12.
+func registerAgentOps(_ huma.API, _ ServerDeps) {}
+
+// registerAuthOps registers the browser auth + bootstrap operations onto
+// apiAPI. Empty stub — filled in by Task 13.
+func registerAuthOps(_ huma.API, _ ServerDeps) {}
+
+// registerDeviceOps registers the device management operations onto apiAPI.
+// Empty stub — filled in by Task 14.
+func registerDeviceOps(_ huma.API, _ ServerDeps) {}
 
 // groupConfig returns a huma.Config whose OpenAPI, Docs, and Schemas paths are
 // all prefixed under prefix. Distinct SchemasPath per group is REQUIRED: both
