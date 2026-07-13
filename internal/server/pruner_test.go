@@ -65,6 +65,25 @@ func TestPrune_RemovesExpiredRecords(t *testing.T) {
 	}
 }
 
+// TestPrune_SweepsOIDCDeviceFlows confirms prune() also sweeps expired
+// oidc_device_flows rows (T15) alongside the three tables covered above.
+func TestPrune_SweepsOIDCDeviceFlows(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+
+	if _, err := st.OIDCDeviceFlows().Create(ctx, store.OIDCDeviceFlow{
+		FlowID: "old", DeviceCode: "d", Interval: 5, ExpiresAt: 1, CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("OIDCDeviceFlows().Create: %v", err)
+	}
+
+	prune(ctx, st, discardLog())
+
+	if _, err := st.OIDCDeviceFlows().Get(ctx, "old"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected expired oidc device flow pruned, got %v", err)
+	}
+}
+
 // TestRunPruner_StopsOnContextCancel confirms the ticker goroutine exits
 // promptly once ctx is cancelled — its only shutdown path.
 func TestRunPruner_StopsOnContextCancel(t *testing.T) {

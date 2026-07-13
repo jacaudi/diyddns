@@ -141,6 +141,61 @@ func TestServer_RunShutsDownOnCancel(t *testing.T) {
 	}
 }
 
+// TestServer_OIDCDegradesWhenNotRequired confirms that OIDC enabled with an
+// unreachable IdP does not block startup when Required is false (degrade):
+// Handler builds successfully and capabilities reports oidc_enabled=false
+// since discovery never ran synchronously (only RetryLoop, started by Run,
+// would retry it in the background).
+func TestServer_OIDCDegradesWhenNotRequired(t *testing.T) {
+	cfg := testConfig(t, validSecretKey())
+	cfg.Server.BaseURL = "https://ddns.example.com"
+	cfg.Auth.OIDC = config.OIDCCfg{
+		Enabled:      true,
+		Required:     false,
+		Issuer:       "http://127.0.0.1:1/nope",
+		ClientID:     "x",
+		ClientSecret: "y",
+		Scopes:       []string{"openid"},
+	}
+
+	handler, err := server.Handler(cfg, memStore(t), discard())
+	if err != nil {
+		t.Fatalf("server.Handler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/agent/v1/capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"oidc_enabled":false`) {
+		t.Errorf("capabilities body = %s, want oidc_enabled:false", body)
+	}
+}
+
+// TestServer_OIDCFailsClosedWhenRequired confirms that OIDC enabled AND
+// required with an unreachable IdP makes Handler fail closed (mirrors the
+// HMAC-key fail-closed path).
+func TestServer_OIDCFailsClosedWhenRequired(t *testing.T) {
+	cfg := testConfig(t, validSecretKey())
+	cfg.Server.BaseURL = "https://ddns.example.com"
+	cfg.Auth.OIDC = config.OIDCCfg{
+		Enabled:      true,
+		Required:     true,
+		Issuer:       "http://127.0.0.1:1/nope",
+		ClientID:     "x",
+		ClientSecret: "y",
+		Scopes:       []string{"openid"},
+	}
+
+	if _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+		t.Fatal("server.Handler() = nil error, want fail-closed error when oidc required but discovery fails")
+	}
+}
+
 // TestServer_ServeBoot is the happy-path serve boot test (follow-up #6): New
 // + Run in a goroutine, hit a real endpoint over the network, cancel, and
 // confirm a clean shutdown.
