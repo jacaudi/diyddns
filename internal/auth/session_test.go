@@ -88,6 +88,19 @@ func TestSession_Authenticate_SlidesExpiry(t *testing.T) {
 	}
 }
 
+func TestSession_Authenticate_DisabledUser(t *testing.T) {
+	// The user is valid at Create time but disabled by the time Authenticate
+	// re-fetches it; a disabled user must fail closed with ErrUnauthorized.
+	sm, _ := newSM(store.User{ID: "u1", Disabled: true})
+	sess, err := sm.Create(t.Context(), "u1", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sm.Authenticate(t.Context(), sess.ID); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("disabled user must be ErrUnauthorized, got %v", err)
+	}
+}
+
 func TestSession_Expired(t *testing.T) {
 	sm, ms := newSM(store.User{ID: "u1"})
 	sess, _ := sm.Create(t.Context(), "u1", "", "")
