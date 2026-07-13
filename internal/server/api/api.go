@@ -11,21 +11,53 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
+	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
 
-// Build registers both huma APIs and the health handlers onto mux.
-func Build(mux *http.ServeMux, log *slog.Logger, st *store.Store, info version.Info) {
-	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent", info.Version))
-	registerCapabilities(agentAPI, info)
+// ServerDeps carries every dependency the API operations need: the store and
+// logger (always populated), the auth verifier/session manager and the
+// service layer (wired by Task 15), and the resolved auth config. Build and
+// the register* op functions read from deps rather than taking individual
+// parameters, so adding an operation never changes Build's signature.
+type ServerDeps struct {
+	Log       *slog.Logger
+	Store     *store.Store
+	Verifier  *auth.Verifier
+	Sessions  *auth.SessionManager
+	Enroll    *service.EnrollmentService
+	Devices   *service.DeviceService
+	Checkin   *service.CheckinService
+	Auth      *service.AuthService
+	Bootstrap *service.BootstrapService
+	Cfg       config.Auth
+	Info      version.Info
+}
 
-	// UI-facing API: no operations yet (added by later plans). Registering it
-	// now serves an (empty) /api/openapi.json + Scalar docs and reserves the
-	// route-group seam.
-	humago.New(mux, groupConfig("DIYDDNS UI API", "/api", info.Version))
+// Build registers both huma APIs, their operations, and the health handlers
+// onto mux.
+func Build(mux *http.ServeMux, deps ServerDeps) {
+	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent", deps.Info.Version))
+	registerCapabilities(agentAPI, deps.Info)
+	registerAgentOps(agentAPI, deps)
 
-	RegisterHealth(mux, log, st)
+	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api", deps.Info.Version))
+	registerAuthOps(apiAPI, deps)
+	registerDeviceOps(apiAPI, deps)
+
+	RegisterHealth(mux, deps.Log, deps.Store)
+}
+
+// registerAgentOps registers the agent-facing operations (enroll, checkin,
+// self) onto agentAPI. Each vertical is isolated in its own file
+// (enroll.go, checkin.go) so a future agent op is a new file plus a line
+// here, not an edit to an existing one.
+func registerAgentOps(a huma.API, deps ServerDeps) {
+	registerEnrollOps(a, deps)
+	registerCheckinOps(a, deps)
 }
 
 // groupConfig returns a huma.Config whose OpenAPI, Docs, and Schemas paths are

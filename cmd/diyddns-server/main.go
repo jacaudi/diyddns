@@ -13,6 +13,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/server"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
@@ -73,11 +74,20 @@ func serveCmd() *cobra.Command {
 			}
 			defer func() { _ = st.Close() }()
 
+			bootstrap := service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, service.NewAuditWriter(st), nil)
+			if err := bootstrap.Startup(ctx); err != nil {
+				return fmt.Errorf("bootstrap startup: %w", err)
+			}
+
 			log.LogAttrs(ctx, slog.LevelInfo, "starting diyddns-server",
 				slog.String("version", version.Current().String()),
 				slog.String("listen", cfg.Server.Listen),
 			)
-			return server.New(cfg, st, log).Run(ctx)
+			srv, err := server.New(cfg, st, log)
+			if err != nil {
+				return err // already wrapped with "server: ..." context by New/Handler
+			}
+			return srv.Run(ctx)
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "", "path to server config file")
