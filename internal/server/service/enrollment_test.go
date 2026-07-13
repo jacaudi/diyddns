@@ -288,6 +288,28 @@ func TestEnrollCredentials_UnknownEmailErrors(t *testing.T) {
 	}
 }
 
+func TestEnrollForUser_MintsSealedDeviceWithAudit(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "u@x.com", "user")
+	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
+
+	res, err := svc.EnrollForUser(t.Context(), usr.ID, "device.enroll.oidc", ClientMeta{Hostname: "homelab"})
+	if err != nil {
+		t.Fatalf("EnrollForUser: %v", err)
+	}
+	if res.DeviceID == "" || len(res.Secret) != 32 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	dev, err := st.Devices().GetByID(t.Context(), res.DeviceID)
+	if err != nil {
+		t.Fatalf("Devices.GetByID: %v", err)
+	}
+	if dev.UserID != usr.ID || dev.Label != "homelab" {
+		t.Fatalf("device not created correctly: %+v", dev)
+	}
+}
+
 func TestEnrollCredentials_DisabledUserErrors(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUserWithPassword(t, st, "a@b.co", "user", "correct horse battery staple")

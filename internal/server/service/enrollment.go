@@ -163,6 +163,30 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 	return EnrollResult{DeviceID: dev.ID, Secret: secret}, nil
 }
 
+// EnrollForUser mints and seals a fresh device for an already-authenticated
+// user — the shared tail of every non-code enrollment path (e.g. the OIDC
+// device-code poll). label defaults to meta.Hostname, or "device" when
+// empty. eventType is the audit event to record (e.g.
+// "device.enroll.oidc"), letting each authenticated path own its own audit
+// trail while sharing this single enrollment operation.
+func (s *EnrollmentService) EnrollForUser(ctx context.Context, userID, eventType string, meta ClientMeta) (EnrollResult, error) {
+	label := meta.Hostname
+	if label == "" {
+		label = "device"
+	}
+	dev, secret, err := s.createSealedDevice(ctx, userID, label, meta)
+	if err != nil {
+		return EnrollResult{}, fmt.Errorf("service.EnrollForUser: %w", err)
+	}
+	s.audit.Log(ctx, store.AuditEntry{
+		ActorUserID: userID,
+		EventType:   eventType,
+		TargetType:  "device",
+		TargetID:    dev.ID,
+	})
+	return EnrollResult{DeviceID: dev.ID, Secret: secret}, nil
+}
+
 // EnrollCredentials authenticates a user by email/password and enrolls a new
 // device for them — the credential-based counterpart to ConsumeCode. label
 // defaults to "device" when meta.Hostname is empty.
