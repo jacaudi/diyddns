@@ -60,10 +60,6 @@ func registerAgentOps(a huma.API, deps ServerDeps) {
 	registerCheckinOps(a, deps)
 }
 
-// registerAuthOps registers the browser auth + bootstrap operations onto
-// apiAPI. Empty stub — filled in by Task 13.
-func registerAuthOps(_ huma.API, _ ServerDeps) {}
-
 // registerDeviceOps registers the device management operations onto apiAPI.
 // Empty stub — filled in by Task 14.
 func registerDeviceOps(_ huma.API, _ ServerDeps) {}
