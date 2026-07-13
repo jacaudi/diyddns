@@ -52,8 +52,13 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 }
 
 // registerAgentOps registers the agent-facing operations (enroll, checkin,
-// self) onto agentAPI. Empty stub — filled in by Task 12.
-func registerAgentOps(_ huma.API, _ ServerDeps) {}
+// self) onto agentAPI. Each vertical is isolated in its own file
+// (enroll.go, checkin.go) so a future agent op is a new file plus a line
+// here, not an edit to an existing one.
+func registerAgentOps(a huma.API, deps ServerDeps) {
+	registerEnrollOps(a, deps)
+	registerCheckinOps(a, deps)
+}
 
 // registerAuthOps registers the browser auth + bootstrap operations onto
 // apiAPI. Empty stub — filled in by Task 13.
