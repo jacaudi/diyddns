@@ -1,0 +1,98 @@
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/jacaudi/diyddns/internal/client/credentials"
+)
+
+// oidcMockServer answers capabilities + start + (first-poll) success.
+func oidcMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/v1/capabilities":
+			_, _ = w.Write([]byte(`{"oidc_enabled":true,"oidc_device_enabled":true}`))
+		case "/agent/v1/enroll/oidc/start":
+			_, _ = w.Write([]byte(`{"flow_id":"f","user_code":"UC","verification_uri":"https://v","expires_in":300,"interval":5}`))
+		case "/agent/v1/enroll/oidc/poll":
+			_, _ = w.Write([]byte(`{"device_id":"dev_42","secret":"c2VjcmV0"}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func runEnroll(t *testing.T, args ...string) error {
+	t.Helper()
+	root := newRootCmd()
+	root.SetOut(&nopWriter{})
+	root.SetErr(&nopWriter{})
+	root.SetArgs(args)
+	return root.Execute()
+}
+
+type nopWriter struct{}
+
+func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestEnrollOIDCEndToEnd(t *testing.T) {
+	ts := oidcMockServer(t)
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+
+	err := runEnroll(t, "enroll", "--oidc", "--server", ts.URL, "--credentials-file", credPath)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	got, err := credentials.Load(credPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.DeviceID != "dev_42" || got.Secret != "c2VjcmV0" || got.ServerURL != ts.URL {
+		t.Errorf("credentials = %+v", got)
+	}
+}
+
+func TestEnrollRefusesExistingCredentials(t *testing.T) {
+	ts := oidcMockServer(t)
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"device_id":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runEnroll(t, "enroll", "--oidc", "--server", ts.URL, "--credentials-file", credPath)
+	if err == nil {
+		t.Fatal("expected refusal without --force")
+	}
+	got, _ := credentials.Load(credPath)
+	if got.DeviceID != "old" {
+		t.Errorf("existing credentials clobbered: %+v", got)
+	}
+}
+
+func TestEnrollDeviceDisabledCapability(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"oidc_enabled":true,"oidc_device_enabled":false}`))
+	}))
+	t.Cleanup(ts.Close)
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	err := runEnroll(t, "enroll", "--oidc", "--server", ts.URL, "--credentials-file", credPath)
+	if err == nil {
+		t.Fatal("expected error when oidc_device_enabled=false")
+	}
+	if _, statErr := os.Stat(credPath); statErr == nil {
+		t.Error("credentials written despite capability gate")
+	}
+}
+
+func TestEnrollRequiresOIDCFlag(t *testing.T) {
+	err := runEnroll(t, "enroll", "--server", "https://x")
+	if err == nil {
+		t.Fatal("expected error without --oidc")
+	}
+}
