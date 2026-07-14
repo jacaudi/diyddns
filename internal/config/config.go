@@ -1,8 +1,9 @@
-// Package config loads the diyddns-server configuration from (in precedence
-// order) command-line flags, DIYDDNS_* environment variables, an optional YAML
-// file, and built-in defaults. The struct is intentionally minimal for the
-// Plan 03 skeleton; new sections (tls, auth, oidc, retention) are added as new
-// fields without restructuring existing callers.
+// Package config loads the diyddns-server and diyddns-client configuration
+// from (in precedence order) command-line flags, DIYDDNS_* environment
+// variables, an optional YAML file, and built-in defaults. The struct is
+// intentionally minimal for the Plan 03 skeleton; new sections (tls, auth,
+// oidc, retention) are added as new fields without restructuring existing
+// callers.
 package config
 
 import (

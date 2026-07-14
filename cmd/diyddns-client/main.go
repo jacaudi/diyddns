@@ -1,26 +1,22 @@
 // Command diyddns-client is the DIYDDNS reporting agent.
-//
-// This file is a Plan 01 scaffold: it exposes only --version. Plan 06
-// (Client) replaces the run path with the real polling loop and enrollment.
 package main
 
 import (
-	"flag"
-	"fmt"
+	"context"
 	"os"
-
-	"github.com/jacaudi/diyddns/internal/version"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	os.Exit(run())
+}
 
-	if *showVersion {
-		fmt.Println("diyddns-client", version.Current().String())
-		return
+func run() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
+		return 1
 	}
-
-	fmt.Fprintln(os.Stderr, "diyddns-client: not yet implemented (Plan 01 scaffold)")
-	os.Exit(2)
+	return 0
 }
