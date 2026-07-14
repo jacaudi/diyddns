@@ -40,7 +40,7 @@ func DefaultPath() (string, error) {
 // Load reads and parses the credentials file. It returns ErrNotFound if the
 // file is absent.
 func Load(path string) (Credentials, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the operator-provided credentials-file location (--credentials-file flag or DefaultPath), not untrusted input; reading it is this function's purpose.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Credentials{}, ErrNotFound
@@ -70,7 +70,7 @@ func Save(path string, c Credentials, force bool) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("credentials: mkdir %s: %w", dir, err)
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(c, "", "  ") // #nosec G117 -- persisting the device secret to credentials.json is the intended design (written atomically at mode 0600); the secret must be on disk for the agent to HMAC-sign later check-ins.
 	if err != nil {
 		return fmt.Errorf("credentials: marshal: %w", err)
 	}
