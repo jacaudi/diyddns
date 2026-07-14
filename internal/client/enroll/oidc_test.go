@@ -179,3 +179,49 @@ func TestDeviceCodeEnrollContextCancel(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+func TestDeviceCodeEnrollIntervalFloor(t *testing.T) {
+	// interval=1 is below the 5s floor → the first sleep must be 5s, not 1s.
+	start := `{"flow_id":"f","user_code":"UC","verification_uri":"https://v","expires_in":300,"interval":1}`
+	c := scriptServer(t, start, []pb{
+		{200, `{"status":"pending"}`},
+		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(clk.slept) != 1 || clk.slept[0] != 5*time.Second { // floored up from 1s
+		t.Errorf("slept = %v, want [5s]", clk.slept)
+	}
+}
+
+func TestDeviceCodeEnrollBadGatewayBumpsInterval(t *testing.T) {
+	// A single 502 bumps the interval by 5s → first sleep is 5s base + 5s = 10s.
+	c := scriptServer(t, startOK, []pb{
+		{502, `{}`},
+		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(clk.slept) != 1 || clk.slept[0] != 10*time.Second { // 5s base + 5s bump
+		t.Errorf("slept = %v, want [10s]", clk.slept)
+	}
+}
+
+func TestDeviceCodeEnrollConsecutive502ResetsOnNon502(t *testing.T) {
+	// Four 502s total, but interleaved by a pending so they never reach three in
+	// a row → the consecutive counter resets and enrollment completes.
+	c := scriptServer(t, startOK, []pb{
+		{502, `{}`}, {502, `{}`},
+		{200, `{"status":"pending"}`}, // resets consecutive502 to 0
+		{502, `{}`}, {502, `{}`},
+		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+		t.Fatalf("interleaved 502s must not trip ErrBadGateway: %v", err)
+	}
+}
