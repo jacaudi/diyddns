@@ -59,8 +59,34 @@ func TestEnrollOIDCEndToEnd(t *testing.T) {
 	}
 }
 
-func TestEnrollRefusesExistingCredentials(t *testing.T) {
+func TestEnrollTrimsTrailingSlashInServerURL(t *testing.T) {
 	ts := oidcMockServer(t)
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+
+	// Pass the server URL WITH a trailing slash; requests must still succeed
+	// (the mock's paths are matched against the trimmed base) and the persisted
+	// ServerURL must be normalized without the trailing slash.
+	err := runEnroll(t, "enroll", "--oidc", "--server", ts.URL+"/", "--credentials-file", credPath)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	got, err := credentials.Load(credPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ServerURL != ts.URL {
+		t.Errorf("ServerURL = %q, want trimmed %q", got.ServerURL, ts.URL)
+	}
+}
+
+func TestEnrollRefusesExistingCredentials(t *testing.T) {
+	// The guard must precede any server contact: point --server at a handler
+	// that fails the test on ANY request, so "credentials exist" short-circuits
+	// before an IdP device authorization could ever be spent.
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not be contacted when credentials exist: %s", r.URL.Path)
+	}))
+	t.Cleanup(ts.Close)
 	credPath := filepath.Join(t.TempDir(), "credentials.json")
 	if err := os.WriteFile(credPath, []byte(`{"device_id":"old"}`), 0o600); err != nil {
 		t.Fatal(err)
