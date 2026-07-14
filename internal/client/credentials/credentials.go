@@ -27,7 +27,8 @@ type Credentials struct {
 	Secret    string `json:"secret"`
 }
 
-// DefaultPath returns the XDG-conforming default credentials path
+// DefaultPath returns the default credentials path under the user's
+// OS-specific config directory, as resolved by os.UserConfigDir
 // (<user-config-dir>/diyddns/credentials.json).
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()

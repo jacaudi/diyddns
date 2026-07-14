@@ -78,6 +78,7 @@ func TestDevicePollStatusMapping(t *testing.T) {
 		{"complete", 200, `{"device_id":"dev","secret":"c2VjcmV0"}`, nil, pollComplete},
 		{"empty200", 200, `{}`, ErrProtocol, 0},
 		{"bad_secret", 200, `{"device_id":"dev","secret":"!!notb64"}`, ErrProtocol, 0},
+		{"malformed_json", 200, `{bad json`, ErrProtocol, 0},
 		{"gone", 410, `{}`, ErrFlowGone, 0},
 		{"rejected", 401, `{}`, ErrRejected, 0},
 		{"idp", 502, `{}`, ErrBadGateway, 0},
