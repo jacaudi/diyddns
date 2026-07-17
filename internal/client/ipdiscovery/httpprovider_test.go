@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,48 @@ func TestHTTPProvider_ParseAndFamilyValidate(t *testing.T) {
 				t.Errorf("Lookup err = nil, want error for %q", tt.body)
 			}
 		})
+	}
+}
+
+func TestHTTPProvider_NonOKStatus(t *testing.T) {
+	// Body is a VALID v4 address so the only way this can fail is the status
+	// check — if that guard were removed, the body would parse fine and this
+	// test would wrongly pass.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("203.0.113.7"))
+	}))
+	defer srv.Close()
+
+	p := NewHTTPProvider(srv.URL, FamilyV4, srv.Client())
+	addr, err := p.Lookup(context.Background())
+	if err == nil {
+		t.Fatal("Lookup err = nil, want error for non-200 status")
+	}
+	if addr.IsValid() {
+		t.Errorf("addr = %v, want invalid on error", addr)
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("err = %v, want it to mention the status code", err)
+	}
+}
+
+func TestHTTPProvider_OversizedBody(t *testing.T) {
+	// maxProviderBody is 4096; send well over that so the io.LimitReader guard
+	// truncates the body before it can be parsed as an IP.
+	oversized := strings.Repeat("9", 5000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(oversized))
+	}))
+	defer srv.Close()
+
+	p := NewHTTPProvider(srv.URL, FamilyV4, srv.Client())
+	addr, err := p.Lookup(context.Background())
+	if err == nil {
+		t.Fatal("Lookup err = nil, want error for oversized body")
+	}
+	if addr.IsValid() {
+		t.Errorf("addr = %v, want invalid on error", addr)
 	}
 }
 
