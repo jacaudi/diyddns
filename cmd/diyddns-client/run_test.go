@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +31,14 @@ func TestRunCmd_Once_EndToEnd(t *testing.T) {
 	var gotDevice string
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotDevice = r.Header.Get(shared.HeaderDevice)
+		body, _ := io.ReadAll(r.Body)
+		// Reconstruct and verify the client's signature exactly as the real
+		// server would, proving run's signing path is wired end-to-end.
+		canonical := shared.CanonicalRequest(r.Method, r.URL.Path,
+			r.Header.Get(shared.HeaderTimestamp), r.Header.Get(shared.HeaderNonce), shared.BodyHashHex(body))
+		if got, want := r.Header.Get(shared.HeaderSignature), shared.Sign(key, canonical); got != want {
+			t.Errorf("signature mismatch: got %s want %s", got, want)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"device_id": gotDevice, "current_ipv4": "203.0.113.7", "current_ipv6": "", "stored": true,
 		})
