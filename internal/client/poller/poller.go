@@ -30,7 +30,6 @@ type Checkiner interface {
 
 // Clock abstracts time for deterministic scheduling tests.
 type Clock interface {
-	Now() time.Time
 	Sleep(ctx context.Context, d time.Duration) error
 }
 
@@ -39,7 +38,6 @@ type systemClock struct{}
 // NewSystemClock returns a real-time Clock.
 func NewSystemClock() Clock { return systemClock{} }
 
-func (systemClock) Now() time.Time { return time.Now() }
 func (systemClock) Sleep(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()

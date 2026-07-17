@@ -67,13 +67,11 @@ func TestRunOnce_AlwaysChecksInWhenQuorum(t *testing.T) {
 
 // fakeClock records sleep durations and cancels after N sleeps.
 type fakeClock struct {
-	now    time.Time
 	sleeps []time.Duration
 	cancel context.CancelFunc
 	stopAt int
 }
 
-func (c *fakeClock) Now() time.Time { return c.now }
 func (c *fakeClock) Sleep(_ context.Context, d time.Duration) error {
 	c.sleeps = append(c.sleeps, d)
 	if len(c.sleeps) >= c.stopAt {
