@@ -126,10 +126,14 @@ func buildDiscoverer(rc config.ClientRunSection) (*ipdiscovery.Discoverer, error
 // deliberately smaller than the server's constructor.
 func newClientLogger(l config.LoggingSection) *slog.Logger {
 	lvl := slog.LevelInfo
-	_ = lvl.UnmarshalText([]byte(l.Level))
+	parseErr := lvl.UnmarshalText([]byte(l.Level))
 	var h slog.Handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
 	if l.Format == "json" {
 		h = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
 	}
-	return slog.New(h)
+	logger := slog.New(h)
+	if parseErr != nil && l.Level != "" {
+		logger.Warn("invalid log level, falling back to info", "level", l.Level, "error", parseErr)
+	}
+	return logger
 }

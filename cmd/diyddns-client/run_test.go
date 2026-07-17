@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
 
@@ -66,6 +69,62 @@ func TestRunCmd_Once_EndToEnd(t *testing.T) {
 	}
 	if gotDevice != "dev-xyz" {
 		t.Errorf("server saw device %q, want dev-xyz", gotDevice)
+	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// whatever was written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+func TestNewClientLogger_InvalidLevelWarns(t *testing.T) {
+	var logger *slog.Logger
+	out := captureStderr(t, func() {
+		logger = newClientLogger(config.LoggingSection{Level: "bogus"})
+	})
+	if logger == nil {
+		t.Fatal("newClientLogger returned nil")
+	}
+	if !strings.Contains(out, "bogus") {
+		t.Errorf("stderr = %q, want it to mention the invalid level %q", out, "bogus")
+	}
+}
+
+func TestNewClientLogger_EmptyLevelNoWarn(t *testing.T) {
+	var logger *slog.Logger
+	out := captureStderr(t, func() {
+		logger = newClientLogger(config.LoggingSection{})
+	})
+	if logger == nil {
+		t.Fatal("newClientLogger returned nil")
+	}
+	if out != "" {
+		t.Errorf("stderr = %q, want no warning when Level is unset", out)
+	}
+}
+
+func TestNewClientLogger_ValidLevelNoWarn(t *testing.T) {
+	var logger *slog.Logger
+	out := captureStderr(t, func() {
+		logger = newClientLogger(config.LoggingSection{Level: "debug"})
+	})
+	if logger == nil {
+		t.Fatal("newClientLogger returned nil")
+	}
+	if out != "" {
+		t.Errorf("stderr = %q, want no warning for a valid level", out)
 	}
 }
 
