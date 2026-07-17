@@ -64,7 +64,7 @@ func TestCheckin_FirstReport_StoresAndAppendsHistory(t *testing.T) {
 	}
 }
 
-func TestCheckin_IdenticalReport_DoesNotStoreOrWrite(t *testing.T) {
+func TestCheckin_IdenticalReport_TouchesLastSeenButNoHistory(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
@@ -74,12 +74,13 @@ func TestCheckin_IdenticalReport_DoesNotStoreOrWrite(t *testing.T) {
 	if _, err := svc.Checkin(t.Context(), dev.ID, report); err != nil {
 		t.Fatalf("first Checkin: %v", err)
 	}
-	beforeSecond, err := st.Devices().GetByID(t.Context(), dev.ID)
-	if err != nil {
-		t.Fatalf("Devices.GetByID: %v", err)
+	// Rewind last_seen_at to a known-old value so the liveness advance is
+	// observable despite NowUnix() second-granularity.
+	if err := st.Devices().Touch(t.Context(), dev.ID, 1000); err != nil {
+		t.Fatalf("rewind Touch: %v", err)
 	}
 
-	res, err := svc.Checkin(t.Context(), dev.ID, report)
+	res, err := svc.Checkin(t.Context(), dev.ID, report) // unchanged IP
 	if err != nil {
 		t.Fatalf("second Checkin: %v", err)
 	}
@@ -90,6 +91,7 @@ func TestCheckin_IdenticalReport_DoesNotStoreOrWrite(t *testing.T) {
 		t.Fatalf("Checkin result CurrentIPv4 = %q, want 1.2.3.4", res.CurrentIPv4)
 	}
 
+	// ip_history still does NOT grow on an unchanged check-in.
 	page, err := st.IPHistory().Page(t.Context(), dev.ID, "", 50)
 	if err != nil {
 		t.Fatalf("IPHistory.Page: %v", err)
@@ -98,15 +100,13 @@ func TestCheckin_IdenticalReport_DoesNotStoreOrWrite(t *testing.T) {
 		t.Fatalf("ip_history rows = %d, want 1 (no new row on unchanged checkin)", len(page.Rows))
 	}
 
+	// last_seen_at DID advance past the rewound value (liveness; #12).
 	after, err := st.Devices().GetByID(t.Context(), dev.ID)
 	if err != nil {
 		t.Fatalf("Devices.GetByID: %v", err)
 	}
-	if after.LastSeenAt != beforeSecond.LastSeenAt {
-		t.Fatalf("device LastSeenAt changed on unchanged checkin: before=%d after=%d", beforeSecond.LastSeenAt, after.LastSeenAt)
-	}
-	if after.UpdatedAt != beforeSecond.UpdatedAt {
-		t.Fatalf("device UpdatedAt changed on unchanged checkin: before=%d after=%d", beforeSecond.UpdatedAt, after.UpdatedAt)
+	if after.LastSeenAt <= 1000 {
+		t.Fatalf("device LastSeenAt did not advance on unchanged check-in: got %d, want > 1000", after.LastSeenAt)
 	}
 }
 

@@ -239,6 +239,27 @@ func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion
 	return nil
 }
 
+// Touch advances last_seen_at (and updated_at) for a device without changing
+// its IP addresses — the liveness signal for a routine, unchanged check-in.
+// Returns ErrNotFound if no row matched.
+func (r *DeviceRepo) Touch(ctx context.Context, id string, lastSeenAt int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET last_seen_at = ?, updated_at = ? WHERE id = ?`,
+		nullIfZero(lastSeenAt), NowUnix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("devices.Touch: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("devices.Touch: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("devices.Touch: %w", ErrNotFound)
+	}
+	return nil
+}
+
 // Rename updates the label of a device.
 // Returns ErrNotFound if no row matched, ErrConflict on UNIQUE violation.
 func (r *DeviceRepo) Rename(ctx context.Context, id, newLabel string) error {
