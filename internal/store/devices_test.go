@@ -477,7 +477,39 @@ func TestDeviceDeleteAndCascadesToIPHistory(t *testing.T) {
 	}
 }
 
-// ---------- 15. FK cascade on user delete ----------
+// ---------- 15. Touch advances last_seen_at without an IP change ----------
+
+func TestDeviceRepo_Touch(t *testing.T) {
+	s, ctx := newTestStore(t)
+	u, err := s.Users().Create(ctx, User{Email: "touch@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	dev, err := s.Devices().Create(ctx, Device{UserID: u.ID, Label: "box"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+
+	if err := s.Devices().Touch(ctx, dev.ID, 1_700_000_000); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	got, err := s.Devices().GetByID(ctx, dev.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.LastSeenAt != 1_700_000_000 {
+		t.Errorf("LastSeenAt = %d, want 1700000000", got.LastSeenAt)
+	}
+	if got.UpdatedAt == 0 {
+		t.Errorf("UpdatedAt not set")
+	}
+
+	if err := s.Devices().Touch(ctx, "nonexistent", 1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Touch(missing) err = %v, want ErrNotFound", err)
+	}
+}
+
+// ---------- 16. FK cascade on user delete ----------
 
 func TestDeviceFKCascadeOnUserDelete(t *testing.T) {
 	s, ctx := newTestStore(t)
