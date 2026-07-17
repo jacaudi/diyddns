@@ -10,6 +10,6 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true, // don't dump usage on a runtime error
 		SilenceErrors: false,
 	}
-	root.AddCommand(newVersionCmd(), newEnrollCmd())
+	root.AddCommand(newVersionCmd(), newEnrollCmd(), newRunCmd())
 	return root
 }
