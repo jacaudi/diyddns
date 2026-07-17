@@ -69,9 +69,13 @@ func TestHTTPProvider_NonOKStatus(t *testing.T) {
 }
 
 func TestHTTPProvider_OversizedBody(t *testing.T) {
-	// maxProviderBody is 4096; send well over that so the io.LimitReader guard
-	// truncates the body before it can be parsed as an IP.
-	oversized := strings.Repeat("9", 5000)
+	// maxProviderBody is 4096. Put a valid IP AFTER that boundary, behind
+	// leading whitespace: truncated to the first 4096 bytes the body is all
+	// spaces (trims to "" and fails to parse), but the full 5011-byte body
+	// would parse fine as 203.0.113.7. That makes the test's outcome
+	// genuinely depend on the io.LimitReader guard — if the cap were removed
+	// or widened past 5011 bytes, this test would fail.
+	oversized := strings.Repeat(" ", 5000) + "203.0.113.7"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(oversized))
 	}))
