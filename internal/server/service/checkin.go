@@ -68,6 +68,12 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 	}
 
 	if effV4 == dev.CurrentIPv4 && effV6 == dev.CurrentIPv6 {
+		// IP unchanged: still a contact. Advance last_seen_at (liveness) so a
+		// stable-IP device is distinguishable from a dead one (#12). "Last
+		// change" remains derivable from the latest ip_history row.
+		if err := s.st.Devices().Touch(ctx, dev.ID, store.NowUnix()); err != nil {
+			return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
+		}
 		return CheckinResult{
 			DeviceID:    dev.ID,
 			CurrentIPv4: dev.CurrentIPv4,
