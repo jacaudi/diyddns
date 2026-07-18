@@ -55,11 +55,14 @@ wiring (mode dispatch + secure password input) to drive them.
 - **D4 — Extend, don't add packages.** Two methods on the existing
   `enroll.Client` + mode dispatch in the existing `enroll.go` command. No new
   package (that would fragment the enroll client Plan 06 kept as one unit).
-- **D5 — Three mutually-exclusive modes.** Exactly one of
-  `--oidc` / `--code` / `--user` is required (cobra
-  `MarkFlagsMutuallyExclusive` + an explicit "choose one mode" error when none
-  is given). All shared flags (`--server`, `--ca-cert`, `--force`,
-  `--credentials-file`, `--config`) are reused unchanged across modes.
+- **D5 — Three mutually-exclusive modes, enforced declaratively.** Exactly one
+  of `--oidc` / `--code` / `--user` is required, expressed with cobra
+  `MarkFlagsMutuallyExclusive` **+ `MarkFlagsOneRequired`** (both exist in
+  cobra 1.10.2) — no hand-rolled "required flag" validation in `RunE`
+  (go-standards §6). All shared flags (`--server`, `--ca-cert`, `--force`,
+  `--credentials-file`, `--config`) are reused unchanged across modes, and
+  `--server` (or `config server.url`) stays required for the new modes just as
+  for `--oidc`.
 - **D6 — One new sentinel, `ErrEnrollUnauthorized`, for the uniform 401.**
   Other sentinels (`ErrServer`, `ErrProtocol`) are reused. The command maps
   `ErrEnrollUnauthorized` to a friendly non-zero-exit message.
@@ -97,7 +100,10 @@ Mirroring the existing OIDC methods' shape (build request via
 `json.Marshal`→`bytes.NewReader`, POST, `switch` on status, `drainClose`):
 
 ```go
-type Result struct{ DeviceID, Secret string } // Secret is wire base64, verbatim
+// Reuse the EXISTING enroll.Result (declared in oidc.go as
+// {DeviceID, Secret string}; Secret is wire base64, verbatim). Do NOT
+// redeclare it — a second identical declaration in package enroll is a
+// compile error. Only Meta is new.
 type Meta struct{ Hostname, OS, ClientVersion string }
 
 func (c *Client) EnrollCode(ctx context.Context, code string) (Result, error)
@@ -120,6 +126,12 @@ Status mapping (both methods):
 | other non-2xx | `ErrServer` (wrapped with status) |
 | transport error | wrapped `%w` |
 
+> Note: huma validates request bodies and can return 400/422 *before* the
+> handler runs; the catch-all buckets those as `ErrServer`. With the correct
+> DTOs (and the §5 tests asserting exact request bodies) that path should not
+> occur, so this is at most cosmetic operator-message drift — not worth a
+> dedicated sentinel.
+
 ### 3.3 Password-input seam (`cmd/diyddns-client`)
 
 Password acquisition is behind an injectable pure function so all branches are
@@ -131,11 +143,15 @@ func resolvePassword(env string, stdin io.Reader, stderr io.Writer,
                      isTTY func() bool, readHidden func() (string, error)) (string, error)
 ```
 
-Production wiring: `env = os.Getenv("DIYDDNS_ENROLL_PASSWORD")`,
-`stdin = os.Stdin`, `isTTY = term.IsTerminal(fd)`,
-`readHidden = term.ReadPassword(fd)`. `x/term` supplies both TTY detection and
-the no-echo read, so it is the only new dependency; its lone transitive dep
-`x/sys` is already vendored.
+Production wiring, with `fd := int(os.Stdin.Fd())` shared by both closures:
+`env = os.Getenv("DIYDDNS_ENROLL_PASSWORD")`, `stdin = os.Stdin`,
+`isTTY = func() bool { return term.IsTerminal(fd) }`,
+`readHidden = func() (string, error) { b, err := term.ReadPassword(fd); return string(b), err }`.
+(`term.ReadPassword` returns `[]byte`, so the seam's `readHidden func() (string,
+error)` wraps the `[]byte`→`string` conversion; that copy is unzeroable, an
+accepted tradeoff for a short-lived CLI that already permits an env-var
+password.) `x/term` supplies both TTY detection and the no-echo read, so it is
+the only new dependency; its lone transitive dep `x/sys` is already vendored.
 
 ### 3.4 Error handling
 
@@ -148,7 +164,7 @@ the password or the device secret.
 
 | File | Change |
 |------|--------|
-| `internal/client/enroll/client.go` | + `EnrollCode`, `EnrollCredentials`, `Result`, `Meta` |
+| `internal/client/enroll/client.go` | + `EnrollCode`, `EnrollCredentials`, `Meta` (reuses the existing `enroll.Result` from `oidc.go` — do not redeclare) |
 | `internal/client/enroll/errors.go` | + `ErrEnrollUnauthorized` |
 | `internal/client/enroll/client_test.go` | + method tests |
 | `cmd/diyddns-client/enroll.go` | mode dispatch; `resolvePassword`; auto metadata; mutual-exclusivity; extract shared `finishEnroll` (refactor `runOIDCEnroll` onto it) |
@@ -194,7 +210,10 @@ change to the server enroll endpoints (they already exist and are unchanged);
   writes credentials; the created device carries hostname/os/client_version.
 - A wrong code, wrong password, unknown email, or disabled account all surface
   the same uniform "invalid enrollment code or credentials" message.
-- Exactly one of `--oidc`/`--code`/`--user` is accepted; none → a clear error.
+- Exactly one of `--oidc`/`--code`/`--user` is accepted (declarative cobra
+  flag groups); none → a clear error. `--server` (or `config server.url`)
+  remains required for `--code`/`--user`; absent → a clear error before any
+  server contact.
 - Re-enroll without `--force` refuses **before** contacting the server; the
   password is never logged, echoed, or shown in `ps`.
 - `go build`/`go vet`/`gofmt` clean; `golangci-lint run` 0 issues;
@@ -208,4 +227,17 @@ change to the server enroll endpoints (they already exist and are unchanged);
   password-input seam (D2); testing & file map. Decisions D1 (both modes) and
   D2 (secure hidden prompt via x/term, no `--password` flag) were explicit user
   choices via popups.
-- SGE (`sr-go-engineer`, Fable) design review — pending.
+- SGE (`sr-go-engineer`, Fable) design review — **AMEND-BEFORE-PLANNING**, all
+  findings folded. (Important) reuse the existing `enroll.Result` instead of
+  redeclaring it (a second identical declaration in package `enroll` would not
+  compile — `oidc.go` already declares it); enforce mode selection with
+  declarative `MarkFlagsMutuallyExclusive` + `MarkFlagsOneRequired` rather than
+  a hand-rolled `RunE` none-check (go-standards §6). (Minor) corrected the
+  `resolvePassword` production wiring to fd-bound closures with the
+  `[]byte`→`string` note; made `--server`-required explicit for the new modes;
+  noted that a huma 400/422 would be bucketed as `ErrServer` (cosmetic — the
+  tests assert exact request bodies so it should not occur). The reviewer
+  ground-truthed every wire contract, the uniform-401 behavior, the existing
+  idioms, the one-dependency `x/term` footprint (only pulls the already-vendored
+  `x/sys`; provides both `IsTerminal` and `ReadPassword`), and that
+  `deps_test.go` stays green — all confirmed accurate.
