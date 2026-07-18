@@ -5,21 +5,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 
 	"github.com/jacaudi/diyddns/internal/client/credentials"
 	"github.com/jacaudi/diyddns/internal/client/enroll"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/version"
 )
 
-// newEnrollCmd builds the `enroll` command. Only --oidc mode is implemented in
-// Plan 06; --code/--user are future additive modes.
+// newEnrollCmd builds the `enroll` command. Exactly one of --oidc, --code, or
+// --user selects the enrollment mode.
 func newEnrollCmd() *cobra.Command {
 	var (
 		useOIDC    bool
+		code       string
+		email      string
 		serverFlag string
 		caCert     string
 		force      bool
@@ -31,9 +37,6 @@ func newEnrollCmd() *cobra.Command {
 		Short: "Enroll this device with a diyddns server",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if !useOIDC {
-				return fmt.Errorf("only --oidc enrollment is supported in this version")
-			}
 			v := viper.New()
 			if err := v.BindPFlag("server.url", cmd.Flags().Lookup("server")); err != nil {
 				return err
@@ -45,21 +48,70 @@ func newEnrollCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runOIDCEnroll(cmd.Context(), enrollParams{
+			p := enrollParams{
 				out:      cmd.ErrOrStderr(),
 				server:   cfg.Server.URL,
 				caCert:   cfg.Server.CABundle,
 				force:    force,
 				credFile: credFile,
-			})
+			}
+			// Dispatch on cmd.Flags().Changed, not on the flag's value: cobra's
+			// MarkFlagsOneRequired is satisfied by an explicitly-set-but-empty flag
+			// (e.g. `--code ""`), so keying off the value would fall through to the
+			// generic default error even though the user DID choose a mode. Mutual
+			// exclusion (MarkFlagsMutuallyExclusive) guarantees only one of
+			// code/user/oidc can be Changed, so these arms can safely precede
+			// case useOIDC.
+			switch {
+			case cmd.Flags().Changed("code"):
+				if code == "" {
+					return fmt.Errorf("enrollment code must not be empty")
+				}
+				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+					return c.EnrollCode(ctx, code)
+				})
+			case cmd.Flags().Changed("user"):
+				if email == "" {
+					return fmt.Errorf("user email must not be empty")
+				}
+				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+					// Resolve the password INSIDE the op so the credential guard
+					// (which runs before this) can refuse a re-enroll without ever
+					// prompting. Never echoed; never logged.
+					fd := int(os.Stdin.Fd())
+					password, err := resolvePassword(
+						os.Getenv("DIYDDNS_ENROLL_PASSWORD"),
+						os.Stdin,
+						p.out,
+						func() bool { return term.IsTerminal(fd) },
+						func() (string, error) { b, err := term.ReadPassword(fd); return string(b), err },
+					)
+					if err != nil {
+						return enroll.Result{}, err
+					}
+					host, _ := os.Hostname()
+					meta := enroll.Meta{Hostname: host, OS: runtime.GOOS, ClientVersion: version.Current().Version}
+					return c.EnrollCredentials(ctx, email, password, meta)
+				})
+			case useOIDC:
+				return runOIDCEnroll(cmd.Context(), p)
+			default:
+				// Unreachable in normal use (MarkFlagsOneRequired enforces a mode);
+				// defensive for the degenerate --oidc=false case.
+				return fmt.Errorf("choose an enrollment mode: --oidc, --code, or --user")
+			}
 		},
 	}
 	cmd.Flags().BoolVar(&useOIDC, "oidc", false, "use OIDC device-code enrollment")
+	cmd.Flags().StringVar(&code, "code", "", "enroll with a one-time enrollment code")
+	cmd.Flags().StringVar(&email, "user", "", "enroll with a user email + password (password via prompt, stdin, or DIYDDNS_ENROLL_PASSWORD)")
 	cmd.Flags().StringVar(&serverFlag, "server", "", "diyddns server base URL")
 	cmd.Flags().StringVar(&caCert, "ca-cert", "", "PEM CA bundle to trust (self-signed servers)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing credentials.json")
 	cmd.Flags().StringVar(&credFile, "credentials-file", "", "path to credentials.json (default: user config dir)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to client config.yaml")
+	cmd.MarkFlagsMutuallyExclusive("oidc", "code", "user")
+	cmd.MarkFlagsOneRequired("oidc", "code", "user")
 	return cmd
 }
 
@@ -71,7 +123,12 @@ type enrollParams struct {
 	credFile string
 }
 
-func runOIDCEnroll(ctx context.Context, p enrollParams) error {
+// finishEnroll is the shared orchestration for every enroll mode. It resolves the
+// credentials path and refuses to overwrite existing credentials BEFORE any
+// server contact (so a re-enroll without --force spends nothing), normalizes
+// and requires the server URL, builds the enroll client, runs the mode-specific
+// operation, and persists the resulting credentials.
+func finishEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error {
 	credPath := p.credFile
 	if credPath == "" {
 		dp, err := credentials.DefaultPath()
@@ -82,7 +139,7 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 	}
 
 	// Guard existing credentials BEFORE contacting the server, so a re-enroll
-	// without --force never spends an IdP device authorization.
+	// without --force never spends a code/login and never prompts for input.
 	if !p.force {
 		switch _, err := credentials.Load(credPath); {
 		case err == nil:
@@ -102,15 +159,7 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 	if err != nil {
 		return err
 	}
-	caps, err := c.Capabilities(ctx)
-	if err != nil {
-		return fmt.Errorf("contacting server: %w", err)
-	}
-	if !caps.OIDCDeviceEnabled {
-		return fmt.Errorf("server does not support OIDC device enrollment")
-	}
-
-	res, err := enroll.DeviceCodeEnroll(ctx, c, stderrPrompter{w: p.out}, enroll.NewSystemClock())
+	res, err := do(ctx, c)
 	if err != nil {
 		return err
 	}
@@ -123,6 +172,20 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 	}
 	_, _ = fmt.Fprintf(p.out, "Device %s enrolled. Credentials written to %s\n", res.DeviceID, credPath)
 	return nil
+}
+
+// runOIDCEnroll runs the OIDC device-code flow through the shared orchestrator.
+func runOIDCEnroll(ctx context.Context, p enrollParams) error {
+	return finishEnroll(ctx, p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+		caps, err := c.Capabilities(ctx)
+		if err != nil {
+			return enroll.Result{}, fmt.Errorf("contacting server: %w", err)
+		}
+		if !caps.OIDCDeviceEnabled {
+			return enroll.Result{}, fmt.Errorf("server does not support OIDC device enrollment")
+		}
+		return enroll.DeviceCodeEnroll(ctx, c, stderrPrompter{w: p.out}, enroll.NewSystemClock())
+	})
 }
 
 // stderrPrompter renders the device-code prompt for the operator. It never
