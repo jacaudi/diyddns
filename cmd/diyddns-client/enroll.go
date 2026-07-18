@@ -5,21 +5,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 
 	"github.com/jacaudi/diyddns/internal/client/credentials"
 	"github.com/jacaudi/diyddns/internal/client/enroll"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/version"
 )
 
-// newEnrollCmd builds the `enroll` command. Only --oidc mode is implemented in
-// Plan 06; --code/--user are future additive modes.
+// newEnrollCmd builds the `enroll` command. Exactly one of --oidc, --code, or
+// --user selects the enrollment mode.
 func newEnrollCmd() *cobra.Command {
 	var (
 		useOIDC    bool
+		code       string
+		email      string
 		serverFlag string
 		caCert     string
 		force      bool
@@ -31,9 +37,6 @@ func newEnrollCmd() *cobra.Command {
 		Short: "Enroll this device with a diyddns server",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if !useOIDC {
-				return fmt.Errorf("only --oidc enrollment is supported in this version")
-			}
 			v := viper.New()
 			if err := v.BindPFlag("server.url", cmd.Flags().Lookup("server")); err != nil {
 				return err
@@ -45,21 +48,57 @@ func newEnrollCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runOIDCEnroll(cmd.Context(), enrollParams{
+			p := enrollParams{
 				out:      cmd.ErrOrStderr(),
 				server:   cfg.Server.URL,
 				caCert:   cfg.Server.CABundle,
 				force:    force,
 				credFile: credFile,
-			})
+			}
+			switch {
+			case useOIDC:
+				return runOIDCEnroll(cmd.Context(), p)
+			case code != "":
+				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+					return c.EnrollCode(ctx, code)
+				})
+			case email != "":
+				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+					// Resolve the password INSIDE the op so the credential guard
+					// (which runs before this) can refuse a re-enroll without ever
+					// prompting. Never echoed; never logged.
+					fd := int(os.Stdin.Fd())
+					password, err := resolvePassword(
+						os.Getenv("DIYDDNS_ENROLL_PASSWORD"),
+						os.Stdin,
+						p.out,
+						func() bool { return term.IsTerminal(fd) },
+						func() (string, error) { b, err := term.ReadPassword(fd); return string(b), err },
+					)
+					if err != nil {
+						return enroll.Result{}, err
+					}
+					host, _ := os.Hostname()
+					meta := enroll.Meta{Hostname: host, OS: runtime.GOOS, ClientVersion: version.Current().Version}
+					return c.EnrollCredentials(ctx, email, password, meta)
+				})
+			default:
+				// Unreachable in normal use (MarkFlagsOneRequired enforces a mode);
+				// defensive for the degenerate --oidc=false case.
+				return fmt.Errorf("choose an enrollment mode: --oidc, --code, or --user")
+			}
 		},
 	}
 	cmd.Flags().BoolVar(&useOIDC, "oidc", false, "use OIDC device-code enrollment")
+	cmd.Flags().StringVar(&code, "code", "", "enroll with a one-time enrollment code")
+	cmd.Flags().StringVar(&email, "user", "", "enroll with a user email + password (password via prompt, stdin, or DIYDDNS_ENROLL_PASSWORD)")
 	cmd.Flags().StringVar(&serverFlag, "server", "", "diyddns server base URL")
 	cmd.Flags().StringVar(&caCert, "ca-cert", "", "PEM CA bundle to trust (self-signed servers)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing credentials.json")
 	cmd.Flags().StringVar(&credFile, "credentials-file", "", "path to credentials.json (default: user config dir)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to client config.yaml")
+	cmd.MarkFlagsMutuallyExclusive("oidc", "code", "user")
+	cmd.MarkFlagsOneRequired("oidc", "code", "user")
 	return cmd
 }
 
