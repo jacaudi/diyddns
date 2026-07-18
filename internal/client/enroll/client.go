@@ -200,6 +200,57 @@ func (c *Client) OIDCDevicePoll(ctx context.Context, flowID string) (PollResult,
 	}
 }
 
+// EnrollCode enrolls this device with a one-time enrollment code
+// (POST /agent/v1/enroll/code). On success it returns the new device id and
+// its HMAC secret (wire base64, carried verbatim).
+func (c *Client) EnrollCode(ctx context.Context, code string) (Result, error) {
+	payload, err := json.Marshal(struct {
+		Code string `json:"code"`
+	}{Code: code})
+	if err != nil {
+		return Result{}, fmt.Errorf("enroll: code marshal: %w", err)
+	}
+	return c.doEnroll(ctx, "/agent/v1/enroll/code", payload)
+}
+
+// doEnroll POSTs a JSON enrollment request and classifies the response. Both
+// code and credential enrollment share this contract: 200 →
+// {device_id, secret(base64)}; a uniform 401 → ErrEnrollUnauthorized; any
+// other non-2xx → ErrServer.
+func (c *Client) doEnroll(ctx context.Context, path string, payload []byte) (Result, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return Result{}, fmt.Errorf("enroll: request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside drainClose below; bodyclose can't trace Close() through a named helper
+	if err != nil {
+		return Result{}, fmt.Errorf("enroll: post %s: %w", path, err)
+	}
+	defer drainClose(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var b struct {
+			DeviceID string `json:"device_id"`
+			Secret   string `json:"secret"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+			return Result{}, fmt.Errorf("%w: enroll decode: %w", ErrProtocol, err)
+		}
+		if b.DeviceID == "" || b.Secret == "" {
+			return Result{}, fmt.Errorf("%w: empty success body", ErrProtocol)
+		}
+		if _, err := base64.StdEncoding.DecodeString(b.Secret); err != nil {
+			return Result{}, fmt.Errorf("%w: secret not base64", ErrProtocol)
+		}
+		return Result{DeviceID: b.DeviceID, Secret: b.Secret}, nil
+	case http.StatusUnauthorized:
+		return Result{}, ErrEnrollUnauthorized
+	default:
+		return Result{}, fmt.Errorf("%w: enroll status %d", ErrServer, resp.StatusCode)
+	}
+}
+
 // drainClose drains and closes a response body so the connection can be reused.
 func drainClose(rc io.ReadCloser) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<16))

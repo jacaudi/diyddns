@@ -2,6 +2,8 @@ package enroll
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"net/http"
@@ -147,5 +149,69 @@ func TestNewClientCACertTrustsTLSServer(t *testing.T) {
 	}
 	if _, err := trusting.Capabilities(context.Background()); err != nil {
 		t.Fatalf("Capabilities with CA: %v", err)
+	}
+}
+
+func TestClient_EnrollCode_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/agent/v1/enroll/code" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Code string `json:"code"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Code != "ABC-123" {
+			t.Errorf("code = %q, want ABC-123", body.Code)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"device_id": "dev-1",
+			"secret":    base64.StdEncoding.EncodeToString([]byte("rawsecret")),
+		})
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(srv.URL, ClientOptions{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	res, err := c.EnrollCode(context.Background(), "ABC-123")
+	if err != nil {
+		t.Fatalf("EnrollCode: %v", err)
+	}
+	if res.DeviceID != "dev-1" {
+		t.Errorf("DeviceID = %q, want dev-1", res.DeviceID)
+	}
+	if _, err := base64.StdEncoding.DecodeString(res.Secret); err != nil {
+		t.Errorf("Secret is not valid base64: %v", err)
+	}
+}
+
+func TestClient_EnrollCode_StatusMapping(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		wantErr error
+	}{
+		{"unauthorized", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }, ErrEnrollUnauthorized},
+		{"server error", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, ErrServer},
+		{"bad base64 secret", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{"device_id": "d", "secret": "!!!not-base64!!!"})
+		}, ErrProtocol},
+		{"empty body", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{"device_id": "", "secret": ""})
+		}, ErrProtocol},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(tt.handler)
+			defer srv.Close()
+			c, _ := NewClient(srv.URL, ClientOptions{})
+			if _, err := c.EnrollCode(context.Background(), "x"); !errors.Is(err, tt.wantErr) {
+				t.Errorf("err = %v, want %v", err, tt.wantErr)
+			}
+		})
 	}
 }

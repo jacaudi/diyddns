@@ -19,4 +19,8 @@ var (
 	ErrExpired = errors.New("enroll: device code expired before authorization")
 	// ErrProtocol: the server returned a 200 that does not match the contract.
 	ErrProtocol = errors.New("enroll: unexpected server response")
+	// ErrEnrollUnauthorized: the server rejected a code or credential
+	// enrollment (uniform 401 — never distinguishes an invalid/expired/used
+	// code from an unknown email, wrong password, or disabled account).
+	ErrEnrollUnauthorized = errors.New("enroll: invalid enrollment code or credentials")
 )
