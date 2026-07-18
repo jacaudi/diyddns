@@ -120,7 +120,7 @@ func TestEnrollDeviceDisabledCapability(t *testing.T) {
 	}
 }
 
-func TestEnrollRequiresOIDCFlag(t *testing.T) {
+func TestEnrollRequiresAMode(t *testing.T) {
 	err := runEnroll(t, "enroll", "--server", "https://x")
 	if err == nil {
 		t.Fatal("expected error without --oidc")
@@ -269,6 +269,30 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 		cmd.SetErr(&nopWriter{})
 		if err := cmd.ExecuteContext(context.Background()); err == nil {
 			t.Fatal("want error when no mode is set")
+		}
+	})
+	t.Run("explicit empty code gets a specific error, not the generic default", func(t *testing.T) {
+		cmd := newEnrollCmd()
+		cmd.SetArgs([]string{"--code", "", "--server", "https://x"})
+		cmd.SetErr(&nopWriter{})
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil {
+			t.Fatal("want error for --code \"\"")
+		}
+		if err.Error() != "enrollment code must not be empty" {
+			t.Errorf("err = %q, want the specific empty-code message (not the generic default)", err.Error())
+		}
+	})
+	t.Run("explicit empty user gets a specific error, not the generic default", func(t *testing.T) {
+		cmd := newEnrollCmd()
+		cmd.SetArgs([]string{"--user", "", "--server", "https://x"})
+		cmd.SetErr(&nopWriter{})
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil {
+			t.Fatal("want error for --user \"\"")
+		}
+		if err.Error() != "user email must not be empty" {
+			t.Errorf("err = %q, want the specific empty-email message (not the generic default)", err.Error())
 		}
 	})
 }

@@ -153,7 +153,7 @@ func TestNewClientCACertTrustsTLSServer(t *testing.T) {
 }
 
 func TestClient_EnrollCode_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/agent/v1/enroll/code" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -170,13 +170,7 @@ func TestClient_EnrollCode_Success(t *testing.T) {
 			"device_id": "dev-1",
 			"secret":    base64.StdEncoding.EncodeToString([]byte("rawsecret")),
 		})
-	}))
-	defer srv.Close()
-
-	c, err := NewClient(srv.URL, ClientOptions{})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	})
 	res, err := c.EnrollCode(context.Background(), "ABC-123")
 	if err != nil {
 		t.Fatalf("EnrollCode: %v", err)
@@ -190,7 +184,7 @@ func TestClient_EnrollCode_Success(t *testing.T) {
 }
 
 func TestClient_EnrollCredentials_SendsFieldsAndParses(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/agent/v1/enroll/credentials" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -216,10 +210,7 @@ func TestClient_EnrollCredentials_SendsFieldsAndParses(t *testing.T) {
 			"device_id": "dev-9",
 			"secret":    base64.StdEncoding.EncodeToString([]byte("k")),
 		})
-	}))
-	defer srv.Close()
-
-	c, _ := NewClient(srv.URL, ClientOptions{})
+	})
 	res, err := c.EnrollCredentials(context.Background(), "me@example.com", "s3cret",
 		Meta{Hostname: "box", OS: "linux", ClientVersion: "1.2.3"})
 	if err != nil {
@@ -231,11 +222,9 @@ func TestClient_EnrollCredentials_SendsFieldsAndParses(t *testing.T) {
 }
 
 func TestClient_EnrollCredentials_Unauthorized(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-	c, _ := NewClient(srv.URL, ClientOptions{})
+	})
 	_, err := c.EnrollCredentials(context.Background(), "me@example.com", "wrong", Meta{})
 	if !errors.Is(err, ErrEnrollUnauthorized) {
 		t.Errorf("err = %v, want ErrEnrollUnauthorized", err)
@@ -259,9 +248,7 @@ func TestClient_EnrollCode_StatusMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(tt.handler)
-			defer srv.Close()
-			c, _ := NewClient(srv.URL, ClientOptions{})
+			c := newTestClient(t, tt.handler)
 			if _, err := c.EnrollCode(context.Background(), "x"); !errors.Is(err, tt.wantErr) {
 				t.Errorf("err = %v, want %v", err, tt.wantErr)
 			}

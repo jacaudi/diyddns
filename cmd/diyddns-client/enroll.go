@@ -55,14 +55,25 @@ func newEnrollCmd() *cobra.Command {
 				force:    force,
 				credFile: credFile,
 			}
+			// Dispatch on cmd.Flags().Changed, not on the flag's value: cobra's
+			// MarkFlagsOneRequired is satisfied by an explicitly-set-but-empty flag
+			// (e.g. `--code ""`), so keying off the value would fall through to the
+			// generic default error even though the user DID choose a mode. Mutual
+			// exclusion (MarkFlagsMutuallyExclusive) guarantees only one of
+			// code/user/oidc can be Changed, so these arms can safely precede
+			// case useOIDC.
 			switch {
-			case useOIDC:
-				return runOIDCEnroll(cmd.Context(), p)
-			case code != "":
+			case cmd.Flags().Changed("code"):
+				if code == "" {
+					return fmt.Errorf("enrollment code must not be empty")
+				}
 				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
 					return c.EnrollCode(ctx, code)
 				})
-			case email != "":
+			case cmd.Flags().Changed("user"):
+				if email == "" {
+					return fmt.Errorf("user email must not be empty")
+				}
 				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
 					// Resolve the password INSIDE the op so the credential guard
 					// (which runs before this) can refuse a re-enroll without ever
@@ -82,6 +93,8 @@ func newEnrollCmd() *cobra.Command {
 					meta := enroll.Meta{Hostname: host, OS: runtime.GOOS, ClientVersion: version.Current().Version}
 					return c.EnrollCredentials(ctx, email, password, meta)
 				})
+			case useOIDC:
+				return runOIDCEnroll(cmd.Context(), p)
 			default:
 				// Unreachable in normal use (MarkFlagsOneRequired enforces a mode);
 				// defensive for the degenerate --oidc=false case.

@@ -26,6 +26,7 @@ func TestResolvePassword(t *testing.T) {
 		{"hidden prompt on a tty", "", "", yesTTY, func() (string, error) { return "hiddenpw", nil }, "hiddenpw", false},
 		{"empty resolved password errors", "", "\n", neverTTY, failHidden, "", true},
 		{"hidden read error propagates", "", "", yesTTY, failHidden, "", true},
+		{"empty hidden read errors", "", "", yesTTY, func() (string, error) { return "", nil }, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
