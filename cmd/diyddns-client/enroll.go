@@ -71,7 +71,12 @@ type enrollParams struct {
 	credFile string
 }
 
-func runOIDCEnroll(ctx context.Context, p enrollParams) error {
+// finishEnroll is the shared orchestration for every enroll mode. It resolves the
+// credentials path and refuses to overwrite existing credentials BEFORE any
+// server contact (so a re-enroll without --force spends nothing), normalizes
+// and requires the server URL, builds the enroll client, runs the mode-specific
+// operation, and persists the resulting credentials.
+func finishEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error {
 	credPath := p.credFile
 	if credPath == "" {
 		dp, err := credentials.DefaultPath()
@@ -82,7 +87,7 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 	}
 
 	// Guard existing credentials BEFORE contacting the server, so a re-enroll
-	// without --force never spends an IdP device authorization.
+	// without --force never spends a code/login and never prompts for input.
 	if !p.force {
 		switch _, err := credentials.Load(credPath); {
 		case err == nil:
@@ -102,15 +107,7 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 	if err != nil {
 		return err
 	}
-	caps, err := c.Capabilities(ctx)
-	if err != nil {
-		return fmt.Errorf("contacting server: %w", err)
-	}
-	if !caps.OIDCDeviceEnabled {
-		return fmt.Errorf("server does not support OIDC device enrollment")
-	}
-
-	res, err := enroll.DeviceCodeEnroll(ctx, c, stderrPrompter{w: p.out}, enroll.NewSystemClock())
+	res, err := do(ctx, c)
 	if err != nil {
 		return err
 	}
@@ -123,6 +120,20 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 	}
 	_, _ = fmt.Fprintf(p.out, "Device %s enrolled. Credentials written to %s\n", res.DeviceID, credPath)
 	return nil
+}
+
+// runOIDCEnroll runs the OIDC device-code flow through the shared orchestrator.
+func runOIDCEnroll(ctx context.Context, p enrollParams) error {
+	return finishEnroll(ctx, p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+		caps, err := c.Capabilities(ctx)
+		if err != nil {
+			return enroll.Result{}, fmt.Errorf("contacting server: %w", err)
+		}
+		if !caps.OIDCDeviceEnabled {
+			return enroll.Result{}, fmt.Errorf("server does not support OIDC device enrollment")
+		}
+		return enroll.DeviceCodeEnroll(ctx, c, stderrPrompter{w: p.out}, enroll.NewSystemClock())
+	})
 }
 
 // stderrPrompter renders the device-code prompt for the operator. It never

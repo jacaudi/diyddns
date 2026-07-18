@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/client/credentials"
+	"github.com/jacaudi/diyddns/internal/client/enroll"
 )
 
 // oidcMockServer answers capabilities + start + (first-poll) success.
@@ -120,5 +122,62 @@ func TestEnrollRequiresOIDCFlag(t *testing.T) {
 	err := runEnroll(t, "enroll", "--server", "https://x")
 	if err == nil {
 		t.Fatal("expected error without --oidc")
+	}
+}
+
+func TestFinishEnroll_GuardsBeforeContact(t *testing.T) {
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, "credentials.json")
+	// Pre-existing credentials.
+	if err := credentials.Save(credPath, credentials.Credentials{
+		ServerURL: "https://old", DeviceID: "old", Secret: "old",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	p := enrollParams{out: &nopWriter{}, server: "https://x", credFile: credPath, force: false}
+	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+		called = true
+		return enroll.Result{}, nil
+	})
+	if err == nil {
+		t.Fatal("want error when credentials already exist and --force is not set")
+	}
+	if called {
+		t.Error("do() was called — guard must refuse BEFORE contacting the server")
+	}
+}
+
+func TestFinishEnroll_RequiresServer(t *testing.T) {
+	dir := t.TempDir()
+	p := enrollParams{out: &nopWriter{}, server: "", credFile: filepath.Join(dir, "credentials.json")}
+	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+		return enroll.Result{}, nil
+	})
+	if err == nil {
+		t.Fatal("want error when server URL is empty")
+	}
+}
+
+func TestFinishEnroll_SavesOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, "credentials.json")
+	p := enrollParams{out: &nopWriter{}, server: "https://srv/", credFile: credPath}
+	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+		return enroll.Result{DeviceID: "dev-1", Secret: "c2VjcmV0"}, nil
+	})
+	if err != nil {
+		t.Fatalf("finishEnroll: %v", err)
+	}
+	got, err := credentials.Load(credPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.DeviceID != "dev-1" || got.Secret != "c2VjcmV0" {
+		t.Errorf("saved creds = %+v", got)
+	}
+	if got.ServerURL != "https://srv" { // trailing slash normalized off
+		t.Errorf("ServerURL = %q, want https://srv", got.ServerURL)
 	}
 }
