@@ -15,7 +15,7 @@
 
 **Goal:** Add `diyddns-client enroll --code <code>` and `enroll --user <email>` (email+password) modes to the client CLI, completing the code-based enroll path (v1 §14 criterion #2) and the client half of issue #26.
 
-**Architecture:** Additive. Two new methods on the existing unauthenticated `internal/client/enroll.Client` (sharing one private `doEnroll` response handler), one new sentinel, a secure password-input seam, a shared `runEnroll` orchestrator that all three modes (existing `--oidc` + new `--code`/`--user`) route through, and declarative cobra mode-selection. One new module dependency (`golang.org/x/term`).
+**Architecture:** Additive. Two new methods on the existing unauthenticated `internal/client/enroll.Client` (sharing one private `doEnroll` response handler), one new sentinel, a secure password-input seam, a shared `finishEnroll` orchestrator that all three modes (existing `--oidc` + new `--code`/`--user`) route through, and declarative cobra mode-selection. One new module dependency (`golang.org/x/term`).
 
 **Tech Stack:** Go 1.25 (no CGO), stdlib `net/http`/`encoding/json`/`bufio`, `golang.org/x/term` (hidden password read), cobra/viper (already present), stdlib `testing` (table-driven, `-race`).
 
@@ -44,7 +44,7 @@
 ```
 T1 doEnroll + EnrollCode + sentinel ─► T2 EnrollCredentials + Meta ─┐
 T3 resolvePassword seam ────────────────────────────────────────────┤
-T4 runEnroll orchestrator (refactor runOIDCEnroll) ─────────────────┼─► T5 mode dispatch + flags + x/term + e2e
+T4 finishEnroll orchestrator (refactor runOIDCEnroll) ─────────────────┼─► T5 mode dispatch + flags + x/term + e2e
 ```
 Independent starts: **T1, T3, T4.** Order for TodoWrite seeding: T1, T2, T3, T4, T5.
 
@@ -67,9 +67,10 @@ Independent starts: **T1, T3, T4.** Order for TodoWrite seeding: T1, T2, T3, T4,
 - [ ] **Step 1: Write the failing test**
 
 ```go
-// internal/client/enroll/client_test.go — add these tests (imports already
-// include context, encoding/base64, encoding/json, errors, net/http,
-// net/http/httptest, testing; add any that are missing).
+// internal/client/enroll/client_test.go — add these tests. The file currently
+// imports context, encoding/pem, errors, net/http, net/http/httptest, os,
+// path/filepath, testing. These tests additionally need encoding/base64 and
+// encoding/json — ADD both to the import block.
 
 func TestClient_EnrollCode_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -477,40 +478,44 @@ git commit -m "feat(client): add resolvePassword seam (env / piped stdin / hidde
 
 ---
 
-### Task 4: `runEnroll` orchestrator (refactor `runOIDCEnroll`)
+### Task 4: `finishEnroll` orchestrator (refactor `runOIDCEnroll`)
 
 **Files:**
-- Modify: `cmd/diyddns-client/enroll.go` (extract `runEnroll`; rewrite `runOIDCEnroll` to call it)
-- Test: `cmd/diyddns-client/enroll_test.go` (create; test `runEnroll` guard + save via a stub op)
+- Modify: `cmd/diyddns-client/enroll.go` (extract `finishEnroll`; rewrite `runOIDCEnroll` to call it)
+- Modify (APPEND): `cmd/diyddns-client/enroll_test.go`
+
+> **This test file ALREADY EXISTS** (created in Plan 06, ~125 lines). It contains
+> 5 OIDC tests (`TestEnrollOIDCEndToEnd`, `TestEnrollTrimsTrailingSlashInServerURL`,
+> `TestEnrollRefusesExistingCredentials`, `TestEnrollDeviceDisabledCapability`,
+> `TestEnrollRequiresOIDCFlag`), a command-driver **test helper**
+> `func runEnroll(t *testing.T, args ...string) error`, and a `type nopWriter
+> struct{}` (an `io.Writer` sink). **APPEND** the new tests; do NOT overwrite or
+> remove any of these. The production orchestrator is named `finishEnroll`
+> precisely so it does not collide with the existing `runEnroll` test helper.
+> Reuse the existing `nopWriter` for the `io.Writer` seam (do not add a
+> duplicate sink type).
 
 **Interfaces:**
-- Consumes: existing `enrollParams`, `credentials.{DefaultPath,Load,Save,ErrNotFound}`, `enroll.{NewClient,ClientOptions,Result}`.
+- Consumes: existing `enrollParams`, `credentials.{DefaultPath,Load,Save,ErrNotFound}`, `enroll.{NewClient,ClientOptions,Result}`; existing test helper `nopWriter`.
 - Produces:
-  - `func runEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error` — resolves cred path; **refuses to overwrite existing credentials before any server contact** unless `--force`; normalizes+requires the server URL; builds the client; runs `do`; saves credentials; prints a success line. `runOIDCEnroll` becomes a thin caller.
+  - `func finishEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error` — resolves cred path; **refuses to overwrite existing credentials before any server contact** unless `--force`; normalizes+requires the server URL; builds the client; runs `do`; saves credentials; prints a success line. `runOIDCEnroll` becomes a thin caller.
 
 > **Refactor note (behavior-preserving):** the guard-before-contact, server
 > normalization, and `Save` logic currently inline in `runOIDCEnroll`
-> (enroll.go) move verbatim into `runEnroll`. The OIDC-specific capabilities
+> (enroll.go) move verbatim into `finishEnroll`. The OIDC-specific capabilities
 > check + device-code flow become the `do` closure. Because the guard runs
 > *before* `do`, callers may safely resolve a password *inside* `do` (Task 5)
 > without prompting on a re-enroll that the guard will reject.
 
 - [ ] **Step 1: Write the failing test**
 
+Append these to the existing `cmd/diyddns-client/enroll_test.go` (its imports
+already include `context`, `path/filepath`, `testing`, and the `credentials`
+and `enroll` packages — the OIDC tests use them; add none). Reuse the existing
+`nopWriter` sink; do **not** add a duplicate writer type.
+
 ```go
-// cmd/diyddns-client/enroll_test.go
-package main
-
-import (
-	"context"
-	"path/filepath"
-	"testing"
-
-	"github.com/jacaudi/diyddns/internal/client/credentials"
-	"github.com/jacaudi/diyddns/internal/client/enroll"
-)
-
-func TestRunEnroll_GuardsBeforeContact(t *testing.T) {
+func TestFinishEnroll_GuardsBeforeContact(t *testing.T) {
 	dir := t.TempDir()
 	credPath := filepath.Join(dir, "credentials.json")
 	// Pre-existing credentials.
@@ -521,8 +526,8 @@ func TestRunEnroll_GuardsBeforeContact(t *testing.T) {
 	}
 
 	called := false
-	p := enrollParams{out: &discardWriter{}, server: "https://x", credFile: credPath, force: false}
-	err := runEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+	p := enrollParams{out: &nopWriter{}, server: "https://x", credFile: credPath, force: false}
+	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		called = true
 		return enroll.Result{}, nil
 	})
@@ -534,10 +539,10 @@ func TestRunEnroll_GuardsBeforeContact(t *testing.T) {
 	}
 }
 
-func TestRunEnroll_RequiresServer(t *testing.T) {
+func TestFinishEnroll_RequiresServer(t *testing.T) {
 	dir := t.TempDir()
-	p := enrollParams{out: &discardWriter{}, server: "", credFile: filepath.Join(dir, "credentials.json")}
-	err := runEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+	p := enrollParams{out: &nopWriter{}, server: "", credFile: filepath.Join(dir, "credentials.json")}
+	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		return enroll.Result{}, nil
 	})
 	if err == nil {
@@ -545,15 +550,15 @@ func TestRunEnroll_RequiresServer(t *testing.T) {
 	}
 }
 
-func TestRunEnroll_SavesOnSuccess(t *testing.T) {
+func TestFinishEnroll_SavesOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	credPath := filepath.Join(dir, "credentials.json")
-	p := enrollParams{out: &discardWriter{}, server: "https://srv/", credFile: credPath}
-	err := runEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+	p := enrollParams{out: &nopWriter{}, server: "https://srv/", credFile: credPath}
+	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		return enroll.Result{DeviceID: "dev-1", Secret: "c2VjcmV0"}, nil
 	})
 	if err != nil {
-		t.Fatalf("runEnroll: %v", err)
+		t.Fatalf("finishEnroll: %v", err)
 	}
 	got, err := credentials.Load(credPath)
 	if err != nil {
@@ -566,29 +571,28 @@ func TestRunEnroll_SavesOnSuccess(t *testing.T) {
 		t.Errorf("ServerURL = %q, want https://srv", got.ServerURL)
 	}
 }
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 ```
+
+> `nopWriter` is the existing sink type in `enroll_test.go`; `&nopWriter{}`
+> satisfies the `io.Writer` seam regardless of its receiver style.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test ./cmd/diyddns-client/ -run TestRunEnroll -v`
-Expected: FAIL — `runEnroll` undefined.
+Run: `go test ./cmd/diyddns-client/ -run TestFinishEnroll -v`
+Expected: FAIL — `finishEnroll` undefined.
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```go
-// cmd/diyddns-client/enroll.go — add runEnroll and rewrite runOIDCEnroll.
+// cmd/diyddns-client/enroll.go — add finishEnroll and rewrite runOIDCEnroll.
 // (context, errors, fmt, strings, credentials, enroll are already imported.)
 
-// runEnroll is the shared orchestration for every enroll mode. It resolves the
+// finishEnroll is the shared orchestration for every enroll mode. It resolves the
 // credentials path and refuses to overwrite existing credentials BEFORE any
 // server contact (so a re-enroll without --force spends nothing), normalizes
 // and requires the server URL, builds the enroll client, runs the mode-specific
 // operation, and persists the resulting credentials.
-func runEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error {
+func finishEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error {
 	credPath := p.credFile
 	if credPath == "" {
 		dp, err := credentials.DefaultPath()
@@ -635,7 +639,7 @@ func runEnroll(ctx context.Context, p enrollParams, do func(context.Context, *en
 
 // runOIDCEnroll runs the OIDC device-code flow through the shared orchestrator.
 func runOIDCEnroll(ctx context.Context, p enrollParams) error {
-	return runEnroll(ctx, p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+	return finishEnroll(ctx, p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
 		caps, err := c.Capabilities(ctx)
 		if err != nil {
 			return enroll.Result{}, fmt.Errorf("contacting server: %w", err)
@@ -655,14 +659,14 @@ func runOIDCEnroll(ctx context.Context, p enrollParams) error {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `go test ./cmd/diyddns-client/ -run TestRunEnroll -race -v`
+Run: `go test ./cmd/diyddns-client/ -run TestFinishEnroll -race -v`
 Expected: PASS. Also run the full client package to confirm the OIDC refactor didn't regress: `go test ./cmd/diyddns-client/ -race`. Then whole-module `golangci-lint run`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add cmd/diyddns-client/enroll.go cmd/diyddns-client/enroll_test.go
-git commit -m "refactor(client): extract shared runEnroll orchestrator from runOIDCEnroll"
+git commit -m "refactor(client): extract shared finishEnroll orchestrator from runOIDCEnroll"
 ```
 
 ---
@@ -675,14 +679,16 @@ git commit -m "refactor(client): extract shared runEnroll orchestrator from runO
 - Test: `cmd/diyddns-client/enroll_test.go` (add end-to-end `--code` / `--user` + mode-selection tests)
 
 **Interfaces:**
-- Consumes: `runEnroll` (Task 4), `enroll.{EnrollCode,EnrollCredentials,Meta}` (Tasks 1-2), `resolvePassword` (Task 3), `config.LoadClient`, `version.Current`.
+- Consumes: `finishEnroll` (Task 4), `enroll.{EnrollCode,EnrollCredentials,Meta}` (Tasks 1-2), `resolvePassword` (Task 3), `config.LoadClient`, `version.Current`.
 - Produces: `newEnrollCmd()` gains `--code`/`--user` modes with declarative mutual-exclusion; no exported signature change.
 
 - [ ] **Step 1: Write the failing test**
 
 ```go
-// cmd/diyddns-client/enroll_test.go — add. New imports:
-// "encoding/base64", "encoding/json", "net/http", "net/http/httptest", "os".
+// APPEND to the existing cmd/diyddns-client/enroll_test.go. Ensure these
+// imports are present (the OIDC tests may already import some — net/http,
+// net/http/httptest): "encoding/base64", "encoding/json", "net/http",
+// "net/http/httptest", "os". Reuse the existing nopWriter sink.
 
 func TestEnrollCmd_Code_EndToEnd(t *testing.T) {
 	var gotCode string
@@ -702,7 +708,7 @@ func TestEnrollCmd_Code_EndToEnd(t *testing.T) {
 	credPath := filepath.Join(dir, "credentials.json")
 	cmd := newEnrollCmd()
 	cmd.SetArgs([]string{"--code", "ABC-123", "--server", srv.URL, "--credentials-file", credPath})
-	cmd.SetErr(&discardWriter{})
+	cmd.SetErr(&nopWriter{})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("enroll --code: %v", err)
 	}
@@ -739,7 +745,7 @@ func TestEnrollCmd_User_EndToEnd_EnvPassword(t *testing.T) {
 	credPath := filepath.Join(dir, "credentials.json")
 	cmd := newEnrollCmd()
 	cmd.SetArgs([]string{"--user", "me@example.com", "--server", srv.URL, "--credentials-file", credPath})
-	cmd.SetErr(&discardWriter{})
+	cmd.SetErr(&nopWriter{})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("enroll --user: %v", err)
 	}
@@ -758,7 +764,7 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 	t.Run("mutually exclusive", func(t *testing.T) {
 		cmd := newEnrollCmd()
 		cmd.SetArgs([]string{"--code", "x", "--user", "me@example.com", "--server", "https://x"})
-		cmd.SetErr(&discardWriter{})
+		cmd.SetErr(&nopWriter{})
 		if err := cmd.ExecuteContext(context.Background()); err == nil {
 			t.Fatal("want error when two modes are set")
 		}
@@ -766,7 +772,7 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 	t.Run("one required", func(t *testing.T) {
 		cmd := newEnrollCmd()
 		cmd.SetArgs([]string{"--server", "https://x"})
-		cmd.SetErr(&discardWriter{})
+		cmd.SetErr(&nopWriter{})
 		if err := cmd.ExecuteContext(context.Background()); err == nil {
 			t.Fatal("want error when no mode is set")
 		}
@@ -832,11 +838,11 @@ Expected: `go.mod` gains `golang.org/x/term` (and `go.sum` its checksums); `gola
 			case useOIDC:
 				return runOIDCEnroll(cmd.Context(), p)
 			case code != "":
-				return runEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
 					return c.EnrollCode(ctx, code)
 				})
 			case email != "":
-				return runEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
+				return finishEnroll(cmd.Context(), p, func(ctx context.Context, c *enroll.Client) (enroll.Result, error) {
 					// Resolve the password INSIDE the op so the credential guard
 					// (which runs before this) can refuse a re-enroll without ever
 					// prompting. Never echoed; never logged.
@@ -867,6 +873,12 @@ Expected: `go.mod` gains `golang.org/x/term` (and `go.sum` its checksums); `gola
 > and the old inline OIDC body — they are replaced by the switch. Keep the
 > existing shared flags (`--server`, `--ca-cert`, `--force`,
 > `--credentials-file`, `--config`) and `enrollParams`/`stderrPrompter`.
+>
+> **Existing test note:** `TestEnrollRequiresOIDCFlag` (Plan 06) still passes —
+> `enroll --server …` with no mode now errors via `MarkFlagsOneRequired` instead
+> of the old `if !useOIDC` guard. Keep the test (it still asserts a no-mode
+> error); optionally rename it to reflect "a mode is required" rather than
+> "--oidc required". Do not delete it.
 
 - [ ] **Step 5: Run tests + deps guard**
 
@@ -896,7 +908,7 @@ git commit -m "feat(client): add enroll --code and --user modes with secure pass
 - [ ] `golangci-lint run` — 0 issues (whole module).
 - [ ] `go test ./... -race` — all pass.
 - [ ] Client deps guard: `go list -deps ./cmd/diyddns-client | grep -E 'huma|oauth2|go-oidc|go-jose'` → empty; `cmd/diyddns-client/deps_test.go` unchanged and green.
-- [ ] Exactly one new module dependency: `git diff origin/main -- go.mod` shows only `golang.org/x/term` added.
+- [ ] One new *direct* module dependency — `golang.org/x/term` — in `git diff origin/main -- go.mod`. (Adding it may also promote the already-vendored `golang.org/x/sys` from `// indirect` to a direct require, or bump its version; that is benign. The real gate is the forbidden-dep grep above being empty and no huma/oauth2/go-oidc/go-jose appearing.)
 - [ ] Manual smoke (optional): `printf 'pw\n' | diyddns-client enroll --user me@example.com --server <url>` and `diyddns-client enroll --code <code> --server <url>` each write `credentials.json`; the password never appears in `ps`/history.
 
 ## Self-review — spec coverage map
@@ -909,16 +921,16 @@ git commit -m "feat(client): add enroll --code and --user modes with secure pass
 | D4 extend, no new package | T1/T2 (methods on existing `Client`) |
 | D5 declarative mutual-exclusion + one-required | T5 (`MarkFlagsMutuallyExclusive`+`MarkFlagsOneRequired`) |
 | D6 `ErrEnrollUnauthorized` for uniform 401 | T1 (sentinel + `doEnroll` mapping) |
-| D7 shared `finishEnroll`/orchestrator (guard-before-contact + save) | T4 (`runEnroll`, refactor `runOIDCEnroll`) |
+| D7 shared `finishEnroll`/orchestrator (guard-before-contact + save) | T4 (`finishEnroll`, refactor `runOIDCEnroll`) |
 | D8 no capabilities pre-check for code/creds | T1/T2 (`doEnroll` just POSTs) |
 | Reuse existing `enroll.Result` | T1 (only `Meta` added) |
 | One new dep `golang.org/x/term`; `deps_test.go` unchanged | T5 |
 
 ## Review provenance
 
-- Author self-review (spec-coverage map above; type-consistency scan: `Result` reused not redeclared; `doEnroll`/`runEnroll`/`resolvePassword`/`Meta` signatures consistent across tasks; password resolved inside the `--user` op so the guard precedes the prompt).
+- Author self-review (spec-coverage map above; type-consistency scan: `Result` reused not redeclared; `doEnroll`/`finishEnroll`/`resolvePassword`/`Meta` signatures consistent across tasks; password resolved inside the `--user` op so the guard precedes the prompt).
 - Design SGE (`sr-go-engineer`, Fable) review folded (AMEND-BEFORE-PLANNING: reuse `enroll.Result`; declarative flag groups; fd-bound password closures; `--server` required; huma 400/422 bucketing note).
-- Implementation-plan SGE review — pending (recommended before execution, per the Plan 04/05/06 rhythm).
+- Implementation-plan SGE (`sr-go-engineer`, Fable) review — **AMEND-BEFORE-EXECUTION**, all findings folded. (Important, F1) the production orchestrator was renamed `runEnroll` → **`finishEnroll`** because `cmd/diyddns-client/enroll_test.go` already exists with a `runEnroll(t, args...)` *test helper* (a redeclaration collision in package `main`); the test file's task verb changed create → **modify/append** so the 5 existing Plan-06 OIDC tests + the `runEnroll` helper + `nopWriter` are preserved, not overwritten. (Minor) reuse the existing `nopWriter` sink (dropped the duplicate `discardWriter`); corrected the T1 `client_test.go` import claim (base64/json must be added); noted `TestEnrollRequiresOIDCFlag` is retained (now passes via `MarkFlagsOneRequired`); loosened the go.mod verification so a benign `x/sys` indirect→direct promotion doesn't read as a violation. The reviewer ground-truthed every task's code against the real APIs (client methods, wire tags, cobra 1.10.2 flag-group helpers, `credentials`/`version` signatures, `x/term` footprint) — all confirmed to compile/pass as written once F1 is applied.
 
 ## Execution handoff
 
