@@ -88,6 +88,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil),
 		OIDC:      oidcSvc,
+		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit),
 		OIDCMgr:   oidcMgr,
 		HMACKey:   key,
 		Cfg:       cfg.Auth,

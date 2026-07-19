@@ -35,6 +35,7 @@ type ServerDeps struct {
 	Auth      *service.AuthService
 	Bootstrap *service.BootstrapService
 	OIDC      *service.OIDCService
+	Admin     *service.AdminService
 	OIDCMgr   *oidc.Manager
 	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
 	Cfg       config.Auth
