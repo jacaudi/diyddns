@@ -130,6 +130,69 @@ func TestVerify_UnknownDevice(t *testing.T) {
 	}
 }
 
+// fakeRotatingDevices is a pointer-based DeviceReader whose stored device can be
+// mutated between calls, so a test can simulate a secret rotation mid-flight.
+// (fakeDevices above is a value type copied into the Verifier at construction
+// time and can't be mutated afterward.)
+type fakeRotatingDevices struct{ dev store.Device }
+
+func (f *fakeRotatingDevices) GetByID(_ context.Context, _ string) (store.Device, error) {
+	return f.dev, nil
+}
+
+func TestVerifier_Invalidate_EvictsCachedSecret(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	secretA, err := GenerateSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretB, err := GenerateSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedA, err := SealSecret(key, secretA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedB, err := SealSecret(key, secretB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dr := &fakeRotatingDevices{dev: store.Device{ID: "dev1", UserID: "usr1", SecretHash: sealedA}}
+	v := NewVerifier(dr, fakeUsers{u: store.User{ID: "usr1"}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
+
+	const now int64 = 1720000000
+	parts := func(secret []byte, nonce string) RequestParts {
+		ts := "1720000000"
+		sig := shared.Sign(secret, shared.CanonicalRequest("POST", "/agent/v1/checkin", ts, nonce, shared.BodyHashHex(nil)))
+		return RequestParts{Device: "dev1", Timestamp: ts, Nonce: nonce, Signature: sig, Method: "POST", Path: "/agent/v1/checkin"}
+	}
+
+	// Seed the cache with secretA by verifying a request signed with it.
+	if _, err := v.Verify(context.Background(), parts(secretA, "n1"), now); err != nil {
+		t.Fatalf("seed verify with secretA: %v", err)
+	}
+
+	// Rotate the stored secret to secretB; the cache still holds secretA.
+	dr.dev.SecretHash = sealedB
+
+	// Without Invalidate: a request signed with the NEW secretB must FAIL
+	// (stale cache still serves secretA).
+	if _, err := v.Verify(context.Background(), parts(secretB, "n2"), now); err == nil {
+		t.Fatal("expected stale cache to reject the new secret before Invalidate")
+	}
+
+	// After Invalidate: the new secretB must now verify.
+	v.Invalidate(dr.dev.ID)
+	if _, err := v.Verify(context.Background(), parts(secretB, "n3"), now); err != nil {
+		t.Fatalf("expected new secret to verify after Invalidate, got %v", err)
+	}
+}
+
 // The next two cover the remaining Verify/secretFor error branches for 100% coverage.
 func TestVerify_NonNumericTimestamp(t *testing.T) {
 	v, _, _, _ := newFixture(t)
