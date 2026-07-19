@@ -67,6 +67,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil)
+	adminSvc := service.NewAdminService(st, cfg.Password, discardAgentAudit{})
 
 	return st, api.ServerDeps{
 		Log:       log,
@@ -78,6 +79,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Checkin:   checkinSvc,
 		Auth:      authSvc,
 		Bootstrap: bootstrapSvc,
+		Admin:     adminSvc,
 		Cfg:       cfg,
 		Info:      version.Info{Version: "v1.2.3"},
 		HMACKey:   key,

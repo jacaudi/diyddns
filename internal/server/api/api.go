@@ -53,6 +53,7 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	registerAuthOps(apiAPI, deps)
 	registerDeviceOps(apiAPI, deps)
 	registerDeviceMgmtOps(apiAPI, deps)
+	registerAdminOps(apiAPI, deps)
 
 	RegisterHealth(mux, deps.Log, deps.Store)
 }
