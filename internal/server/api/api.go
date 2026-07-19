@@ -51,6 +51,7 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api", deps.Info.Version))
 	registerAuthOps(apiAPI, deps)
 	registerDeviceOps(apiAPI, deps)
+	registerDeviceMgmtOps(apiAPI, deps)
 
 	RegisterHealth(mux, deps.Log, deps.Store)
 }
