@@ -49,7 +49,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{})
 	checkinSvc := service.NewCheckinService(st, discardAgentAudit{})
-	devicesSvc := service.NewDeviceService(st)
+	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{})
 
 	cfg := config.Auth{
 		Session: config.SessionCfg{

@@ -83,7 +83,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Verifier:  verifier,
 		Sessions:  sessions,
 		Enroll:    service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit),
-		Devices:   service.NewDeviceService(st),
+		Devices:   service.NewDeviceService(st, key, verifier, audit),
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil),
