@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -14,12 +15,18 @@ import (
 var (
 	// ErrLastAdmin is returned when an operation would leave zero enabled admins.
 	ErrLastAdmin = errors.New("service: cannot remove the last admin")
-	// ErrSelfLockout is returned when an admin tries to disable or delete themselves.
+	// ErrSelfLockout is returned when an admin tries to disable, delete, or
+	// demote themselves.
 	ErrSelfLockout = errors.New("service: cannot disable or delete your own account")
 	// ErrOIDCNoPassword is returned when setting a local password on an OIDC-only account.
 	ErrOIDCNoPassword = errors.New("service: user is OIDC-managed; no local password")
 	// ErrInvalidRole is returned for a role outside {admin, user}.
 	ErrInvalidRole = errors.New("service: invalid role")
+	// ErrWeakPassword is returned when a password is shorter than the
+	// configured policy minimum.
+	ErrWeakPassword = errors.New("service: password too short")
+	// ErrInvalidEmail is returned when an email address fails RFC parsing.
+	ErrInvalidEmail = errors.New("service: invalid email address")
 )
 
 // CreateUserParams is the input to CreateUser. Role must be "admin" or "user".
@@ -42,15 +49,18 @@ type UpdateUserParams struct {
 type AdminService struct {
 	st           *store.Store
 	argon2Params auth.Argon2Params
+	minLength    int
 	audit        AuditSink
 }
 
 // NewAdminService constructs an AdminService. pw supplies the argon2id params
-// used when creating users or resetting passwords.
+// and minimum password length enforced when creating users or resetting
+// passwords.
 func NewAdminService(st *store.Store, pw config.PasswordCfg, audit AuditSink) *AdminService {
 	return &AdminService{
 		st:           st,
 		argon2Params: auth.Argon2Params{Time: pw.Argon2Time, MemoryKiB: pw.Argon2MemoryKiB, Parallelism: pw.Argon2Parallelism},
+		minLength:    pw.MinLength,
 		audit:        audit,
 	}
 }
@@ -88,6 +98,12 @@ func (s *AdminService) ListUsers(ctx context.Context) ([]store.User, error) {
 func (s *AdminService) CreateUser(ctx context.Context, actorID string, p CreateUserParams) (store.User, error) {
 	if !validRole(p.Role) {
 		return store.User{}, fmt.Errorf("service.CreateUser: %w", ErrInvalidRole)
+	}
+	if _, err := mail.ParseAddress(p.Email); err != nil {
+		return store.User{}, fmt.Errorf("service.CreateUser: %w", ErrInvalidEmail)
+	}
+	if len(p.Password) < s.minLength {
+		return store.User{}, fmt.Errorf("service.CreateUser: %w", ErrWeakPassword)
 	}
 	hash, err := auth.HashPassword(p.Password, s.argon2Params)
 	if err != nil {
@@ -127,17 +143,22 @@ func (s *AdminService) UpdateUser(ctx context.Context, actorID, targetID string,
 	return updated, nil
 }
 
-// guardUpdateUser applies UpdateUser's three lockout/validity guards: invalid
-// role, demoting/disabling the last enabled admin, self-disable, and
-// resetting a password on an OIDC-only account. u is the target's
-// pre-update row (read by the caller so its PasswordHash reflects current
-// state).
+// guardUpdateUser applies UpdateUser's lockout/validity guards: invalid
+// role, self-demote, demoting/disabling the last enabled admin, self-disable,
+// resetting a password on an OIDC-only account, and a too-short password. u
+// is the target's pre-update row (read by the caller so its PasswordHash
+// reflects current state).
 func (s *AdminService) guardUpdateUser(ctx context.Context, actorID, targetID string, u store.User, p UpdateUserParams) error {
 	if p.Role != nil {
 		if !validRole(*p.Role) {
 			return ErrInvalidRole
 		}
 		if *p.Role != "admin" {
+			// Self-demote is blocked unconditionally — regardless of how many
+			// other admins exist — before the last-admin guard even runs.
+			if targetID == actorID {
+				return ErrSelfLockout
+			}
 			if err := s.guardLastAdmin(ctx, targetID); err != nil {
 				return err
 			}
@@ -151,8 +172,13 @@ func (s *AdminService) guardUpdateUser(ctx context.Context, actorID, targetID st
 			return err
 		}
 	}
-	if p.Password != nil && u.PasswordHash == "" {
-		return ErrOIDCNoPassword
+	if p.Password != nil {
+		if u.PasswordHash == "" {
+			return ErrOIDCNoPassword
+		}
+		if len(*p.Password) < s.minLength {
+			return ErrWeakPassword
+		}
 	}
 	return nil
 }
@@ -199,7 +225,11 @@ func (s *AdminService) applyDisabled(ctx context.Context, actorID, targetID stri
 	event := "user.enabled"
 	if *p.Disabled {
 		event = "user.disabled"
-		if n, _ := s.st.Sessions().DeleteByUser(ctx, targetID); n > 0 {
+		n, err := s.st.Sessions().DeleteByUser(ctx, targetID)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
 			s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: "session.revoked", TargetType: "user", TargetID: targetID})
 		}
 	}

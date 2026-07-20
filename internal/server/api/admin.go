@@ -265,6 +265,10 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 		return huma.Error409Conflict("user is OIDC-managed; no local password")
 	case errors.Is(err, service.ErrInvalidRole):
 		return huma.Error422UnprocessableEntity("role must be 'admin' or 'user'")
+	case errors.Is(err, service.ErrWeakPassword):
+		return huma.Error422UnprocessableEntity("password does not meet the minimum length policy")
+	case errors.Is(err, service.ErrInvalidEmail):
+		return huma.Error422UnprocessableEntity("invalid email address")
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)

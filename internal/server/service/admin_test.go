@@ -15,7 +15,7 @@ import (
 func newAdminSvc(t *testing.T) (*store.Store, *AdminService) {
 	t.Helper()
 	st := openTestStore(t)
-	pw := config.PasswordCfg{Argon2Time: 1, Argon2MemoryKiB: 8 * 1024, Argon2Parallelism: 1}
+	pw := config.PasswordCfg{Argon2Time: 1, Argon2MemoryKiB: 8 * 1024, Argon2Parallelism: 1, MinLength: 8}
 	return st, NewAdminService(st, pw, NewAuditWriter(st))
 }
 
@@ -48,6 +48,24 @@ func TestAdminService_CreateUser_RejectsBadRole(t *testing.T) {
 	}
 }
 
+func TestAdminService_CreateUser_RejectsWeakPassword(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "a@x", "admin")
+
+	if _, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "n@x", Password: "short", Role: "user"}); !errors.Is(err, ErrWeakPassword) {
+		t.Fatalf("err = %v, want ErrWeakPassword", err)
+	}
+}
+
+func TestAdminService_CreateUser_RejectsInvalidEmail(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "a@x", "admin")
+
+	if _, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "not-an-email", Password: "correcthorse12", Role: "user"}); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("err = %v, want ErrInvalidEmail", err)
+	}
+}
+
 func TestAdminService_UpdateUser_LastAdminDemote_Rejected(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")
@@ -62,15 +80,26 @@ func TestAdminService_UpdateUser_LastAdminDemote_Rejected(t *testing.T) {
 func TestAdminService_UpdateUser_RoleChange_Success(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")
-	seedUser(t, st, "second@x", "admin") // second admin, so demoting the first is allowed
+	second := seedUser(t, st, "second@x", "admin") // second admin, demoted by the first — not a self-demote
 
 	role := "user"
-	u, err := svc.UpdateUser(t.Context(), admin.ID, admin.ID, UpdateUserParams{Role: &role})
+	u, err := svc.UpdateUser(t.Context(), admin.ID, second.ID, UpdateUserParams{Role: &role})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if u.Role != "user" {
 		t.Fatalf("Role = %q, want %q", u.Role, "user")
+	}
+}
+
+func TestAdminService_UpdateUser_SelfDemote_Rejected(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "a@x", "admin")
+	seedUser(t, st, "b@x", "admin") // a second admin so last-admin guard is not what fires
+
+	role := "user"
+	if _, err := svc.UpdateUser(t.Context(), admin.ID, admin.ID, UpdateUserParams{Role: &role}); !errors.Is(err, ErrSelfLockout) {
+		t.Fatalf("self-demote err = %v, want ErrSelfLockout", err)
 	}
 }
 
@@ -132,6 +161,19 @@ func TestAdminService_UpdateUser_PasswordOnOIDCOnly_Rejected(t *testing.T) {
 	pwNew := "correcthorse12"
 	if _, err := svc.UpdateUser(t.Context(), admin.ID, oidcUser.ID, UpdateUserParams{Password: &pwNew}); !errors.Is(err, ErrOIDCNoPassword) {
 		t.Fatalf("err = %v, want ErrOIDCNoPassword", err)
+	}
+}
+
+func TestAdminService_UpdateUser_RejectsWeakPassword(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "a@x", "admin")
+	// other must already have a local password so the OIDC-only guard does
+	// not fire before the length check under test.
+	other := seedUserWithPassword(t, st, "b@x", "user", "correcthorse12")
+
+	pwNew := "short"
+	if _, err := svc.UpdateUser(t.Context(), admin.ID, other.ID, UpdateUserParams{Password: &pwNew}); !errors.Is(err, ErrWeakPassword) {
+		t.Fatalf("err = %v, want ErrWeakPassword", err)
 	}
 }
 
