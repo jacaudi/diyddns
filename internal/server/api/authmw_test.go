@@ -303,6 +303,97 @@ func TestSessionMiddleware_CookieAuthForwardsUserAndSession(t *testing.T) {
 	})
 }
 
+// registerAdminProbe wires a throwaway guarded op behind sessionMiddleware +
+// adminMiddleware (the required ordering) and returns the server plus an
+// admin-role session and a non-admin-role session.
+func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess store.Session) {
+	t.Helper()
+	st := openTestStore(t)
+	admin, err := st.Users().Create(context.Background(), store.User{Email: "admin@example.com", Role: "admin"})
+	if err != nil {
+		t.Fatalf("seed admin user: %v", err)
+	}
+	usr, err := st.Users().Create(context.Background(), store.User{Email: "user@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
+	adminSess, err = sm.Create(context.Background(), admin.ID, "127.0.0.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SessionManager.Create (admin): %v", err)
+	}
+	userSess, err = sm.Create(context.Background(), usr.ID, "127.0.0.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SessionManager.Create (user): %v", err)
+	}
+
+	const path = "/admin/v1/probe"
+	mux := http.NewServeMux()
+	probeAPI := humago.New(mux, huma.DefaultConfig("admin-probe", "1"))
+
+	type out struct {
+		Body struct {
+			OK bool `json:"ok"`
+		}
+	}
+
+	huma.Register(probeAPI, huma.Operation{
+		Method: http.MethodGet,
+		Path:   path,
+		Middlewares: huma.Middlewares{
+			sessionMiddleware(probeAPI, sm, testCookieName),
+			adminMiddleware(probeAPI),
+		},
+	}, func(ctx context.Context, _ *struct{}) (*out, error) {
+		o := &out{}
+		o.Body.OK = true
+		return o, nil
+	})
+
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, adminSess, userSess
+}
+
+func TestAdminMiddleware_ForbidsNonAdmin(t *testing.T) {
+	srv, adminSess, userSess := registerAdminProbe(t)
+
+	t.Run("admin session succeeds", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/admin/v1/probe", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.AddCookie(&http.Cookie{Name: testCookieName, Value: adminSess.ID})
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200, body=%s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("non-admin session is rejected 403", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/admin/v1/probe", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.AddCookie(&http.Cookie{Name: testCookieName, Value: userSess.ID})
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", resp.StatusCode)
+		}
+	})
+}
+
 func TestCSRFMiddleware_RunsAfterSessionAndComparesConstantTime(t *testing.T) {
 	srv, _, sess := registerSessionProbe(t, true)
 

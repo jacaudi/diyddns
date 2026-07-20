@@ -49,7 +49,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{})
 	checkinSvc := service.NewCheckinService(st, discardAgentAudit{})
-	devicesSvc := service.NewDeviceService(st)
+	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{})
 
 	cfg := config.Auth{
 		Session: config.SessionCfg{
@@ -67,6 +67,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil)
+	adminSvc := service.NewAdminService(st, cfg.Password, discardAgentAudit{})
 
 	return st, api.ServerDeps{
 		Log:       log,
@@ -78,6 +79,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Checkin:   checkinSvc,
 		Auth:      authSvc,
 		Bootstrap: bootstrapSvc,
+		Admin:     adminSvc,
 		Cfg:       cfg,
 		Info:      version.Info{Version: "v1.2.3"},
 		HMACKey:   key,

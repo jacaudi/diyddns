@@ -124,3 +124,16 @@ func csrfMiddleware(api huma.API) func(huma.Context, func(huma.Context)) {
 		next(ctx)
 	}
 }
+
+// adminMiddleware rejects the request with 403 unless the session-authenticated
+// user has the "admin" role. It MUST run after sessionMiddleware in the chain,
+// since it reads the user from context.
+func adminMiddleware(api huma.API) func(huma.Context, func(huma.Context)) {
+	return func(ctx huma.Context, next func(huma.Context)) {
+		if UserFrom(ctx.Context()).Role != "admin" {
+			_ = huma.WriteErr(api, ctx, http.StatusForbidden, "admin role required")
+			return
+		}
+		next(ctx)
+	}
+}

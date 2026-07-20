@@ -38,8 +38,9 @@ type RequestParts struct {
 }
 
 // Verifier authenticates agent HMAC requests. It holds a process-local cache of
-// decrypted secret bytes (populate-only in Plan 04 — secrets never rotate here;
-// device disable is checked live from the DB each request).
+// decrypted secret bytes; a cache entry is evicted via Invalidate when a
+// device's secret is rotated, so the next Verify re-opens it from the DB
+// (device disable is checked live from the DB each request).
 type Verifier struct {
 	devices  DeviceReader
 	users    UserReader
@@ -95,6 +96,16 @@ func (v *Verifier) Verify(ctx context.Context, p RequestParts, now int64) (strin
 		return "", ErrUnauthorized // ErrConflict => replay; any insert error is fail-closed
 	}
 	return dev.ID, nil
+}
+
+// Invalidate evicts the cached decrypted secret for deviceID, forcing the next
+// Verify to re-open the stored (possibly rotated) sealed secret from the DB.
+// Called after a device's secret is rotated so the stale secret stops
+// authenticating.
+func (v *Verifier) Invalidate(deviceID string) {
+	v.mu.Lock()
+	delete(v.cache, deviceID)
+	v.mu.Unlock()
 }
 
 func (v *Verifier) secretFor(dev store.Device) ([]byte, error) {

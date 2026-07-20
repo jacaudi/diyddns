@@ -42,6 +42,13 @@ func TestGuard_ProtectedPathsRejectUnauthenticated(t *testing.T) {
 		{http.MethodPost, "/api/v1/devices"},
 		{http.MethodGet, "/api/v1/devices"},
 		{http.MethodGet, "/api/v1/devices/some-id"},
+		{http.MethodGet, "/api/v1/admin/users"},
+		{http.MethodPost, "/api/v1/admin/users"},
+		{http.MethodPatch, "/api/v1/admin/users/some-id"},
+		{http.MethodDelete, "/api/v1/admin/users/some-id"},
+		{http.MethodGet, "/api/v1/admin/devices"},
+		{http.MethodGet, "/api/v1/admin/audit"},
+		{http.MethodGet, "/api/v1/admin/server"},
 	}
 	for _, c := range cases {
 		code := doNoAuth(t, srv, c.method, c.path)

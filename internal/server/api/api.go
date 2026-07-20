@@ -35,6 +35,7 @@ type ServerDeps struct {
 	Auth      *service.AuthService
 	Bootstrap *service.BootstrapService
 	OIDC      *service.OIDCService
+	Admin     *service.AdminService
 	OIDCMgr   *oidc.Manager
 	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
 	Cfg       config.Auth
@@ -51,6 +52,8 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api", deps.Info.Version))
 	registerAuthOps(apiAPI, deps)
 	registerDeviceOps(apiAPI, deps)
+	registerDeviceMgmtOps(apiAPI, deps)
+	registerAdminOps(apiAPI, deps)
 
 	RegisterHealth(mux, deps.Log, deps.Store)
 }
