@@ -86,23 +86,40 @@ func (s *GrantService) IssueInvite(ctx context.Context, actorID, userID string) 
 	return link, nil
 }
 
-// IssueRecovery revokes all of userID's existing passkeys (design D10 —
-// revoke-at-issue, the lost-or-stolen-device model) and mints a "recovery"
-// grant. Called by both the admin-recovery endpoint and self-service
-// recovery (RequestSelfServiceRecovery) — the only difference between the
-// two is who triggers issuance and what happens to the resulting link.
-func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string) (string, error) {
-	if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, userID); err != nil {
-		return "", fmt.Errorf("service.IssueRecovery: %w", err)
-	}
+// mintRecoveryGrant creates a single-use "recovery" grant for userID and
+// audits passkey.recovery_issued. It does NOT revoke any existing passkeys —
+// revocation is the caller's decision and timing: admin recovery revokes at
+// issue (IssueRecovery), while self-service recovery defers revocation to
+// redeem (confirm-then-revoke — RedeemFinish revokes only once mailbox
+// possession is proven, so a pre-auth request can never lock anyone out).
+// actorID is recorded as the audit actor (the triggering admin, or the user
+// themselves for self-service).
+func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID string) (string, error) {
 	link, err := s.issue(ctx, userID, "recovery")
 	if err != nil {
-		return "", fmt.Errorf("service.IssueRecovery: %w", err)
+		return "", fmt.Errorf("service.mintRecoveryGrant: %w", err)
 	}
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: actorID, EventType: "passkey.recovery_issued",
 		TargetType: "user", TargetID: userID,
 	})
+	return link, nil
+}
+
+// IssueRecovery is the admin recovery path: it revokes all of userID's
+// existing passkeys immediately (design D10 — revoke-at-issue, the
+// lost-or-stolen-device model, safe because the caller is an authenticated
+// admin taking an intentional action) and mints a "recovery" grant. The
+// self-service path (RequestSelfServiceRecovery) deliberately does NOT revoke
+// at issue — see mintRecoveryGrant.
+func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string) (string, error) {
+	if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, userID); err != nil {
+		return "", fmt.Errorf("service.IssueRecovery: %w", err)
+	}
+	link, err := s.mintRecoveryGrant(ctx, actorID, userID)
+	if err != nil {
+		return "", fmt.Errorf("service.IssueRecovery: %w", err)
+	}
 	return link, nil
 }
 
@@ -118,7 +135,11 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string
 //     possession alone, which would silently downgrade an OIDC/MFA account
 //     to email control)
 //
-// Send failures are logged (audit email.send_failed) and never surfaced.
+// It mints the grant but does NOT revoke the user's existing passkeys
+// (confirm-then-revoke): revocation happens at redeem (RedeemFinish), gated
+// by mailbox possession, so a pre-auth request from anyone who merely knows
+// an email address can never lock that account out. Send failures are logged
+// (audit email.send_failed) and never surfaced.
 func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEmail, ip string) error {
 	if s.mailer == nil || !s.mailer.Enabled() {
 		return nil
@@ -132,7 +153,7 @@ func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEma
 		return nil
 	}
 
-	link, err := s.IssueRecovery(ctx, u.ID, u.ID)
+	link, err := s.mintRecoveryGrant(ctx, u.ID, u.ID)
 	if err != nil {
 		s.log.Error("self-service recovery: issue failed", "err", err)
 		return nil
@@ -204,9 +225,13 @@ func (s *GrantService) RedeemBegin(ctx context.Context, token string) (string, [
 // verify-before-consume, NO sql.Tx — the store's single-connection pool
 // would deadlock a transaction wrapping these repos): verify the passkey in
 // memory (no DB write) -> Consume the grant (the atomic single-use gate) ->
-// persist the credential. A store failure after Consume spends the grant
-// without registering a credential — the admin must re-issue; this is
-// documented, not a hang, and logged at CRITICAL.
+// for a "recovery" grant, revoke the user's existing passkeys now that
+// mailbox/link possession is proven (confirm-then-revoke) -> persist the new
+// credential. The revoke happens BEFORE the persist so the freshly-registered
+// passkey survives. An "invite" grant never revokes (a new user has no
+// passkeys; a corner-case existing one is kept). A store failure after
+// Consume spends the grant without completing registration — the admin must
+// re-issue; this is documented, not a hang, and logged at CRITICAL.
 func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie string, r *http.Request, name string) error {
 	if s.passkeys == nil {
 		return ErrWebAuthnUnavailable
@@ -235,6 +260,14 @@ func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie str
 
 	if _, err := s.st.AccountRecovery().Consume(ctx, auth.HashToken(token), store.NowUnix()); err != nil {
 		return ErrGrantInvalid
+	}
+
+	if grant.Reason == "recovery" {
+		if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, grant.UserID); err != nil {
+			s.log.Error("GRANT CRITICAL: recovery grant consumed but passkey revoke failed; admin must re-issue",
+				"err", err, "user_id", grant.UserID)
+			return fmt.Errorf("service.RedeemFinish: %w", err)
+		}
 	}
 
 	if _, err := s.passkeys.persistCredential(ctx, grant.UserID, sess.UserID, cred, name); err != nil {

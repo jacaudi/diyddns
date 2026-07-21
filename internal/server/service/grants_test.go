@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/descope/virtualwebauthn"
@@ -52,6 +53,22 @@ func extractToken(t *testing.T, link string) string {
 		t.Fatalf("link %q missing token query param", link)
 	}
 	return tok
+}
+
+// extractLinkFromBody pulls the "https://..." recovery link out of an email
+// body (as rendered by email.RecoveryLinkBody), so a test can drive the
+// redeem exactly as a user clicking the emailed link would.
+func extractLinkFromBody(t *testing.T, body string) string {
+	t.Helper()
+	i := strings.Index(body, "https://")
+	if i < 0 {
+		t.Fatalf("email body has no https:// link: %q", body)
+	}
+	link := body[i:]
+	if j := strings.IndexAny(link, " \r\n\t"); j >= 0 {
+		link = link[:j]
+	}
+	return link
 }
 
 // driveRedeem completes a full RedeemBegin -> RedeemFinish ceremony for
@@ -240,6 +257,82 @@ func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t
 	}
 	if !gotUser || !gotAdmin {
 		t.Errorf("expected emails to %q and %q, got %+v", u.Email, admin.Email, mailer.sent)
+	}
+
+	// Confirm-then-revoke: the request must NOT revoke the user's existing
+	// passkeys — revocation is deferred to redeem (proven mailbox possession),
+	// so a pre-auth request cannot lock anyone out.
+	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("passkeys after RequestSelfServiceRecovery = %d, want 1 (revoke deferred to redeem)", len(creds))
+	}
+}
+
+func TestGrantService_SelfServiceRecoveryRedeem_RevokesOldRegistersOne(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+
+	u := seedUser(t, st, "alice@example.com", "user")
+	rp := testRP()
+	oldStored, _, _ := registerPasskey(t, passkeys, u.ID, "Old Key", rp)
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	// The self-service link is emailed to the user (first send); recover its
+	// token to drive the redeem, exactly as a user clicking the link would.
+	if len(mailer.sent) == 0 {
+		t.Fatal("no email sent")
+	}
+	token := extractToken(t, extractLinkFromBody(t, mailer.sent[0].body))
+
+	if err := driveRedeem(t, grants, token, "New Key", rp); err != nil {
+		t.Fatalf("driveRedeem: %v", err)
+	}
+
+	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("passkeys after self-service redeem = %d, want exactly 1 (old revoked, new registered)", len(creds))
+	}
+	if string(creds[0].CredentialID) == string(oldStored.CredentialID) {
+		t.Error("surviving credential is the OLD one; want the freshly-registered credential (old must be revoked at redeem)")
+	}
+}
+
+func TestGrantService_InviteRedeem_DoesNotRevokeExistingPasskeys(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	grants := newTestGrantService(t, st, passkeys, &fakeMailer{}, NewAuditWriter(st))
+
+	u := seedUser(t, st, "alice@example.com", "user")
+	rp := testRP()
+	// A user who already has a passkey being invited (edge case): invite
+	// redeem must ADD, never revoke — the reason-aware revoke fires only for
+	// recovery grants.
+	registerPasskey(t, passkeys, u.ID, "Existing Key", rp)
+
+	link, err := grants.IssueInvite(t.Context(), "admin-id", u.ID)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+	if err := driveRedeem(t, grants, extractToken(t, link), "Invited Key", rp); err != nil {
+		t.Fatalf("driveRedeem: %v", err)
+	}
+
+	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(creds) != 2 {
+		t.Fatalf("passkeys after invite redeem = %d, want 2 (invite adds, never revokes)", len(creds))
 	}
 }
 
