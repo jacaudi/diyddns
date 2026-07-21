@@ -1,0 +1,18 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DIYDDNS</title>
+<link rel="stylesheet" href="/static/app.css">
+{{if .CSRFToken}}<meta name="csrf" content="{{.CSRFToken}}">{{end}}
+<script src="/static/passkey.js" defer></script>
+</head>
+<body>
+<main class="wrap">
+<div class="brand"><span class="logo">D</span> DIYDDNS</div>
+{{template "content" .}}
+</main>
+</body>
+</html>
+{{end}}

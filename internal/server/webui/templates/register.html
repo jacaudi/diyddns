@@ -1,0 +1,22 @@
+{{define "content"}}
+<div class="card auth-card">
+  <h1>Create your passkey</h1>
+  <p class="muted">Used for the first-run admin setup, an invited account, or recovering a lost passkey.</p>
+  <form id="register-form">
+    <div class="field">
+      <label for="register-token">Registration token</label>
+      <input class="input" id="register-token" name="token" type="text" value="{{.Token}}" autocomplete="off" required>
+    </div>
+    <div class="field">
+      <label for="register-email">Email</label>
+      <input class="input" id="register-email" name="email" type="email" autocomplete="email" placeholder="only needed for first-run admin setup">
+    </div>
+    <div class="field">
+      <label for="register-name">Passkey name</label>
+      <input class="input" id="register-name" name="name" type="text" autocomplete="off" placeholder="e.g. MacBook Pro" required>
+    </div>
+    <button class="btn primary block" type="submit">Create passkey</button>
+  </form>
+  <p id="register-status" class="status" role="status" aria-live="polite"></p>
+</div>
+{{end}}
