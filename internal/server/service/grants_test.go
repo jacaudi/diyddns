@@ -243,6 +243,17 @@ func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t
 	}
 }
 
+func TestGrantService_RequestSelfServiceRecovery_NilMailer_NoPanicNilError(t *testing.T) {
+	st := openTestStore(t)
+	// A nil email.Mailer must be treated as "not configured" — same uniform
+	// no-op outcome as a disabled mailer, never a panic on s.mailer.Enabled().
+	grants := NewGrantService(st, nil, nil, "https://ddns.example.com", discardAudit{}, discardLogger())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), "anyone@example.com", "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery with nil mailer: %v, want nil", err)
+	}
+}
+
 func TestGrantService_RequestSelfServiceRecovery_MailerDisabled_NoEmailNoGrant(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})

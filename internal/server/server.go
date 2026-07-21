@@ -12,7 +12,6 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
-	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
@@ -77,28 +76,15 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
 
-	// passkeys is best-effort: WebAuthn's Relying Party identity can only be
-	// resolved once server.base_url is set (or auth.webauthn.rp_id/rp_origin
-	// are set explicitly). Until the passkey/bootstrap-claim HTTP routes are
-	// wired (a later task), an unresolved RP degrades WebAuthn-dependent
-	// features (bootstrap claim, registration grants) to
-	// ErrWebAuthnUnavailable rather than failing server startup — avoiding a
-	// behavior change for deployments that don't set base_url yet. The
-	// eventual fail-closed policy (base_url required whenever passkey login
-	// is the only path, with a hide_local_login_ui bypass) belongs to the
-	// task that turns those routes on.
-	var passkeys *service.PasskeyService
-	if rpID, rpOrigin, rerr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL); rerr != nil {
-		log.Warn("webauthn relying party unresolved; passkey features unavailable", "err", rerr)
-	} else if p, perr := service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit); perr != nil {
-		return nil, nil, fmt.Errorf("server: %w", perr)
-	} else {
-		passkeys = p
-	}
-
-	mailer := email.New(cfg.Email, log)
-	grants := service.NewGrantService(st, passkeys, mailer, cfg.Server.BaseURL, audit, log)
-
+	// The passkey ceremony service, registration-grant service, and SMTP
+	// mailer are left nil here: the HTTP routes that drive bootstrap-via-
+	// passkey, registration grants, and self-service recovery are not wired
+	// in this task. Constructing a live PasskeyService requires resolving the
+	// WebAuthn Relying Party from config, which must be fail-closed per design
+	// §10 — that policy (and the live wiring) belongs to the task that turns
+	// those routes on. BootstrapService/AdminService accept nil safely,
+	// returning ErrWebAuthnUnavailable if their passkey/grant paths are ever
+	// invoked. This matches cmd/diyddns-server/main.go's Startup-only instance.
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{
 		Log:       log,
@@ -109,9 +95,9 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Devices:   service.NewDeviceService(st, key, verifier, audit),
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
-		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil, passkeys, key),
+		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil, nil, nil),
 		OIDC:      oidcSvc,
-		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit, grants),
+		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit, nil),
 		OIDCMgr:   oidcMgr,
 		HMACKey:   key,
 		Cfg:       cfg.Auth,

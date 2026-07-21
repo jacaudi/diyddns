@@ -120,7 +120,7 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string
 //
 // Send failures are logged (audit email.send_failed) and never surfaced.
 func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEmail, ip string) error {
-	if !s.mailer.Enabled() {
+	if s.mailer == nil || !s.mailer.Enabled() {
 		return nil
 	}
 	u, err := s.st.Users().GetByEmail(ctx, targetEmail)
@@ -166,13 +166,13 @@ func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEma
 // validGrant exists so RedeemBegin can reject a dead token before spending
 // an authenticator ceremony on it, and so RedeemFinish can resolve the
 // target user before verifying.
+//
+// The Get lookup is keyed by the token's exact HashToken(token) primary key,
+// so a returned row inherently authenticates the token — no separate
+// constant-time VerifyToken is needed (it would always re-compare equal).
 func (s *GrantService) validGrant(ctx context.Context, token string) (store.RecoveryToken, error) {
-	hash := auth.HashToken(token)
-	grant, err := s.st.AccountRecovery().Get(ctx, hash)
+	grant, err := s.st.AccountRecovery().Get(ctx, auth.HashToken(token))
 	if err != nil {
-		return store.RecoveryToken{}, ErrGrantInvalid
-	}
-	if !auth.VerifyToken(grant.TokenHash, token) {
 		return store.RecoveryToken{}, ErrGrantInvalid
 	}
 	if grant.UsedAt != 0 || grant.ExpiresAt <= store.NowUnix() {
