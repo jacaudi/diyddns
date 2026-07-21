@@ -94,13 +94,7 @@ func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName string)
 	return func(ctx huma.Context, next func(huma.Context)) {
 		r, _ := humago.Unwrap(ctx)
 
-		c, err := r.Cookie(cookieName)
-		if err != nil {
-			_ = huma.WriteErr(api, ctx, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-
-		usr, sess, err := sm.Authenticate(ctx.Context(), c.Value)
+		usr, sess, err := sm.AuthenticateRequest(r, cookieName)
 		if err != nil {
 			_ = huma.WriteErr(api, ctx, http.StatusUnauthorized, "unauthorized")
 			return

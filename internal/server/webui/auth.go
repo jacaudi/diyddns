@@ -1,31 +1,22 @@
 package webui
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// authenticateBrowser is the framework-agnostic "how to authenticate a
-// browser request" check (design §9/N2): read the named session cookie off
-// r, then validate it against sessions. It is this package's single source
-// for that check — requireSession below is its only caller here — mirroring
-// (without importing, since internal/server/api is a sibling package) the
-// same cookie->SessionManager.Authenticate sequence internal/server/api's
-// huma sessionMiddleware performs against the same *auth.SessionManager;
-// only the huma-vs-stdlib glue differs.
+// authenticateBrowser is this package's thin, one-line delegate to
+// auth.SessionManager.AuthenticateRequest, the single, framework-agnostic
+// home for "authenticate a browser request by its session cookie" (design
+// §9/N2): the cookie->Authenticate knowledge itself lives only there, shared
+// with internal/server/api's huma sessionMiddleware — only the huma-vs-stdlib
+// glue differs between callers. Kept as a named function (rather than having
+// requireSession and handlers.go call AuthenticateRequest directly) since it
+// has two callers in this package.
 func authenticateBrowser(sessions *auth.SessionManager, r *http.Request, cookieName string) (store.User, store.Session, error) {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
-		return store.User{}, store.Session{}, fmt.Errorf("webui: no session cookie: %w", err)
-	}
-	usr, sess, err := sessions.Authenticate(r.Context(), c.Value)
-	if err != nil {
-		return store.User{}, store.Session{}, fmt.Errorf("webui: %w", err)
-	}
-	return usr, sess, nil
+	return sessions.AuthenticateRequest(r, cookieName)
 }
 
 // requireSession wraps next so it only runs when the request carries a

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/store"
@@ -93,6 +94,20 @@ func (m *SessionManager) Authenticate(ctx context.Context, sessionID string) (st
 		}
 	}
 	return usr, sess, nil
+}
+
+// AuthenticateRequest is the single, framework-agnostic home for "authenticate
+// a browser request by its session cookie": it reads cookieName off r and
+// validates it via Authenticate. A missing or empty cookie fails closed with
+// ErrUnauthorized, same as an unknown or expired one. Both the huma session
+// middleware (internal/server/api) and the stdlib webui middleware
+// (internal/server/webui) call this instead of duplicating the cookie-read.
+func (m *SessionManager) AuthenticateRequest(r *http.Request, cookieName string) (store.User, store.Session, error) {
+	c, err := r.Cookie(cookieName)
+	if err != nil || c.Value == "" {
+		return store.User{}, store.Session{}, ErrUnauthorized
+	}
+	return m.Authenticate(r.Context(), c.Value)
 }
 
 // Destroy removes a session (logout). A missing session is not an error.
