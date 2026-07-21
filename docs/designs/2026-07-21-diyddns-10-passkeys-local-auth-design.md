@@ -128,9 +128,11 @@ There are **no releases/tags** and no deployed password-based installs to migrat
   register-finish, not at claim (SGE I3).** First-run admin claim stays token-gated but
   registers the admin's first passkey instead of setting a password. The token is
   **validated (not consumed) at the claim step**; the target email is carried in the
-  sealed challenge cookie; and `Bootstrap.Consume` + `createAdmin` + credential storage
-  run **together at register-finish** (re-checking `AdminExists` to keep the double-admin
-  race closed). An abandoned ceremony therefore leaves the token intact and reusable — it
+  sealed challenge cookie; and at register-finish the server **verifies the passkey
+  first, then** `Bootstrap.Consume` + creates the admin + stores the credential, in that
+  order (re-checking `AdminExists` to keep the double-admin race closed; not a DB
+  transaction — the single-connection pool would deadlock, see §6). An abandoned ceremony
+  therefore leaves the token intact and reusable — it
   can never burn the token, orphan a credential-less admin, or lock out the sole admin
   (which my earlier consume-at-claim ordering could). The env
   `DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD` path is dropped (a passkey cannot be registered
@@ -309,16 +311,23 @@ off `user.OIDCSubject != ""`, which the admin DTO must be made consistent with (
 - The `/bootstrap` claim page: submit **token + email** → the server **validates** the
   token hash (constant-time) and the email, but does **not** consume yet. It stashes the
   target email in the sealed challenge cookie and returns register-begin options.
-- At **register-finish**, the server runs `Bootstrap.Consume` + `createAdmin(email)` +
-  credential storage **together in one transaction**, re-checking `AdminExists` to keep
-  the double-admin race closed (the atomic `consumed_at`-gated `Consume` admits exactly
-  one winner). An abandoned or failed ceremony leaves `consumed_at` NULL, so the token
-  stays valid and reusable — no orphan admin, no sole-admin lockout (SGE I3). This moves
-  the atomic gate from claim to finish without weakening it.
+- At **register-finish**, the ordering is **verify-before-consume** (not a DB
+  transaction — the store's single-connection pool, `SetMaxOpenConns(1)`, makes a
+  `BeginTx` wrapping the pool-based repos self-deadlock; SGE-plan C1): re-check
+  `AdminExists` → **verify the passkey** (`FinishRegistration`, credential held in
+  memory, no DB write) → `Bootstrap.Consume` (the atomic `consumed_at`-gated single-row
+  UPDATE admits exactly one winner) → create the **credential-less** admin
+  (`Users().Create(Role:"admin")`) → store the credential + `webauthn_handle`. Verifying
+  before consuming means an abandoned ceremony never spends the token (`consumed_at` stays
+  NULL) — no orphan admin, no sole-admin lockout (SGE I3). This moves the atomic gate from
+  claim to finish without weakening it.
 - `Consume`'s password/min-length validation is replaced by email validation only.
-- The existing "BOOTSTRAP CRITICAL" log guidance is updated: the only residual failure is
-  a DB error *after* `Consume` succeeds inside the finish transaction — the transaction
-  rolls back, keeping the token reusable.
+- Residual (`BOOTSTRAP CRITICAL`): the only window is a credential INSERT failing *after*
+  `Consume` + admin-create succeed (a single local INSERT). Recovery = delete the admin +
+  bootstrap rows and restart (Startup re-mints). Full multi-statement atomicity would
+  require threading a `*sql.Tx` through every repo — a store-wide change deferred as
+  out-of-scope; the verify-before-consume ordering shrinks the residual to this
+  documented sub-millisecond case, matching the project's existing bootstrap tolerance.
 
 ---
 
@@ -558,3 +567,8 @@ Next step after this design is approved: `superpowers:writing-plans` →
     `StatementBegin/End`, §3).
   - **Nit:** N1 (enroll wording — code & oidc, §8) · N2 (single-source browser-auth helper,
     §9). All folded.
+- **SGE (Fable) plan review, 2026-07-21** (of the implementation plan) surfaced C1: a
+  `BeginTx` wrapping the single-connection pool's repos would self-deadlock, so §6/D9's
+  bootstrap-finish was reconciled from "one transaction" to **verify-before-consume**
+  ordering (verify passkey → atomic `Bootstrap.Consume` gate → credential-less admin →
+  store credential). See the plan's Review Provenance for the full fold.
