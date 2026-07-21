@@ -44,13 +44,19 @@ func validSecretKey() string {
 }
 
 // testConfig resolves a config.Server the same way production does (via
-// config.Load and its defaults), overriding only database.path (required)
-// and auth.hmac.secret_key (the fail-closed knob under test).
+// config.Load and its defaults), overriding database.path (required),
+// auth.hmac.secret_key (the fail-closed knob under test), and
+// server.base_url. base_url is now required by handler()'s fail-closed
+// WebAuthn Relying Party resolution (passkey login is available by default,
+// see TestHandler_FailsClosedOnUnresolvableWebAuthnRP) — most tests in this
+// file only care about the server coming up, not about WebAuthn, so it is
+// set here once rather than in every test.
 func testConfig(t *testing.T, secretKey string) config.Server {
 	t.Helper()
 	v := viper.New()
 	v.Set("database.path", ":memory:")
 	v.Set("auth.hmac.secret_key", secretKey)
+	v.Set("server.base_url", "https://ddns.example.com")
 	cfg, err := config.Load(v, "")
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
@@ -193,6 +199,90 @@ func TestServer_OIDCFailsClosedWhenRequired(t *testing.T) {
 
 	if _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when oidc required but discovery fails")
+	}
+}
+
+// TestHandler_FailsClosedOnUnresolvableWebAuthnRP confirms that when passkey
+// login is available (auth.hide_local_login_ui unset, the default) and its
+// WebAuthn Relying Party cannot be resolved (no server.base_url, no explicit
+// auth.webauthn.rp_origin), Handler fails closed rather than serving a
+// passkey login button whose ceremonies could never verify (design §10,
+// mirrors the HMAC-key and required-OIDC fail-closed paths).
+func TestHandler_FailsClosedOnUnresolvableWebAuthnRP(t *testing.T) {
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	v.Set("auth.hmac.secret_key", validSecretKey())
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Server.BaseURL != "" || cfg.Auth.WebAuthn.RPOrigin != "" {
+		t.Fatalf("test setup: expected empty base_url/rp_origin, got %q/%q", cfg.Server.BaseURL, cfg.Auth.WebAuthn.RPOrigin)
+	}
+
+	if _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+		t.Fatal("server.Handler() = nil error, want fail-closed error when passkey login is available but the WebAuthn RP is unresolvable")
+	}
+}
+
+// TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden confirms
+// the other half of the §10 predicate: when auth.hide_local_login_ui is set,
+// there is no passkey login to serve, so an unresolvable WebAuthn RP does
+// NOT fail Handler closed — it simply leaves PasskeyService unconstructed
+// (deps.Passkey stays nil, which already keeps the passkey routes off the
+// mux, see api.Build).
+func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing.T) {
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	v.Set("auth.hmac.secret_key", validSecretKey())
+	v.Set("auth.hide_local_login_ui", true)
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	if _, err := server.Handler(cfg, memStore(t), discard()); err != nil {
+		t.Fatalf("server.Handler() = %v, want no error when hide_local_login_ui tolerates an unresolvable RP", err)
+	}
+}
+
+// TestServer_PasskeyRoutesWired confirms the live wiring: with a resolvable
+// WebAuthn RP (base_url set, the default via testConfig), the web UI's
+// /login page is mounted on the mux and the passkey login API is registered
+// (deps.Passkey/deps.Grants are non-nil, not left nil per the old
+// Task-8-era placeholder).
+func TestServer_PasskeyRoutesWired(t *testing.T) {
+	cfg := testConfig(t, validSecretKey())
+	handler, err := server.Handler(cfg, memStore(t), discard())
+	if err != nil {
+		t.Fatalf("server.Handler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /login status = %d, want 200", resp.StatusCode)
+	}
+
+	beginResp, err := http.Post(srv.URL+"/api/v1/auth/passkey/login/begin", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer beginResp.Body.Close()
+	if beginResp.StatusCode == http.StatusNotFound {
+		t.Fatal("POST /api/v1/auth/passkey/login/begin = 404, want the passkey op registered (deps.Passkey non-nil)")
+	}
+	body, _ := io.ReadAll(beginResp.Body)
+	if beginResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/v1/auth/passkey/login/begin status = %d, body = %s, want 200", beginResp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "publicKey") {
+		t.Errorf("login/begin body = %s, want WebAuthn credential-request options", body)
 	}
 }
 

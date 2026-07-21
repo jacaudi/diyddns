@@ -12,10 +12,12 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
 	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/server/webui"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
@@ -76,15 +78,34 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
 
-	// The passkey ceremony service, registration-grant service, and SMTP
-	// mailer are left nil here: the HTTP routes that drive bootstrap-via-
-	// passkey, registration grants, and self-service recovery are not wired
-	// in this task. Constructing a live PasskeyService requires resolving the
-	// WebAuthn Relying Party from config, which must be fail-closed per design
-	// §10 — that policy (and the live wiring) belongs to the task that turns
-	// those routes on. BootstrapService/AdminService accept nil safely,
-	// returning ErrWebAuthnUnavailable if their passkey/grant paths are ever
-	// invoked. This matches cmd/diyddns-server/main.go's Startup-only instance.
+	// Passkey login is the default local credential and is always available
+	// unless auth.hide_local_login_ui is set — there is no separate
+	// auth.webauthn.enabled toggle (design §10). Resolving the WebAuthn
+	// Relying Party from server.base_url can fail (no base_url and no
+	// explicit auth.webauthn.rp_origin); when passkey login is available that
+	// failure FAILS CLOSED, mirroring the HMAC-key and required-OIDC paths
+	// above — a server that advertises "sign in with a passkey" but can never
+	// verify the ceremony is worse than one that refuses to start. When
+	// hide_local_login_ui is set, an unresolved RP is tolerable: there is no
+	// passkey login to serve, so PasskeyService is simply left nil (deps.
+	// Passkey==nil already keeps the passkey routes off the mux, see
+	// api.Build).
+	var passkeySvc *service.PasskeyService
+	rpID, rpOrigin, rpErr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL)
+	if rpErr != nil {
+		if !cfg.Auth.HideLocalLoginUI {
+			return nil, nil, fmt.Errorf("server: %w", rpErr)
+		}
+	} else {
+		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("server: %w", err)
+		}
+	}
+
+	mailer := email.New(cfg.Email, log)
+	grantSvc := service.NewGrantService(st, passkeySvc, mailer, cfg.Server.BaseURL, audit, log)
+
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{
 		Log:       log,
@@ -95,14 +116,28 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Devices:   service.NewDeviceService(st, key, verifier, audit),
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
-		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil, nil, nil),
+		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil, passkeySvc, key),
 		OIDC:      oidcSvc,
-		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit, nil),
+		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit, grantSvc),
+		Passkey:   passkeySvc,
+		Grants:    grantSvc,
+		Mailer:    mailer,
 		OIDCMgr:   oidcMgr,
 		HMACKey:   key,
 		Cfg:       cfg.Auth,
 		Info:      version.Current(),
 	})
+
+	// The web UI's own mux already declares "GET /login" etc. as its route
+	// patterns; mounting the same patterns on the outer mux forwards matching
+	// requests straight into it. Distinct prefixes from /api, /agent,
+	// /healthz, /readyz — no collision.
+	webHandler := webui.New(webui.Deps{Sessions: sessions, Cfg: cfg, Log: log})
+	mux.Handle("GET /login", webHandler)
+	mux.Handle("GET /register", webHandler)
+	mux.Handle("GET /account", webHandler)
+	mux.Handle("GET /static/", webHandler)
+
 	chain := middleware.Chain(mux,
 		middleware.RequestID,
 		middleware.AccessLog(log),
