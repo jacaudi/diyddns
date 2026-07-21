@@ -23,9 +23,25 @@ import (
 type smtpMailer struct {
 	cfg config.EmailSection
 	log *slog.Logger
+	// tlsConfig, when non-nil, overrides the client TLS config used for the
+	// implicit-TLS dial and the STARTTLS upgrade. Production never sets it
+	// (clientTLSConfig falls back to a default derived from cfg.Host); it is
+	// an injection seam so tests can trust a self-signed cert. See
+	// export_test.go's NewSMTPForTest.
+	tlsConfig *tls.Config
 }
 
 func (m *smtpMailer) Enabled() bool { return true }
+
+// clientTLSConfig returns the TLS config for outbound connections: the
+// injected tlsConfig if present, else a default that verifies the server
+// against cfg.Host with a TLS 1.2 floor.
+func (m *smtpMailer) clientTLSConfig() *tls.Config {
+	if m.tlsConfig != nil {
+		return m.tlsConfig
+	}
+	return &tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}
+}
 
 // Send connects to the configured SMTP server and delivers one message. The
 // SMTP password (cfg.Password) is never included in a log attribute — only
@@ -59,7 +75,7 @@ func (m *smtpMailer) Send(ctx context.Context, to, subject, body string) error {
 // sendEnvelope, once the client has confirmed the server offers it).
 func (m *smtpMailer) dial(addr string) (*smtp.Client, error) {
 	if m.cfg.TLS == "implicit" {
-		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12})
+		conn, err := tls.Dial("tcp", addr, m.clientTLSConfig())
 		if err != nil {
 			return nil, fmt.Errorf("email: dial %s over tls: %w", addr, err)
 		}
@@ -82,7 +98,7 @@ func (m *smtpMailer) dial(addr string) (*smtp.Client, error) {
 // optional STARTTLS upgrade, optional AUTH, MAIL FROM/RCPT TO/DATA, QUIT.
 func (m *smtpMailer) sendEnvelope(c *smtp.Client, to, subject, body string) error {
 	if m.cfg.TLS == "starttls" {
-		if err := c.StartTLS(&tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
+		if err := c.StartTLS(m.clientTLSConfig()); err != nil {
 			return fmt.Errorf("email: starttls: %w", err)
 		}
 	}
