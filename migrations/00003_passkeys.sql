@@ -12,6 +12,7 @@ CREATE TABLE webauthn_credentials (
 CREATE INDEX webauthn_credentials_user ON webauthn_credentials(user_id);
 
 ALTER TABLE users ADD COLUMN webauthn_handle BLOB;
+CREATE UNIQUE INDEX users_webauthn_handle ON users(webauthn_handle);
 
 CREATE TABLE account_recovery_tokens (
     token_hash   TEXT PRIMARY KEY,
@@ -26,6 +27,7 @@ CREATE INDEX account_recovery_tokens_expires ON account_recovery_tokens(expires_
 -- +goose Down
 -- +goose StatementBegin
 DROP TABLE IF EXISTS account_recovery_tokens;
+DROP INDEX IF EXISTS users_webauthn_handle;
 ALTER TABLE users DROP COLUMN webauthn_handle;
 DROP TABLE IF EXISTS webauthn_credentials;
 -- +goose StatementEnd

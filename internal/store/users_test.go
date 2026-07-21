@@ -320,6 +320,48 @@ func TestUserGetByWebAuthnHandleUnknownReturnsErrNotFound(t *testing.T) {
 	}
 }
 
+func TestUserSetWebAuthnHandleUniqueness(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u1, err := s.Users().Create(ctx, User{Email: "handle-uniq-1@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 1: %v", err)
+	}
+	u2, err := s.Users().Create(ctx, User{Email: "handle-uniq-2@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 2: %v", err)
+	}
+
+	// A shared non-nil handle must collide on the second SetWebAuthnHandle.
+	handle := []byte{0x01, 0x02, 0x03}
+	if err := s.Users().SetWebAuthnHandle(ctx, u1.ID, handle); err != nil {
+		t.Fatalf("SetWebAuthnHandle u1: %v", err)
+	}
+	err = s.Users().SetWebAuthnHandle(ctx, u2.ID, handle)
+	if err == nil {
+		t.Fatal("SetWebAuthnHandle u2 with duplicate handle: expected error, got nil")
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("SetWebAuthnHandle u2 with duplicate handle: got %v, want ErrConflict", err)
+	}
+
+	// Two users left with NULL handles (never set) must NOT collide:
+	// SQLite treats multiple NULLs as distinct under a UNIQUE index. Both
+	// u3 and u4 have never had a handle set, and creating both succeeds above;
+	// this is the NULL-non-collision half of the requirement.
+	u3, err := s.Users().Create(ctx, User{Email: "handle-uniq-3@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 3 (NULL handle): %v", err)
+	}
+	u4, err := s.Users().Create(ctx, User{Email: "handle-uniq-4@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 4 (NULL handle): %v", err)
+	}
+	if u3.ID == "" || u4.ID == "" {
+		t.Fatal("expected both NULL-handle users to be created without conflict")
+	}
+}
+
 func TestUserGetByWebAuthnHandleEmptyRejected(t *testing.T) {
 	s, ctx := newTestStore(t)
 

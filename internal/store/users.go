@@ -227,14 +227,19 @@ func (r *UserRepo) Delete(ctx context.Context, id string) error {
 }
 
 // SetWebAuthnHandle sets the opaque per-user handle used to resolve a user
-// during discoverable (usernameless) passkey login.
-// Returns ErrNotFound if no row matched.
+// during discoverable (usernameless) passkey login. The handle is the lookup
+// key for GetByWebAuthnHandle and is enforced UNIQUE at the DB level.
+// Returns ErrNotFound if no row matched, ErrConflict if the handle is already
+// assigned to another user.
 func (r *UserRepo) SetWebAuthnHandle(ctx context.Context, userID string, handle []byte) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE users SET webauthn_handle = ? WHERE id = ?`,
 		handle, userID,
 	)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("users.SetWebAuthnHandle: %w", ErrConflict)
+		}
 		return fmt.Errorf("users.SetWebAuthnHandle: %w", err)
 	}
 	n, err := res.RowsAffected()
