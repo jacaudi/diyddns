@@ -271,6 +271,66 @@ func TestLoad_OIDCValidation(t *testing.T) {
 	})
 }
 
+func TestLoad_WebAuthnEmailDefaults(t *testing.T) {
+	cfg := mustLoadWithDB(t)
+	if cfg.Auth.WebAuthn.RPID != "" {
+		t.Errorf("WebAuthn.RPID = %q, want empty by default", cfg.Auth.WebAuthn.RPID)
+	}
+	if cfg.Auth.WebAuthn.RPOrigin != "" {
+		t.Errorf("WebAuthn.RPOrigin = %q, want empty by default", cfg.Auth.WebAuthn.RPOrigin)
+	}
+	if cfg.Auth.WebAuthn.RPDisplayName != "DIYDDNS" {
+		t.Errorf("WebAuthn.RPDisplayName = %q, want DIYDDNS", cfg.Auth.WebAuthn.RPDisplayName)
+	}
+	if cfg.Auth.WebAuthn.Timeout != 120*time.Second {
+		t.Errorf("WebAuthn.Timeout = %v, want 120s", cfg.Auth.WebAuthn.Timeout)
+	}
+	if cfg.Auth.HideLocalLoginUI {
+		t.Error("Auth.HideLocalLoginUI = true, want false by default")
+	}
+	if cfg.Email.Enabled {
+		t.Error("Email.Enabled = true, want false by default")
+	}
+	if cfg.Email.TLS != "starttls" {
+		t.Errorf("Email.TLS = %q, want starttls", cfg.Email.TLS)
+	}
+}
+
+// TestLoad_EmailHostEnvBinding is the regression guard for the pattern noted
+// on keyDefaults: config.Load has no viper.AutomaticEnv(), so every email.*
+// key MUST be registered in keyDefaults or its DIYDDNS_* env var is silently
+// dropped.
+func TestLoad_EmailHostEnvBinding(t *testing.T) {
+	t.Setenv("DIYDDNS_EMAIL_HOST", "smtp.example.com")
+	cfg := mustLoadWithDB(t)
+	if cfg.Email.Host != "smtp.example.com" {
+		t.Errorf("Email.Host = %q, want smtp.example.com (env var DIYDDNS_EMAIL_HOST was dropped)", cfg.Email.Host)
+	}
+}
+
+func TestAuth_ResolveWebAuthn(t *testing.T) {
+	t.Run("derives rpID and origin from baseURL", func(t *testing.T) {
+		var a config.Auth
+		rpID, rpOrigin, err := a.ResolveWebAuthn("https://ddns.example.com")
+		if err != nil {
+			t.Fatalf("ResolveWebAuthn: %v", err)
+		}
+		if rpID != "ddns.example.com" {
+			t.Errorf("rpID = %q, want ddns.example.com", rpID)
+		}
+		if rpOrigin != "https://ddns.example.com" {
+			t.Errorf("rpOrigin = %q, want https://ddns.example.com", rpOrigin)
+		}
+	})
+
+	t.Run("empty baseURL and empty explicit fields is an error", func(t *testing.T) {
+		var a config.Auth
+		if _, _, err := a.ResolveWebAuthn(""); err == nil {
+			t.Fatal("expected error when neither rp fields nor baseURL are set")
+		}
+	})
+}
+
 func TestSecretKeyBytes_Requires32(t *testing.T) {
 	if _, err := config.DecodeSecretKey(base64.StdEncoding.EncodeToString(make([]byte, 16))); err == nil {
 		t.Fatal("16-byte key must be rejected")

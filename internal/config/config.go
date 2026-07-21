@@ -9,6 +9,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type Server struct {
 	Database DatabaseSection
 	Logging  LoggingSection
 	Auth     Auth
+	Email    EmailSection
 }
 
 // ServerSection holds HTTP listener settings.
@@ -42,14 +44,28 @@ type LoggingSection struct {
 	Output string
 }
 
+// EmailSection holds SMTP settings for outbound account email (e.g. passkey
+// recovery notices). Enabled gates whether the email subsystem is active.
+type EmailSection struct {
+	Enabled  bool
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
+	TLS      string // "none", "starttls", or "tls"
+}
+
 // Auth holds all authentication-related configuration: browser sessions, agent
-// HMAC signing, password hashing, and first-run bootstrap.
+// HMAC signing, password hashing, first-run bootstrap, and WebAuthn passkeys.
 type Auth struct {
-	Session   SessionCfg
-	HMAC      HMACCfg
-	Password  PasswordCfg
-	Bootstrap BootstrapCfg
-	OIDC      OIDCCfg
+	Session          SessionCfg
+	HMAC             HMACCfg
+	Password         PasswordCfg
+	Bootstrap        BootstrapCfg
+	OIDC             OIDCCfg
+	WebAuthn         WebAuthnCfg
+	HideLocalLoginUI bool `mapstructure:"hide_local_login_ui"`
 }
 
 // SessionCfg holds browser session cookie settings.
@@ -98,6 +114,16 @@ type OIDCCfg struct {
 	AllowOIDCSignup bool `mapstructure:"allow_oidc_signup"`
 }
 
+// WebAuthnCfg holds WebAuthn (passkey) Relying Party settings. RPID and
+// RPOrigin may be left empty to have ResolveWebAuthn derive them from
+// server.base_url at startup.
+type WebAuthnCfg struct {
+	RPID          string        `mapstructure:"rp_id"`
+	RPOrigin      string        `mapstructure:"rp_origin"`
+	RPDisplayName string        `mapstructure:"rp_display_name"`
+	Timeout       time.Duration `mapstructure:"timeout"`
+}
+
 // keyDefaults enumerates every config key, its default, and its env var. Keys
 // with a corresponding CLI flag (server.listen) still carry a SetDefault here;
 // viper ranks SetDefault above an unchanged flag's default, so a changed flag
@@ -134,9 +160,21 @@ var keyDefaults = map[string]any{
 	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
 	// (viper delivers env values as a single string, not []string). Configure
 	// scopes via YAML or flags; the default covers the common case.
-	"auth.oidc.scopes":             []string{"openid", "profile", "email"},
-	"auth.oidc.auto_link_by_email": true,
-	"auth.oidc.allow_oidc_signup":  true,
+	"auth.oidc.scopes":              []string{"openid", "profile", "email"},
+	"auth.oidc.auto_link_by_email":  true,
+	"auth.oidc.allow_oidc_signup":   true,
+	"auth.webauthn.rp_id":           "",
+	"auth.webauthn.rp_origin":       "",
+	"auth.webauthn.rp_display_name": "DIYDDNS",
+	"auth.webauthn.timeout":         "120s",
+	"auth.hide_local_login_ui":      false,
+	"email.enabled":                 false,
+	"email.host":                    "",
+	"email.port":                    0,
+	"email.username":                "",
+	"email.password":                "",
+	"email.from":                    "",
+	"email.tls":                     "starttls",
 }
 
 // Load resolves configuration into a Server. Callers may pre-configure v (e.g.
@@ -201,6 +239,35 @@ func validateOIDC(cfg Server) error {
 		return fmt.Errorf("config: auth.oidc.scopes must include \"openid\"")
 	}
 	return nil
+}
+
+// ResolveWebAuthn derives the WebAuthn Relying Party ID and origin, falling
+// back to baseURL (typically server.base_url) when auth.webauthn.rp_id or
+// auth.webauthn.rp_origin are left empty. It returns an error when a value
+// cannot be resolved from either source, so callers can fail closed at
+// startup rather than register passkeys against an unusable RP.
+func (a Auth) ResolveWebAuthn(baseURL string) (rpID, rpOrigin string, err error) {
+	rpID, rpOrigin = a.WebAuthn.RPID, a.WebAuthn.RPOrigin
+	if rpID != "" && rpOrigin != "" {
+		return rpID, rpOrigin, nil
+	}
+	if baseURL == "" {
+		return "", "", fmt.Errorf("config: auth.webauthn.rp_id/rp_origin not set and server.base_url is empty")
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", "", fmt.Errorf("config: parse server.base_url %q: %w", baseURL, err)
+	}
+	if u.Hostname() == "" {
+		return "", "", fmt.Errorf("config: server.base_url %q has no host, cannot derive WebAuthn RP ID", baseURL)
+	}
+	if rpID == "" {
+		rpID = u.Hostname()
+	}
+	if rpOrigin == "" {
+		rpOrigin = u.Scheme + "://" + u.Host
+	}
+	return rpID, rpOrigin, nil
 }
 
 // DecodeSecretKey decodes the base64 AEAD master key and requires exactly 32
