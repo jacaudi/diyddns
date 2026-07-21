@@ -70,7 +70,7 @@ func newAuthHarness(t *testing.T, tokenSink func(token string)) authHarness {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, tokenSink)
+	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, tokenSink, nil, nil)
 
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{

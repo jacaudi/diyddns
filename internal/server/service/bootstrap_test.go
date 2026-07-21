@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/descope/virtualwebauthn"
+
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -29,7 +31,38 @@ func testBootstrapCfg(email, password string) config.BootstrapCfg {
 
 func newTestBootstrapService(t *testing.T, st *store.Store, cfg config.BootstrapCfg, audit AuditSink, emitToken func(string)) *BootstrapService {
 	t.Helper()
-	return NewBootstrapService(st, cfg, testPasswordCfg(), discardLogger(), audit, emitToken)
+	return NewBootstrapService(st, cfg, testPasswordCfg(), discardLogger(), audit, emitToken, nil, nil)
+}
+
+// newTestBootstrapServiceWithPasskeys builds a BootstrapService wired to a
+// real PasskeyService (and a matching seal key) for tests that drive
+// BeginClaim/FinishClaim.
+func newTestBootstrapServiceWithPasskeys(t *testing.T, st *store.Store, audit AuditSink, emitToken func(string)) *BootstrapService {
+	t.Helper()
+	passkeys := newTestPasskeyService(t, st, audit)
+	return NewBootstrapService(st, testBootstrapCfg("", ""), testPasswordCfg(), discardLogger(), audit, emitToken, passkeys, testKey32())
+}
+
+// driveClaim completes a full BeginClaim -> FinishClaim ceremony via
+// virtualwebauthn, returning whatever FinishClaim returns.
+func driveClaim(t *testing.T, svc *BootstrapService, token, email, name string, rp virtualwebauthn.RelyingParty) (store.User, error) {
+	t.Helper()
+
+	sealed, optsJSON, err := svc.BeginClaim(t.Context(), token, email)
+	if err != nil {
+		t.Fatalf("BeginClaim: %v", err)
+	}
+
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(optsJSON))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	authr := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: []byte(attOpts.UserID)})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	authr.AddCredential(cred)
+	attResp := virtualwebauthn.CreateAttestationResponse(rp, authr, cred, *attOpts)
+
+	return svc.FinishClaim(t.Context(), sealed, jsonRequest(attResp), name)
 }
 
 func TestBootstrapService_Startup_EnvPath_CreatesAdmin(t *testing.T) {
@@ -291,7 +324,7 @@ func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
 	}
 
 	var emitted string
-	svc := NewBootstrapService(st, config.BootstrapCfg{}, testPasswordCfg(), discardLogger(), NewAuditWriter(st), func(tok string) { emitted = tok })
+	svc := NewBootstrapService(st, config.BootstrapCfg{}, testPasswordCfg(), discardLogger(), NewAuditWriter(st), func(tok string) { emitted = tok }, nil, nil)
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("Startup: %v", err)
@@ -321,5 +354,111 @@ func TestBootstrapService_AdminExists(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("AdminExists = false after creating an admin user, want true")
+	}
+}
+
+func TestBootstrapService_FinishClaim_CreatesAdminAndFirstPasskey(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, NewAuditWriter(st), func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	rp := testRP()
+
+	u, err := driveClaim(t, svc, token, "admin@example.com", "My Key", rp)
+	if err != nil {
+		t.Fatalf("driveClaim: %v", err)
+	}
+	if u.Role != "admin" || u.Email != "admin@example.com" {
+		t.Fatalf("FinishClaim returned %+v, want Role=admin Email=admin@example.com", u)
+	}
+	if u.PasswordHash != "" {
+		t.Errorf("FinishClaim: PasswordHash = %q, want empty (credential-less admin, M1)", u.PasswordHash)
+	}
+
+	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("credentials after FinishClaim = %d, want 1", len(creds))
+	}
+
+	bs, err := st.Bootstrap().Get(t.Context())
+	if err != nil {
+		t.Fatalf("Bootstrap.Get: %v", err)
+	}
+	if bs.ConsumedAt == 0 {
+		t.Error("Bootstrap.Get: ConsumedAt = 0, want set after FinishClaim")
+	}
+
+	for _, evt := range []string{"user.created", "bootstrap.consumed", "passkey.registered"} {
+		page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: evt}, "", 10)
+		if err != nil {
+			t.Fatalf("ListPaginated(%s): %v", evt, err)
+		}
+		if len(page.Rows) != 1 {
+			t.Errorf("%s entries = %d, want 1", evt, len(page.Rows))
+		}
+	}
+}
+
+func TestBootstrapService_AbandonedClaim_LeavesTokenReusable(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+
+	// BeginClaim only — no FinishClaim. Simulates a user who never completed
+	// (or abandoned) the WebAuthn ceremony.
+	if _, _, err := svc.BeginClaim(t.Context(), token, "admin@example.com"); err != nil {
+		t.Fatalf("BeginClaim: %v", err)
+	}
+
+	bs, err := st.Bootstrap().Get(t.Context())
+	if err != nil {
+		t.Fatalf("Bootstrap.Get: %v", err)
+	}
+	if bs.ConsumedAt != 0 {
+		t.Fatalf("Bootstrap.Get: ConsumedAt = %d, want 0 (abandoned claim must not spend the token)", bs.ConsumedAt)
+	}
+
+	users, err := st.Users().List(t.Context())
+	if err != nil {
+		t.Fatalf("Users.List: %v", err)
+	}
+	if len(users) != 0 {
+		t.Fatalf("users after abandoned claim = %d, want 0 (no orphan admin)", len(users))
+	}
+
+	// The token must still work end-to-end.
+	rp := testRP()
+	if _, err := driveClaim(t, svc, token, "admin@example.com", "My Key", rp); err != nil {
+		t.Fatalf("driveClaim after abandoned BeginClaim: %v", err)
+	}
+}
+
+func TestBootstrapService_BeginClaim_WrongTokenRejected(t *testing.T) {
+	st := openTestStore(t)
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(string) {})
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+
+	if _, _, err := svc.BeginClaim(t.Context(), "wrong-token", "admin@example.com"); !errors.Is(err, ErrBootstrapToken) {
+		t.Fatalf("BeginClaim (wrong token): got %v, want ErrBootstrapToken", err)
+	}
+}
+
+func TestBootstrapService_BeginClaim_AdminAlreadyExists_ReturnsClosed(t *testing.T) {
+	st := openTestStore(t)
+	seedUserWithPassword(t, st, "existing-admin@example.com", "admin", "some-password-1")
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(string) {})
+
+	if _, _, err := svc.BeginClaim(t.Context(), "any-token", "new-admin@example.com"); !errors.Is(err, ErrBootstrapClosed) {
+		t.Fatalf("BeginClaim (admin exists): got %v, want ErrBootstrapClosed", err)
 	}
 }

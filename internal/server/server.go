@@ -12,6 +12,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
@@ -76,6 +77,28 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
 
+	// passkeys is best-effort: WebAuthn's Relying Party identity can only be
+	// resolved once server.base_url is set (or auth.webauthn.rp_id/rp_origin
+	// are set explicitly). Until the passkey/bootstrap-claim HTTP routes are
+	// wired (a later task), an unresolved RP degrades WebAuthn-dependent
+	// features (bootstrap claim, registration grants) to
+	// ErrWebAuthnUnavailable rather than failing server startup — avoiding a
+	// behavior change for deployments that don't set base_url yet. The
+	// eventual fail-closed policy (base_url required whenever passkey login
+	// is the only path, with a hide_local_login_ui bypass) belongs to the
+	// task that turns those routes on.
+	var passkeys *service.PasskeyService
+	if rpID, rpOrigin, rerr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL); rerr != nil {
+		log.Warn("webauthn relying party unresolved; passkey features unavailable", "err", rerr)
+	} else if p, perr := service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit); perr != nil {
+		return nil, nil, fmt.Errorf("server: %w", perr)
+	} else {
+		passkeys = p
+	}
+
+	mailer := email.New(cfg.Email, log)
+	grants := service.NewGrantService(st, passkeys, mailer, cfg.Server.BaseURL, audit, log)
+
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{
 		Log:       log,
@@ -86,9 +109,9 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Devices:   service.NewDeviceService(st, key, verifier, audit),
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
-		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil),
+		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil, passkeys, key),
 		OIDC:      oidcSvc,
-		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit),
+		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit, grants),
 		OIDCMgr:   oidcMgr,
 		HMACKey:   key,
 		Cfg:       cfg.Auth,

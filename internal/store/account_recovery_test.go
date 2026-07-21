@@ -242,6 +242,50 @@ func TestAccountRecoveryPruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
 	}
 }
 
+// ---------- 6b. Get reads a row without consuming it ----------
+
+func TestAccountRecoveryGet_ReadsWithoutConsuming(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "ar-frank@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	now := NowUnix()
+	tok := RecoveryToken{
+		TokenHash: "HASH-GET",
+		UserID:    u.ID,
+		Reason:    "invite",
+		ExpiresAt: now + 3600,
+	}
+	if err := s.AccountRecovery().Create(ctx, tok); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.AccountRecovery().Get(ctx, tok.TokenHash)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.UserID != u.ID || got.Reason != "invite" || got.UsedAt != 0 {
+		t.Errorf("Get: got %+v, want UserID=%q Reason=invite UsedAt=0", got, u.ID)
+	}
+
+	// Get must not consume: Consume must still succeed afterward.
+	if _, err := s.AccountRecovery().Consume(ctx, tok.TokenHash, now); err != nil {
+		t.Fatalf("Consume after Get: %v, want success (Get must be read-only)", err)
+	}
+}
+
+func TestAccountRecoveryGet_UnknownReturnsErrNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.AccountRecovery().Get(ctx, "HASH-NEVER-ISSUED")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get unknown: got %v, want ErrNotFound", err)
+	}
+}
+
 // ---------- 7. FK cascade on user delete ----------
 
 func TestAccountRecoveryFKCascadeOnUserDelete(t *testing.T) {

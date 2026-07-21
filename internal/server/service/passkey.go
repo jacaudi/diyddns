@@ -24,6 +24,13 @@ import (
 // remaining way to sign in.
 var ErrLastCredential = errors.New("service: cannot remove the last credential")
 
+// ErrWebAuthnUnavailable is returned by callers that depend on a
+// *PasskeyService instance (bootstrap claim, registration-grant redeem) when
+// none was wired in — e.g. server.base_url could not be resolved to a
+// WebAuthn Relying Party at startup. It means "not configured", never "wrong
+// credential"; it is distinct from ErrPasskeyVerification.
+var ErrWebAuthnUnavailable = errors.New("service: webauthn service unavailable")
+
 // ErrPasskeyVerification is the single uniform error returned for every
 // WebAuthn ceremony verification failure — a bad/expired/replayed challenge
 // cookie, a failed FinishRegistration/FinishDiscoverableLogin, a sign-count
@@ -339,30 +346,78 @@ func (s *PasskeyService) FinishRegister(ctx context.Context, userID, sealedCooki
 	if err != nil {
 		return store.WebAuthnCredential{}, fmt.Errorf("service.FinishRegister: %w", err)
 	}
-	wu, err := newWebauthnUser(u.Email, sess.UserID, nil)
-	if err != nil {
-		return store.WebAuthnCredential{}, fmt.Errorf("service.FinishRegister: %w", err)
-	}
 
+	cred, err := s.verifyRegistration(u.Email, sess.UserID, sess, r)
+	if err != nil {
+		return store.WebAuthnCredential{}, err
+	}
+	return s.persistCredential(ctx, userID, sess.UserID, cred, name)
+}
+
+// beginRegistrationFor starts a registration ceremony for an identity
+// (email + WebAuthn handle) that does not yet have a store.User row — used
+// only by BootstrapService.BeginClaim (design D9), where the admin account
+// is not created until after the atomic Bootstrap.Consume gate is won.
+// Unlike BeginRegister, this never touches the store and does not seal the
+// returned session: the caller (bootstrap.go) combines it with additional
+// claim-specific data (the target email) into its own sealed cookie, since
+// PasskeyService's own cookie format only carries webauthn.SessionData.
+func (s *PasskeyService) beginRegistrationFor(email string, handle []byte) ([]byte, *webauthn.SessionData, error) {
+	wu, err := newWebauthnUser(email, handle, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.beginRegistrationFor: %w", err)
+	}
+	creation, sess, err := s.wa.BeginRegistration(wu)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.beginRegistrationFor: %w", err)
+	}
+	optsJSON, err := json.Marshal(creation)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.beginRegistrationFor: marshal options: %w", err)
+	}
+	return optsJSON, sess, nil
+}
+
+// verifyRegistration performs go-webauthn's raw registration verification
+// for (email, handle) against sess, returning the verified credential held
+// only in memory — no store access. Callers that must gate persistence
+// behind an atomic single-use token (BootstrapService.FinishClaim,
+// GrantService.RedeemFinish — design C1) call this first, win their atomic
+// consume, then call persistCredential. Every failure collapses to
+// ErrPasskeyVerification, matching FinishRegister's uniform failure mode.
+func (s *PasskeyService) verifyRegistration(email string, handle []byte, sess webauthn.SessionData, r *http.Request) (*webauthn.Credential, error) {
+	wu, err := newWebauthnUser(email, handle, nil)
+	if err != nil {
+		return nil, fmt.Errorf("service.verifyRegistration: %w", err)
+	}
 	cred, err := s.wa.FinishRegistration(wu, sess, r)
 	if err != nil {
-		return store.WebAuthnCredential{}, ErrPasskeyVerification
+		return nil, ErrPasskeyVerification
 	}
+	return cred, nil
+}
 
-	if err := s.st.Users().SetWebAuthnHandle(ctx, userID, sess.UserID); err != nil {
-		return store.WebAuthnCredential{}, fmt.Errorf("service.FinishRegister: %w", err)
+// persistCredential stores a credential already verified by
+// verifyRegistration: idempotently sets userID's webauthn_handle, inserts
+// the credential row, and audits passkey.registered. userID must already
+// exist as a row — callers gating persistence on an atomic token create or
+// validate that row (BootstrapService.FinishClaim, GrantService.RedeemFinish)
+// before calling this.
+func (s *PasskeyService) persistCredential(ctx context.Context, userID string, handle []byte, cred *webauthn.Credential, name string) (store.WebAuthnCredential, error) {
+	if err := s.st.Users().SetWebAuthnHandle(ctx, userID, handle); err != nil {
+		return store.WebAuthnCredential{}, fmt.Errorf("service.persistCredential: %w", err)
 	}
 
 	credJSON, err := json.Marshal(cred)
 	if err != nil {
-		return store.WebAuthnCredential{}, fmt.Errorf("service.FinishRegister: marshal credential: %w", err)
+		return store.WebAuthnCredential{}, fmt.Errorf("service.persistCredential: marshal credential: %w", err)
 	}
 	stored, err := s.st.WebAuthnCredentials().Create(ctx, store.WebAuthnCredential{
 		CredentialID: cred.ID, UserID: userID, CredentialJSON: credJSON,
 		Name: name, AAGUID: cred.Authenticator.AAGUID, CreatedAt: store.NowUnix(),
 	})
 	if err != nil {
-		return store.WebAuthnCredential{}, fmt.Errorf("service.FinishRegister: %w", err)
+		return store.WebAuthnCredential{}, fmt.Errorf("service.persistCredential: %w", err)
 	}
 
 	s.audit.Log(ctx, store.AuditEntry{

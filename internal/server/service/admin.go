@@ -51,17 +51,21 @@ type AdminService struct {
 	argon2Params auth.Argon2Params
 	minLength    int
 	audit        AuditSink
+	grants       *GrantService
 }
 
 // NewAdminService constructs an AdminService. pw supplies the argon2id params
 // and minimum password length enforced when creating users or resetting
-// passwords.
-func NewAdminService(st *store.Store, pw config.PasswordCfg, audit AuditSink) *AdminService {
+// passwords. grants drives CreateUserInvite's registration-grant issuance
+// (design D15); it may be nil if WebAuthn is not configured, in which case
+// CreateUserInvite returns ErrWebAuthnUnavailable.
+func NewAdminService(st *store.Store, pw config.PasswordCfg, audit AuditSink, grants *GrantService) *AdminService {
 	return &AdminService{
 		st:           st,
 		argon2Params: auth.Argon2Params{Time: pw.Argon2Time, MemoryKiB: pw.Argon2MemoryKiB, Parallelism: pw.Argon2Parallelism},
 		minLength:    pw.MinLength,
 		audit:        audit,
+		grants:       grants,
 	}
 }
 
@@ -115,6 +119,34 @@ func (s *AdminService) CreateUser(ctx context.Context, actorID string, p CreateU
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: "user.created", TargetType: "user", TargetID: u.ID})
 	return u, nil
+}
+
+// CreateUserInvite creates a credential-less local user (no password, no
+// passkey) and mints a registration-grant invite link for it (design D15).
+// The link drives GrantService's redeem flow, where the invited user
+// registers their first passkey.
+func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, role string) (store.User, string, error) {
+	if !validRole(role) {
+		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidRole)
+	}
+	if _, err := mail.ParseAddress(email); err != nil {
+		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidEmail)
+	}
+	if s.grants == nil {
+		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrWebAuthnUnavailable)
+	}
+
+	u, err := s.st.Users().Create(ctx, store.User{Email: email, Role: role})
+	if err != nil {
+		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", err) // ErrConflict flows up
+	}
+	s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: "user.created", TargetType: "user", TargetID: u.ID})
+
+	link, err := s.grants.IssueInvite(ctx, actorID, u.ID)
+	if err != nil {
+		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", err)
+	}
+	return u, link, nil
 }
 
 // UpdateUser applies a partial update (role / disabled / password) with lockout

@@ -66,8 +66,12 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		t.Fatalf("NewAuthService: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil)
-	adminSvc := service.NewAdminService(st, cfg.Password, discardAgentAudit{})
+	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil, nil, nil)
+	// mailer is nil: nothing in this file's tests exercises GrantService's
+	// mail-sending paths, only AdminService.CreateUserInvite's constructor
+	// wiring (which never touches the mailer).
+	grantsSvc := service.NewGrantService(st, nil, nil, "", discardAgentAudit{}, log)
+	adminSvc := service.NewAdminService(st, cfg.Password, discardAgentAudit{}, grantsSvc)
 
 	return st, api.ServerDeps{
 		Log:       log,

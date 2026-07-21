@@ -2,11 +2,16 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/mail"
 	"slices"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -41,15 +46,27 @@ type BootstrapService struct {
 	log          *slog.Logger
 	audit        AuditSink
 	emitToken    func(token string)
+	passkeys     *PasskeyService
+	sealKey      []byte
 }
 
 // NewBootstrapService constructs a BootstrapService. pw supplies the
 // argon2id cost parameters (shared with AuthService) and minimum password
-// length policy. emitToken delivers the freshly-minted bootstrap token to
-// its operator-facing destination; pass nil to default to logToken, which
-// prints the token and the endpoint that redeems it at info level. Tests
-// inject a capturing sink instead.
-func NewBootstrapService(st *store.Store, cfg config.BootstrapCfg, pw config.PasswordCfg, log *slog.Logger, audit AuditSink, emitToken func(token string)) *BootstrapService {
+// length policy, used by the existing env/token+password Consume path.
+// emitToken delivers the freshly-minted bootstrap token to its
+// operator-facing destination; pass nil to default to logToken, which prints
+// the token and the endpoint that redeems it at info level. Tests inject a
+// capturing sink instead.
+//
+// passkeys and sealKey drive the passkey-based claim path (BeginClaim /
+// FinishClaim, design D9) — passkeys reuses PasskeyService's WebAuthn
+// ceremony machinery rather than duplicating its Relying Party config, and
+// sealKey (32 bytes, see auth.SealWithAAD) seals the claim's combined
+// session+email cookie, shaped differently from PasskeyService's own
+// SessionData-only cookie, so it cannot reuse PasskeyService's key
+// indirectly. Both may be nil if WebAuthn is not configured; BeginClaim and
+// FinishClaim then return ErrWebAuthnUnavailable rather than panicking.
+func NewBootstrapService(st *store.Store, cfg config.BootstrapCfg, pw config.PasswordCfg, log *slog.Logger, audit AuditSink, emitToken func(token string), passkeys *PasskeyService, sealKey []byte) *BootstrapService {
 	s := &BootstrapService{
 		st:           st,
 		cfg:          cfg,
@@ -57,6 +74,8 @@ func NewBootstrapService(st *store.Store, cfg config.BootstrapCfg, pw config.Pas
 		pwMinLen:     pw.MinLength,
 		log:          log,
 		audit:        audit,
+		passkeys:     passkeys,
+		sealKey:      sealKey,
 	}
 	if emitToken != nil {
 		s.emitToken = emitToken
@@ -183,6 +202,150 @@ func (s *BootstrapService) createAdmin(ctx context.Context, email, pw, path stri
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "user.created", TargetType: "user", TargetID: u.ID})
 	if path == "token" {
 		s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "bootstrap.consumed", TargetType: "user", TargetID: u.ID})
+	}
+	return u, nil
+}
+
+// bootstrapHandleBytes is the byte length of the WebAuthn handle minted for
+// a claim ceremony's not-yet-existing admin identity.
+const bootstrapHandleBytes = 32
+
+// bootstrapClaimAAD domain-separates the sealed bootstrap-claim cookie
+// (WebAuthn session data + target email) from other sealed cookies sharing
+// the master key (the passkey ceremony challenge cookie, OIDC flow state).
+var bootstrapClaimAAD = []byte("diyddns/bootstrap-claim-v1")
+
+// claimSession is the sealed payload round-tripped between BeginClaim and
+// FinishClaim: the in-flight WebAuthn ceremony state plus the target email
+// validated at BeginClaim time (there is no user row yet to read it back
+// from — that is the entire point of D9's deferred-consume ordering).
+type claimSession struct {
+	Email   string
+	Session webauthn.SessionData
+}
+
+// sealClaim seals cs under sealKey, domain-separated by bootstrapClaimAAD.
+func (s *BootstrapService) sealClaim(cs claimSession) (string, error) {
+	raw, err := json.Marshal(cs)
+	if err != nil {
+		return "", fmt.Errorf("service.sealClaim: %w", err)
+	}
+	sealed, err := auth.SealWithAAD(s.sealKey, raw, bootstrapClaimAAD)
+	if err != nil {
+		return "", fmt.Errorf("service.sealClaim: %w", err)
+	}
+	return sealed, nil
+}
+
+// openClaim reverses sealClaim. Every failure — bad key, malformed payload,
+// failed AEAD authentication — collapses to ErrPasskeyVerification, matching
+// PasskeyService.openSession's uniform-failure contract.
+func (s *BootstrapService) openClaim(sealed string) (claimSession, error) {
+	raw, err := auth.OpenWithAAD(s.sealKey, sealed, bootstrapClaimAAD)
+	if err != nil {
+		return claimSession{}, ErrPasskeyVerification
+	}
+	var cs claimSession
+	if err := json.Unmarshal(raw, &cs); err != nil {
+		return claimSession{}, ErrPasskeyVerification
+	}
+	return cs, nil
+}
+
+// BeginClaim validates a bootstrap token + target email (constant-time
+// token comparison, same as Consume) WITHOUT consuming the token, then
+// starts a registration ceremony for a synthetic, not-yet-persisted admin
+// identity (a freshly-minted WebAuthn handle + the validated email). It
+// returns the sealed cookie (carrying both the ceremony session and the
+// email — see claimSession) and the JSON creation options for the browser.
+//
+// Design D9/C1: the token is validated but NOT consumed here — consumption
+// happens only in FinishClaim, after the passkey itself has verified. An
+// abandoned ceremony (BeginClaim called, FinishClaim never called) therefore
+// never spends the token.
+func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) (string, []byte, error) {
+	if s.passkeys == nil {
+		return "", nil, ErrWebAuthnUnavailable
+	}
+	if ok, _ := s.AdminExists(ctx); ok {
+		return "", nil, ErrBootstrapClosed
+	}
+	if _, err := mail.ParseAddress(email); err != nil {
+		return "", nil, fmt.Errorf("service.BeginClaim: invalid email: %w", err)
+	}
+
+	bs, err := s.st.Bootstrap().Get(ctx)
+	if err != nil || bs.TokenHash == "" {
+		return "", nil, ErrBootstrapToken
+	}
+	ok, err := auth.VerifyPassword(bs.TokenHash, token)
+	if err != nil || !ok {
+		return "", nil, ErrBootstrapToken
+	}
+
+	handle := make([]byte, bootstrapHandleBytes)
+	if _, err := rand.Read(handle); err != nil {
+		return "", nil, fmt.Errorf("service.BeginClaim: generate webauthn handle: %w", err)
+	}
+	optsJSON, sess, err := s.passkeys.beginRegistrationFor(email, handle)
+	if err != nil {
+		return "", nil, fmt.Errorf("service.BeginClaim: %w", err)
+	}
+	sealed, err := s.sealClaim(claimSession{Email: email, Session: *sess})
+	if err != nil {
+		return "", nil, fmt.Errorf("service.BeginClaim: %w", err)
+	}
+	return sealed, optsJSON, nil
+}
+
+// FinishClaim completes a passkey-based bootstrap claim. Ordering (design
+// D9/C1, verify-before-consume, NO sql.Tx — the store's single-connection
+// pool would deadlock a transaction wrapping these repos): re-check
+// AdminExists (closes the concurrent-double-admin race, mirroring Consume)
+// -> verify the passkey in memory (no DB write) -> Bootstrap.Consume (the
+// atomic single-row gate) -> create the credential-less admin (NOT the
+// password-hashing createAdmin — M1) -> persist the credential. Verifying
+// before consuming means an abandoned ceremony never spends the token; the
+// only residual risk is the credential INSERT failing after the admin
+// INSERT succeeds (a single local write), which is logged BOOTSTRAP CRITICAL
+// — recovery is deleting the admin + bootstrap rows and restarting (Startup
+// re-mints).
+func (s *BootstrapService) FinishClaim(ctx context.Context, sealedCookie string, r *http.Request, name string) (store.User, error) {
+	if s.passkeys == nil {
+		return store.User{}, ErrWebAuthnUnavailable
+	}
+	if ok, _ := s.AdminExists(ctx); ok {
+		return store.User{}, ErrBootstrapClosed
+	}
+
+	cs, err := s.openClaim(sealedCookie)
+	if err != nil {
+		return store.User{}, err
+	}
+	if !s.passkeys.claimChallenge(cs.Session.Challenge, cs.Session.Expires) {
+		return store.User{}, ErrPasskeyVerification
+	}
+	cred, err := s.passkeys.verifyRegistration(cs.Email, cs.Session.UserID, cs.Session, r)
+	if err != nil {
+		return store.User{}, err
+	}
+
+	if err := s.st.Bootstrap().Consume(ctx); err != nil {
+		// ErrNotFound => already consumed, or this call lost the atomic race.
+		return store.User{}, ErrBootstrapClosed
+	}
+
+	u, err := s.st.Users().Create(ctx, store.User{Email: cs.Email, Role: "admin"})
+	if err != nil {
+		s.log.Error("BOOTSTRAP CRITICAL: token consumed but admin creation failed; recover by deleting the bootstrap row and restarting", "err", err)
+		return store.User{}, fmt.Errorf("service.FinishClaim: %w", err)
+	}
+	s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "user.created", TargetType: "user", TargetID: u.ID})
+	s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "bootstrap.consumed", TargetType: "user", TargetID: u.ID})
+
+	if _, err := s.passkeys.persistCredential(ctx, u.ID, cs.Session.UserID, cred, name); err != nil {
+		s.log.Error("BOOTSTRAP CRITICAL: admin created but credential persist failed; recover by deleting the admin + bootstrap rows and restarting", "err", err, "user_id", u.ID)
+		return store.User{}, fmt.Errorf("service.FinishClaim: %w", err)
 	}
 	return u, nil
 }

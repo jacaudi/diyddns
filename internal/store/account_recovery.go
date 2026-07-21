@@ -68,18 +68,21 @@ func (r *AccountRecoveryRepo) Create(ctx context.Context, t RecoveryToken) error
 	return nil
 }
 
-// get fetches a recovery token by its hash (primary key).
+// Get fetches a recovery token by its hash (primary key), without consuming
+// it. Callers that must validate a token before starting an expensive
+// ceremony (grant redeem begin, bootstrap claim begin — see design C1) use
+// this as a non-atomic pre-check; Consume remains the sole atomic gate.
 // Returns ErrNotFound if no row exists.
-func (r *AccountRecoveryRepo) get(ctx context.Context, tokenHash string) (RecoveryToken, error) {
+func (r *AccountRecoveryRepo) Get(ctx context.Context, tokenHash string) (RecoveryToken, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT `+recoveryTokenColumns+` FROM account_recovery_tokens WHERE token_hash = ?`, tokenHash,
 	)
 	t, err := scanRecoveryToken(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return RecoveryToken{}, fmt.Errorf("account_recovery.get: %w", ErrNotFound)
+			return RecoveryToken{}, fmt.Errorf("account_recovery.Get: %w", ErrNotFound)
 		}
-		return RecoveryToken{}, fmt.Errorf("account_recovery.get: %w", err)
+		return RecoveryToken{}, fmt.Errorf("account_recovery.Get: %w", err)
 	}
 	return t, nil
 }
@@ -107,7 +110,7 @@ func (r *AccountRecoveryRepo) Consume(ctx context.Context, tokenHash string, now
 	if rows == 0 {
 		return RecoveryToken{}, fmt.Errorf("account_recovery.Consume: %w", ErrNotFound)
 	}
-	return r.get(ctx, tokenHash)
+	return r.Get(ctx, tokenHash)
 }
 
 // PruneExpired deletes recovery tokens that have expired and have not been

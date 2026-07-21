@@ -11,12 +11,17 @@ import (
 
 // newAdminSvc returns a fresh in-memory store and an AdminService bound to
 // it, using cheap argon2id params and a real audit writer (so guard paths
-// that write audit entries exercise the real sink, not a discard).
+// that write audit entries exercise the real sink, not a discard). grants
+// has a nil PasskeyService: CreateUser/UpdateUser/DeleteUser never touch it,
+// and IssueInvite (which CreateUserInvite drives) doesn't need a ceremony —
+// only RedeemBegin/RedeemFinish do.
 func newAdminSvc(t *testing.T) (*store.Store, *AdminService) {
 	t.Helper()
 	st := openTestStore(t)
+	audit := NewAuditWriter(st)
 	pw := config.PasswordCfg{Argon2Time: 1, Argon2MemoryKiB: 8 * 1024, Argon2Parallelism: 1, MinLength: 8}
-	return st, NewAdminService(st, pw, NewAuditWriter(st))
+	grants := NewGrantService(st, nil, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
+	return st, NewAdminService(st, pw, audit, grants)
 }
 
 func TestAdminService_CreateUser_HashesPassword(t *testing.T) {
@@ -63,6 +68,31 @@ func TestAdminService_CreateUser_RejectsInvalidEmail(t *testing.T) {
 
 	if _, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "not-an-email", Password: "correcthorse12", Role: "user"}); !errors.Is(err, ErrInvalidEmail) {
 		t.Fatalf("err = %v, want ErrInvalidEmail", err)
+	}
+}
+
+func TestAdminService_CreateUserInvite_CredentiallessUserAndRedeemableLink(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "admin@x.com", "admin")
+
+	u, link, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user")
+	if err != nil {
+		t.Fatalf("CreateUserInvite: %v", err)
+	}
+	if u.PasswordHash != "" {
+		t.Errorf("CreateUserInvite: PasswordHash = %q, want empty (credential-less)", u.PasswordHash)
+	}
+	if u.Email != "invitee@x.com" || u.Role != "user" {
+		t.Errorf("CreateUserInvite: user = %+v, want Email=invitee@x.com Role=user", u)
+	}
+
+	token := extractToken(t, link)
+	grant, err := st.AccountRecovery().Get(t.Context(), auth.HashToken(token))
+	if err != nil {
+		t.Fatalf("AccountRecovery.Get: %v", err)
+	}
+	if grant.UserID != u.ID || grant.Reason != "invite" || grant.UsedAt != 0 {
+		t.Errorf("grant = %+v, want UserID=%q Reason=invite UsedAt=0", grant, u.ID)
 	}
 }
 
