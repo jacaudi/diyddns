@@ -53,7 +53,7 @@ type EmailSection struct {
 	Username string
 	Password string
 	From     string
-	TLS      string // "none", "starttls", or "tls"
+	TLS      string // "starttls", "implicit", or "none" — see validateEmail
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
@@ -219,6 +219,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 	if err := validateOIDC(cfg); err != nil {
 		return Server{}, err
 	}
+	if err := validateEmail(cfg); err != nil {
+		return Server{}, err
+	}
 	return cfg, nil
 }
 
@@ -239,6 +242,21 @@ func validateOIDC(cfg Server) error {
 		return fmt.Errorf("config: auth.oidc.scopes must include \"openid\"")
 	}
 	return nil
+}
+
+// validateEmail enforces the email.tls enum when email.enabled is true,
+// mirroring validateOIDC: fail-closed at startup on a config typo rather
+// than the internal/email package silently falling back to plaintext SMTP.
+func validateEmail(cfg Server) error {
+	if !cfg.Email.Enabled {
+		return nil
+	}
+	switch cfg.Email.TLS {
+	case "starttls", "implicit", "none":
+		return nil
+	default:
+		return fmt.Errorf("config: email.tls must be one of starttls, implicit, none, got %q", cfg.Email.TLS)
+	}
 }
 
 // ResolveWebAuthn derives the WebAuthn Relying Party ID and origin, falling

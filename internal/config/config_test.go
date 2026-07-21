@@ -308,6 +308,43 @@ func TestLoad_EmailHostEnvBinding(t *testing.T) {
 	}
 }
 
+// TestLoad_EmailTLSValidation mirrors TestLoad_OIDCValidation: email.tls is
+// only validated when email.enabled is true, and must be one of the three
+// values the internal/email package understands (starttls, implicit, none).
+func TestLoad_EmailTLSValidation(t *testing.T) {
+	t.Run("enabled with invalid tls value is an error", func(t *testing.T) {
+		v := viper.New()
+		v.Set("database.path", ":memory:")
+		v.Set("email.enabled", true)
+		v.Set("email.tls", "tls") // old/typo value, not in the enum
+		if _, err := config.Load(v, ""); err == nil {
+			t.Fatal("expected error for email.enabled with invalid email.tls")
+		}
+	})
+
+	t.Run("enabled with each valid tls value loads clean", func(t *testing.T) {
+		for _, tls := range []string{"starttls", "implicit", "none"} {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("email.enabled", true)
+			v.Set("email.tls", tls)
+			if _, err := config.Load(v, ""); err != nil {
+				t.Errorf("Load with email.tls=%q: %v", tls, err)
+			}
+		}
+	})
+
+	t.Run("disabled skips validation even with a garbage tls value", func(t *testing.T) {
+		v := viper.New()
+		v.Set("database.path", ":memory:")
+		v.Set("email.enabled", false)
+		v.Set("email.tls", "not-a-real-value")
+		if _, err := config.Load(v, ""); err != nil {
+			t.Fatalf("Load with email disabled: %v", err)
+		}
+	})
+}
+
 func TestAuth_ResolveWebAuthn(t *testing.T) {
 	t.Run("derives rpID and origin from baseURL", func(t *testing.T) {
 		var a config.Auth
