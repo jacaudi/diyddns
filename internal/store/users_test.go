@@ -274,6 +274,72 @@ func TestUserDeleteNotFound(t *testing.T) {
 	}
 }
 
+func TestUserWebAuthnHandleRoundTrip(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "handle-alice@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	handle := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	if err := s.Users().SetWebAuthnHandle(ctx, u.ID, handle); err != nil {
+		t.Fatalf("SetWebAuthnHandle: %v", err)
+	}
+
+	got, err := s.Users().GetByWebAuthnHandle(ctx, handle)
+	if err != nil {
+		t.Fatalf("GetByWebAuthnHandle: %v", err)
+	}
+	if got.ID != u.ID {
+		t.Errorf("GetByWebAuthnHandle: ID = %q, want %q", got.ID, u.ID)
+	}
+}
+
+func TestUserSetWebAuthnHandleNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	err := s.Users().SetWebAuthnHandle(ctx, "nonexistent-id", []byte{0x01})
+	if err == nil {
+		t.Fatal("SetWebAuthnHandle: expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetWebAuthnHandle: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestUserGetByWebAuthnHandleUnknownReturnsErrNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.Users().GetByWebAuthnHandle(ctx, []byte{0x11, 0x22})
+	if err == nil {
+		t.Fatal("GetByWebAuthnHandle: expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWebAuthnHandle: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestUserGetByWebAuthnHandleEmptyRejected(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.Users().GetByWebAuthnHandle(ctx, nil)
+	if err == nil {
+		t.Fatal("GetByWebAuthnHandle(nil): expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWebAuthnHandle(nil): got %v, want ErrNotFound", err)
+	}
+
+	_, err = s.Users().GetByWebAuthnHandle(ctx, []byte{})
+	if err == nil {
+		t.Fatal("GetByWebAuthnHandle(empty): expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWebAuthnHandle(empty): got %v, want ErrNotFound", err)
+	}
+}
+
 func TestUserListOrdersByEmail(t *testing.T) {
 	s, ctx := newTestStore(t)
 

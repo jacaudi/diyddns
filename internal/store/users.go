@@ -226,6 +226,49 @@ func (r *UserRepo) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetWebAuthnHandle sets the opaque per-user handle used to resolve a user
+// during discoverable (usernameless) passkey login.
+// Returns ErrNotFound if no row matched.
+func (r *UserRepo) SetWebAuthnHandle(ctx context.Context, userID string, handle []byte) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET webauthn_handle = ? WHERE id = ?`,
+		handle, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("users.SetWebAuthnHandle: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("users.SetWebAuthnHandle: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("users.SetWebAuthnHandle: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// GetByWebAuthnHandle fetches a user by their WebAuthn handle. An empty
+// handle is rejected before querying: webauthn_handle is NULL for every
+// user that has not registered a passkey, and an empty/nil argument must
+// never be treated as a match against those rows.
+// Returns ErrNotFound if handle is empty or no row exists.
+func (r *UserRepo) GetByWebAuthnHandle(ctx context.Context, handle []byte) (User, error) {
+	if len(handle) == 0 {
+		return User{}, fmt.Errorf("users.GetByWebAuthnHandle: %w", ErrNotFound)
+	}
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE webauthn_handle = ?`, handle,
+	)
+	u, err := scanUser(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, fmt.Errorf("users.GetByWebAuthnHandle: %w", ErrNotFound)
+		}
+		return User{}, fmt.Errorf("users.GetByWebAuthnHandle: %w", err)
+	}
+	return u, nil
+}
+
 // List returns all users ordered by email ascending.
 func (r *UserRepo) List(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
