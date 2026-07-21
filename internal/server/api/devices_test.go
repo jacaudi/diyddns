@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -8,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/descope/virtualwebauthn"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -28,12 +31,30 @@ type fullHarness struct {
 	st  *store.Store
 }
 
+// apiTestRP is the WebAuthn Relying Party identity every passkey ceremony
+// test in this package drives against — must match cfg.WebAuthn below.
+func apiTestRP() virtualwebauthn.RelyingParty {
+	return virtualwebauthn.RelyingParty{ID: "localhost", Name: "Test", Origin: "http://localhost:8080"}
+}
+
+// fakeMailer is a real-enough Mailer double for buildServerDeps: Enabled
+// reports true (so GrantService.RequestSelfServiceRecovery's mailer-enabled
+// gate doesn't short-circuit before this file's tests can observe the
+// account-exists/has-a-passkey checks that follow it) and Send always
+// succeeds without touching the network. mirrors discardAgentAudit's
+// no-op-double style (agent_test.go).
+type fakeMailer struct{}
+
+func (fakeMailer) Send(context.Context, string, string, string) error { return nil }
+func (fakeMailer) Enabled() bool                                      { return true }
+
 // buildServerDeps assembles every ServerDeps field common to the full-server
-// harness (agent HMAC surface, browser auth surface, device management) onto
-// a fresh :memory: store, WITHOUT registering it onto a mux. It is the single
-// place that "how the full server's non-OIDC deps are wired" lives, so both
-// newFullHarness and newOIDCHarness build from the same deps rather than each
-// hand-duplicating the ~10-field ServerDeps literal.
+// harness (agent HMAC surface, browser auth surface, device management,
+// passkey ceremonies) onto a fresh :memory: store, WITHOUT registering it
+// onto a mux. It is the single place that "how the full server's non-OIDC
+// deps are wired" lives, so both newFullHarness and newOIDCHarness build from
+// the same deps rather than each hand-duplicating the ~10-field ServerDeps
+// literal.
 func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	t.Helper()
 	st, err := store.Open(t.Context(), ":memory:")
@@ -59,6 +80,9 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 			SlideWindow:  time.Minute,
 		},
 		Password: cheapPasswordCfg(),
+		WebAuthn: config.WebAuthnCfg{
+			RPID: "localhost", RPOrigin: "http://localhost:8080", RPDisplayName: "Test", Timeout: 2 * time.Minute,
+		},
 	}
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Session.TTL, cfg.Session.SlideWindow)
 	authSvc, err := service.NewAuthService(st, sessions, cfg.Password, discardAgentAudit{})
@@ -66,11 +90,19 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		t.Fatalf("NewAuthService: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil, nil, nil)
-	// mailer is nil: nothing in this file's tests exercises GrantService's
-	// mail-sending paths, only AdminService.CreateUserInvite's constructor
-	// wiring (which never touches the mailer).
-	grantsSvc := service.NewGrantService(st, nil, nil, "", discardAgentAudit{}, log)
+
+	// One 32-byte master key seals both the agent HMAC envelope (via
+	// verifier) and every AEAD-sealed browser cookie (session challenge,
+	// bootstrap claim) below — mirrors production's single
+	// cfg.Auth.HMAC.SecretKey reused across auth.SealWithAAD call sites
+	// (e.g. oidc.go's flow cookie), domain-separated by AAD, not by key.
+	passkeySvc, err := service.NewPasskeyService(st, sessions, key, cfg.WebAuthn, cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, discardAgentAudit{})
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	mailer := fakeMailer{}
+	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log)
+	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil, passkeySvc, key)
 	adminSvc := service.NewAdminService(st, cfg.Password, discardAgentAudit{}, grantsSvc)
 
 	return st, api.ServerDeps{
@@ -84,6 +116,9 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Auth:      authSvc,
 		Bootstrap: bootstrapSvc,
 		Admin:     adminSvc,
+		Passkey:   passkeySvc,
+		Grants:    grantsSvc,
+		Mailer:    mailer,
 		Cfg:       cfg,
 		Info:      version.Info{Version: "v1.2.3"},
 		HMACKey:   key,

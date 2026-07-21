@@ -64,6 +64,22 @@ type deleteUserInput struct {
 // deleteUserOutput carries no body; huma emits 204 via DefaultStatus.
 type deleteUserOutput struct{}
 
+// issueRecoveryInput carries the {id} path parameter of POST
+// /api/v1/admin/users/{id}/recovery.
+type issueRecoveryInput struct {
+	ID string `path:"id"`
+}
+
+// issueRecoveryResponse is the one-time registration-grant link an admin
+// shows the user out of band (design §7's admin-recovery path) — the same
+// shape a future admin-invite response will carry (I1, folded into
+// create-user in a later task), kept local to this op since no second
+// consumer exists yet.
+type issueRecoveryResponse struct {
+	Link string `json:"link"`
+}
+type issueRecoveryOutput struct{ Body issueRecoveryResponse }
+
 // ---- admin devices DTO (adds user_id to the non-secret device view) ----
 
 // adminDeviceView embeds the owner-scoped deviceView and adds user_id — the
@@ -193,6 +209,24 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			return nil, adminErr(ctx, deps, "delete user", err)
 		}
 		return &deleteUserOutput{}, nil
+	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/recovery", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
+	}, func(ctx context.Context, in *issueRecoveryInput) (*issueRecoveryOutput, error) {
+		actor := UserFrom(ctx)
+		// GrantService.IssueRecovery does not itself check that in.ID names a
+		// real user (it only issues a grant + revokes credentials for
+		// whatever id it's given) — this pre-check keeps the 404-on-bad-id
+		// behavior consistent with this file's other {id}-scoped endpoints.
+		if _, err := deps.Store.Users().GetByID(ctx, in.ID); err != nil {
+			return nil, adminErr(ctx, deps, "issue recovery", err)
+		}
+		link, err := deps.Grants.IssueRecovery(ctx, actor.ID, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "issue recovery", err)
+		}
+		return &issueRecoveryOutput{Body: issueRecoveryResponse{Link: link}}, nil
 	})
 
 	huma.Register(a, huma.Operation{
