@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 	"time"
@@ -379,6 +380,65 @@ func TestUserGetByWebAuthnHandleEmptyRejected(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetByWebAuthnHandle(empty): got %v, want ErrNotFound", err)
+	}
+}
+
+// TestUserGetWebAuthnHandle_RoundTrip covers the forward lookup companion to
+// GetByWebAuthnHandle: PasskeyService needs to read a user's *existing*
+// handle back (by user ID) before registering a second passkey, so that
+// every credential a user registers shares the one handle value baked into
+// their authenticators — a mismatched handle across credentials would make
+// GetByWebAuthnHandle unable to resolve the user for whichever credential's
+// login doesn't carry the (overwritten) latest handle.
+func TestUserGetWebAuthnHandle_RoundTrip(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "handle-getter@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	handle := []byte{0x01, 0x02, 0x03, 0x04}
+	if err := s.Users().SetWebAuthnHandle(ctx, u.ID, handle); err != nil {
+		t.Fatalf("SetWebAuthnHandle: %v", err)
+	}
+
+	got, err := s.Users().GetWebAuthnHandle(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetWebAuthnHandle: %v", err)
+	}
+	if !bytes.Equal(got, handle) {
+		t.Errorf("GetWebAuthnHandle = %x, want %x", got, handle)
+	}
+}
+
+// TestUserGetWebAuthnHandle_NilWhenUnset covers a user that has never
+// registered a passkey: the handle column is NULL, and the getter must
+// report that as a nil/empty slice rather than an error, so callers can use
+// len(handle)==0 to decide "mint a new one".
+func TestUserGetWebAuthnHandle_NilWhenUnset(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "handle-unset@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	got, err := s.Users().GetWebAuthnHandle(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetWebAuthnHandle: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("GetWebAuthnHandle = %x, want empty", got)
+	}
+}
+
+func TestUserGetWebAuthnHandle_UnknownUserReturnsErrNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.Users().GetWebAuthnHandle(ctx, "nonexistent-id")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetWebAuthnHandle: got %v, want ErrNotFound", err)
 	}
 }
 

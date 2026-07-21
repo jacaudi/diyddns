@@ -274,6 +274,27 @@ func (r *UserRepo) GetByWebAuthnHandle(ctx context.Context, handle []byte) (User
 	return u, nil
 }
 
+// GetWebAuthnHandle returns the WebAuthn handle for userID, or nil if the
+// user has never registered a passkey (webauthn_handle is NULL). Callers
+// registering a second (or later) passkey for the same user must reuse this
+// exact value in the ceremony: the handle is baked into each authenticator's
+// resident credential at registration time, so every credential a user owns
+// must share the one handle stored on their row, or discoverable-login
+// resolution (GetByWebAuthnHandle) breaks for whichever credential's handle
+// isn't the one currently on the row.
+// Returns ErrNotFound if no such user exists.
+func (r *UserRepo) GetWebAuthnHandle(ctx context.Context, userID string) ([]byte, error) {
+	var handle []byte
+	err := r.db.QueryRowContext(ctx, `SELECT webauthn_handle FROM users WHERE id = ?`, userID).Scan(&handle)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("users.GetWebAuthnHandle: %w", ErrNotFound)
+		}
+		return nil, fmt.Errorf("users.GetWebAuthnHandle: %w", err)
+	}
+	return handle, nil
+}
+
 // List returns all users ordered by email ascending.
 func (r *UserRepo) List(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
