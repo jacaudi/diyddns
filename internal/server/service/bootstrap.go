@@ -27,6 +27,13 @@ var ErrBootstrapClosed = errors.New("service: bootstrap closed")
 // missing, unset, or does not match the stored hash. Maps to HTTP 401.
 var ErrBootstrapToken = errors.New("service: invalid bootstrap token")
 
+// ErrBootstrapInvalidEmail is returned by BeginClaim when the supplied admin
+// email fails RFC parsing. Maps to HTTP 422 (a client-fixable input error,
+// not a token/closed condition) — kept a distinct exported sentinel so the
+// API layer can report it as 422 rather than collapsing it into a logged
+// 500, mirroring AdminService.ErrInvalidEmail.
+var ErrBootstrapInvalidEmail = errors.New("service: invalid bootstrap email")
+
 // bootstrapTokenBytes is the byte length of the random bootstrap token
 // minted by Startup's token path (before base64 encoding).
 const bootstrapTokenBytes = 32
@@ -271,7 +278,7 @@ func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) 
 		return "", nil, ErrBootstrapClosed
 	}
 	if _, err := mail.ParseAddress(email); err != nil {
-		return "", nil, fmt.Errorf("service.BeginClaim: invalid email: %w", err)
+		return "", nil, fmt.Errorf("service.BeginClaim: %w", ErrBootstrapInvalidEmail)
 	}
 
 	bs, err := s.st.Bootstrap().Get(ctx)

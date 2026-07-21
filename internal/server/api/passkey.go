@@ -164,6 +164,8 @@ func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) 
 		return huma.Error410Gone("bootstrap already completed")
 	case errors.Is(err, service.ErrBootstrapToken):
 		return huma.Error401Unauthorized("invalid bootstrap token")
+	case errors.Is(err, service.ErrBootstrapInvalidEmail):
+		return huma.Error422UnprocessableEntity("invalid email address")
 	case errors.Is(err, service.ErrGrantInvalid):
 		return huma.Error401Unauthorized("registration link invalid, expired, or already used")
 	case errors.Is(err, service.ErrPasskeyVerification):

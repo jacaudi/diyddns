@@ -116,6 +116,23 @@ func seedAdminWithPassword(t *testing.T, st *store.Store, email, password string
 	return u
 }
 
+// seedBootstrapToken plants a known bootstrap token on st's single-row
+// bootstrap record so a test can drive the passkey-based first-admin claim
+// (design D9) without invoking Startup (whose default token sink only logs
+// the token). VerifyPassword reads the argon2 params back out of the encoded
+// hash, so the params used here need not match the harness's — only the
+// plaintext token must round-trip.
+func seedBootstrapToken(t *testing.T, st *store.Store, token string) {
+	t.Helper()
+	hash, err := auth.HashPassword(token, auth.Argon2Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1})
+	if err != nil {
+		t.Fatalf("hash bootstrap token: %v", err)
+	}
+	if err := st.Bootstrap().SetTokenHash(context.Background(), hash); err != nil {
+		t.Fatalf("seed bootstrap token: %v", err)
+	}
+}
+
 // mergeField decodes jsonBody, sets key to value, and re-encodes it — used to
 // merge the extra fields (credential nickname, grant token) this package's
 // finish operations accept alongside the raw WebAuthn response body (see
@@ -354,5 +371,91 @@ func TestAdminRecovery_IssuedLinkRedeemsViaRegisterEndpoint(t *testing.T) {
 	status, _, finishRespBody := jarPost(t, redeemClient, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
 	if status != http.StatusOK {
 		t.Fatalf("register finish (grant redeem): status = %d, want 200, body=%s", status, finishRespBody)
+	}
+}
+
+// TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint drives the
+// passkey-based first-admin claim end to end through the shared
+// /api/v1/register/begin + /finish pair (design D9): a token+email body at
+// begin routes to BootstrapService.BeginClaim (not GrantService), the sealed
+// bootstrap-claim cookie round-trips through webauthnMetaMiddleware, and a
+// token-less finish body routes to FinishClaim — proving the begin/finish
+// discriminator and the bootstrap-AAD cookie both work through the huma
+// adapter. This is the ONLY path that mints the first admin, so it is
+// covered at the HTTP layer here (abandoned-claim / atomic-gate properties
+// are covered at the service layer in bootstrap_test.go).
+func TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint(t *testing.T) {
+	h := newFullHarness(t)
+	seedBootstrapToken(t, h.st, "bootstrap-token-abc")
+
+	client := jarClient(t)
+	rp := apiTestRP()
+
+	status, header, beginBody := jarPost(t, client, h.srv.URL+"/api/v1/register/begin", map[string]string{
+		"token": "bootstrap-token-abc", "email": "firstadmin@example.com",
+	}, "")
+	if status != http.StatusOK {
+		t.Fatalf("register begin (bootstrap claim): status = %d, want 200, body=%s", status, beginBody)
+	}
+	if cookie := findCookie(header, webauthnChallengeCookieName); cookie == nil || cookie.Value == "" {
+		t.Fatalf("no bootstrap-claim challenge cookie set; headers=%v", header)
+	}
+
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(beginBody))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	authr := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: []byte(attOpts.UserID)})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	authr.AddCredential(cred)
+	attResp := virtualwebauthn.CreateAttestationResponse(rp, authr, cred, *attOpts)
+	// No token merged in — a token-less finish body routes to FinishClaim.
+	finishBody := mergeField(t, attResp, "name", "First Admin Key")
+
+	status, _, finishRespBody := jarPost(t, client, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
+	if status != http.StatusOK {
+		t.Fatalf("register finish (bootstrap claim): status = %d, want 200, body=%s", status, finishRespBody)
+	}
+
+	admin, err := h.st.Users().GetByEmail(t.Context(), "firstadmin@example.com")
+	if err != nil {
+		t.Fatalf("GetByEmail(firstadmin): %v", err)
+	}
+	if admin.Role != "admin" {
+		t.Errorf("created user role = %q, want admin", admin.Role)
+	}
+	if admin.PasswordHash != "" {
+		t.Errorf("bootstrap-claimed admin has a password hash, want none (passkey-only)")
+	}
+	count, err := h.st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), admin.ID)
+	if err != nil {
+		t.Fatalf("CountWebAuthnCredentials: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("admin passkey count = %d, want 1", count)
+	}
+}
+
+func TestBootstrapClaim_WrongTokenReturns401(t *testing.T) {
+	h := newFullHarness(t)
+	seedBootstrapToken(t, h.st, "bootstrap-token-abc")
+
+	status, _, body := jarPost(t, jarClient(t), h.srv.URL+"/api/v1/register/begin", map[string]string{
+		"token": "wrong-token", "email": "firstadmin@example.com",
+	}, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("bootstrap claim (wrong token): status = %d, want 401, body=%s", status, body)
+	}
+}
+
+func TestBootstrapClaim_MalformedEmailReturns422(t *testing.T) {
+	h := newFullHarness(t)
+	seedBootstrapToken(t, h.st, "bootstrap-token-abc")
+
+	status, _, body := jarPost(t, jarClient(t), h.srv.URL+"/api/v1/register/begin", map[string]string{
+		"token": "bootstrap-token-abc", "email": "not-an-email",
+	}, "")
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("bootstrap claim (malformed email): status = %d, want 422, body=%s", status, body)
 	}
 }
