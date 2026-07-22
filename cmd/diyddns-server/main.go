@@ -78,7 +78,7 @@ func serveCmd() *cobra.Command {
 			// instance never calls BeginClaim/FinishClaim (those are driven
 			// by the HTTP-serving BootstrapService server.New wires up
 			// separately, with a real PasskeyService when WebAuthn resolves).
-			bootstrap := service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, service.NewAuditWriter(st), nil, nil, nil)
+			bootstrap := service.NewBootstrapService(st, log, service.NewAuditWriter(st), nil, nil, nil)
 			if err := bootstrap.Startup(ctx); err != nil {
 				return fmt.Errorf("bootstrap startup: %w", err)
 			}

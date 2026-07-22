@@ -360,19 +360,14 @@ func TestVerifier_SurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	pw := "correct horse battery staple"
-	hash, err := auth.HashPassword(pw, auth.Argon2Params{Time: 3, MemoryKiB: 65536, Parallelism: 2})
-	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
-	}
-	u, err := st1.Users().Create(ctx, store.User{Email: "restart@example.com", PasswordHash: hash, Role: "user"})
+	u, err := st1.Users().Create(ctx, store.User{Email: "restart@example.com", Role: "user"})
 	if err != nil {
 		t.Fatalf("Users().Create: %v", err)
 	}
 	enroll := service.NewEnrollmentService(st1, key, 15*time.Minute, service.NewAuditWriter(st1))
-	result, err := enroll.EnrollCredentials(ctx, u.Email, pw, service.ClientMeta{Hostname: "restart-host"})
+	result, err := enroll.EnrollForUser(ctx, u.ID, "device.enroll.oidc", service.ClientMeta{Hostname: "restart-host"})
 	if err != nil {
-		t.Fatalf("EnrollCredentials: %v", err)
+		t.Fatalf("EnrollForUser: %v", err)
 	}
 	if err := st1.Close(); err != nil {
 		t.Fatalf("st1.Close: %v", err)

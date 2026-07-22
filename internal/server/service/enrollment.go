@@ -7,7 +7,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -58,14 +57,8 @@ func (w *auditWriter) Log(ctx context.Context, e store.AuditEntry) {
 	_, _ = w.st.AuditLog().Append(ctx, e)
 }
 
-// errInvalidCredentials is returned uniformly for every credential-enrollment
-// failure mode (unknown email, disabled account, OIDC-only account with no
-// password hash, wrong password) so callers cannot distinguish "no such
-// user" from "wrong password".
-var errInvalidCredentials = errors.New("service: invalid credentials")
-
-// EnrollmentService turns single-use enrollment codes and email/password
-// credentials into registered devices with AEAD-sealed HMAC secrets.
+// EnrollmentService turns single-use enrollment codes into registered devices
+// with AEAD-sealed HMAC secrets.
 type EnrollmentService struct {
 	st      *store.Store
 	key     []byte
@@ -103,7 +96,7 @@ func (s *EnrollmentService) CreateCode(ctx context.Context, userID, label string
 
 // createSealedDevice mints a fresh HMAC secret, seals it under the service's
 // AEAD key, and creates the device record. Shared by ConsumeCode and
-// EnrollCredentials: issuing a device's sealed secret is the same operation
+// EnrollForUser: issuing a device's sealed secret is the same operation
 // regardless of how the caller authenticated, so both flows must stay in
 // lockstep if it changes.
 func (s *EnrollmentService) createSealedDevice(ctx context.Context, userID, label string, meta ClientMeta) (store.Device, []byte, error) {
@@ -181,46 +174,6 @@ func (s *EnrollmentService) EnrollForUser(ctx context.Context, userID, eventType
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: userID,
 		EventType:   eventType,
-		TargetType:  "device",
-		TargetID:    dev.ID,
-	})
-	return EnrollResult{DeviceID: dev.ID, Secret: secret}, nil
-}
-
-// EnrollCredentials authenticates a user by email/password and enrolls a new
-// device for them — the credential-based counterpart to ConsumeCode. label
-// defaults to "device" when meta.Hostname is empty.
-func (s *EnrollmentService) EnrollCredentials(ctx context.Context, email, password string, meta ClientMeta) (EnrollResult, error) {
-	u, err := s.st.Users().GetByEmail(ctx, email)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return EnrollResult{}, errInvalidCredentials
-		}
-		return EnrollResult{}, fmt.Errorf("service.EnrollCredentials: %w", err)
-	}
-	if u.Disabled || u.PasswordHash == "" {
-		return EnrollResult{}, errInvalidCredentials
-	}
-	ok, err := auth.VerifyPassword(u.PasswordHash, password)
-	if err != nil {
-		return EnrollResult{}, fmt.Errorf("service.EnrollCredentials: %w", err)
-	}
-	if !ok {
-		return EnrollResult{}, errInvalidCredentials
-	}
-
-	label := meta.Hostname
-	if label == "" {
-		label = "device"
-	}
-	dev, secret, err := s.createSealedDevice(ctx, u.ID, label, meta)
-	if err != nil {
-		return EnrollResult{}, fmt.Errorf("service.EnrollCredentials: %w", err)
-	}
-
-	s.audit.Log(ctx, store.AuditEntry{
-		ActorUserID: u.ID,
-		EventType:   "device.enroll.credentials",
 		TargetType:  "device",
 		TargetID:    dev.ID,
 	})

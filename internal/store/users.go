@@ -11,7 +11,6 @@ import (
 type User struct {
 	ID           string
 	Email        string
-	PasswordHash string // empty when OIDC-only
 	Role         string // "admin" | "user"
 	OIDCProvider string // empty when not linked
 	OIDCSubject  string // empty when not linked
@@ -44,18 +43,17 @@ func scanString(ns sql.NullString) string {
 	return ""
 }
 
-const userColumns = `id, email, password_hash, role, oidc_provider, oidc_subject, disabled, created_at, updated_at`
+const userColumns = `id, email, role, oidc_provider, oidc_subject, disabled, created_at, updated_at`
 
 func scanUser(row interface {
 	Scan(dest ...any) error
 }) (User, error) {
 	var u User
-	var passwordHash, oidcProvider, oidcSubject sql.NullString
+	var oidcProvider, oidcSubject sql.NullString
 	var disabled int64
 	err := row.Scan(
 		&u.ID,
 		&u.Email,
-		&passwordHash,
 		&u.Role,
 		&oidcProvider,
 		&oidcSubject,
@@ -66,7 +64,6 @@ func scanUser(row interface {
 	if err != nil {
 		return User{}, err
 	}
-	u.PasswordHash = scanString(passwordHash)
 	u.OIDCProvider = scanString(oidcProvider)
 	u.OIDCSubject = scanString(oidcSubject)
 	u.Disabled = disabled != 0
@@ -85,11 +82,10 @@ func (r *UserRepo) Create(ctx context.Context, u User) (User, error) {
 	u.UpdatedAt = now
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, password_hash, role, oidc_provider, oidc_subject, disabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO users (id, email, role, oidc_provider, oidc_subject, disabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.ID,
 		u.Email,
-		nullIfEmpty(u.PasswordHash),
 		u.Role,
 		nullIfEmpty(u.OIDCProvider),
 		nullIfEmpty(u.OIDCSubject),
@@ -160,12 +156,11 @@ func (r *UserRepo) GetByOIDC(ctx context.Context, provider, subject string) (Use
 func (r *UserRepo) Update(ctx context.Context, u User) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE users
-		 SET email = ?, password_hash = ?, role = ?,
+		 SET email = ?, role = ?,
 		     oidc_provider = ?, oidc_subject = ?, disabled = ?,
 		     updated_at = ?
 		 WHERE id = ?`,
 		u.Email,
-		nullIfEmpty(u.PasswordHash),
 		u.Role,
 		nullIfEmpty(u.OIDCProvider),
 		nullIfEmpty(u.OIDCSubject),

@@ -38,7 +38,6 @@ func TestGuard_ProtectedPathsRejectUnauthenticated(t *testing.T) {
 		{http.MethodGet, "/agent/v1/self"},
 		{http.MethodPost, "/api/v1/auth/logout"},
 		{http.MethodGet, "/api/v1/auth/me"},
-		{http.MethodPost, "/api/v1/auth/password"},
 		{http.MethodPost, "/api/v1/devices"},
 		{http.MethodGet, "/api/v1/devices"},
 		{http.MethodGet, "/api/v1/devices/some-id"},

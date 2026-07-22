@@ -16,9 +16,8 @@ func TestUserCreateAndGetByID(t *testing.T) {
 	s, ctx := newTestStore(t)
 
 	u := User{
-		Email:        "alice@example.com",
-		PasswordHash: "hash1",
-		Role:         roleAdmin,
+		Email: "alice@example.com",
+		Role:  roleAdmin,
 	}
 	created, err := s.Users().Create(ctx, u)
 	if err != nil {
@@ -49,9 +48,6 @@ func TestUserCreateAndGetByID(t *testing.T) {
 	}
 	if got.Email != created.Email {
 		t.Errorf("GetByID: Email = %q, want %q", got.Email, created.Email)
-	}
-	if got.PasswordHash != created.PasswordHash {
-		t.Errorf("GetByID: PasswordHash = %q, want %q", got.PasswordHash, created.PasswordHash)
 	}
 	if got.CreatedAt != created.CreatedAt {
 		t.Errorf("GetByID: CreatedAt = %d, want %d", got.CreatedAt, created.CreatedAt)
@@ -147,9 +143,8 @@ func TestUserUpdate(t *testing.T) {
 	s, ctx := newTestStore(t)
 
 	u := User{
-		Email:        "eve@example.com",
-		PasswordHash: "oldhash",
-		Role:         roleUser,
+		Email: "eve@example.com",
+		Role:  roleUser,
 	}
 	created, err := s.Users().Create(ctx, u)
 	if err != nil {
@@ -160,7 +155,8 @@ func TestUserUpdate(t *testing.T) {
 	time.Sleep(time.Second)
 
 	created.Email = "eve-updated@example.com"
-	created.PasswordHash = "newhash"
+	created.OIDCProvider = "https://idp.example.com"
+	created.OIDCSubject = "sub-123"
 	created.Role = roleAdmin
 	if err := s.Users().Update(ctx, created); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -173,8 +169,8 @@ func TestUserUpdate(t *testing.T) {
 	if got.Email != "eve-updated@example.com" {
 		t.Errorf("Update: Email = %q, want %q", got.Email, "eve-updated@example.com")
 	}
-	if got.PasswordHash != "newhash" {
-		t.Errorf("Update: PasswordHash = %q, want %q", got.PasswordHash, "newhash")
+	if got.OIDCSubject != "sub-123" {
+		t.Errorf("Update: OIDCSubject = %q, want %q", got.OIDCSubject, "sub-123")
 	}
 	if got.Role != roleAdmin {
 		t.Errorf("Update: Role = %q, want %q", got.Role, roleAdmin)

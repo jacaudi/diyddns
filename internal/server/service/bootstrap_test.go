@@ -10,7 +10,6 @@ import (
 
 	"github.com/descope/virtualwebauthn"
 
-	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -25,13 +24,9 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func testBootstrapCfg(email, password string) config.BootstrapCfg {
-	return config.BootstrapCfg{AdminEmail: email, AdminPassword: password}
-}
-
-func newTestBootstrapService(t *testing.T, st *store.Store, cfg config.BootstrapCfg, audit AuditSink, emitToken func(string)) *BootstrapService {
+func newTestBootstrapService(t *testing.T, st *store.Store, audit AuditSink, emitToken func(string)) *BootstrapService {
 	t.Helper()
-	return NewBootstrapService(st, cfg, testPasswordCfg(), discardLogger(), audit, emitToken, nil, nil)
+	return NewBootstrapService(st, discardLogger(), audit, emitToken, nil, nil)
 }
 
 // newTestBootstrapServiceWithPasskeys builds a BootstrapService wired to a
@@ -40,7 +35,7 @@ func newTestBootstrapService(t *testing.T, st *store.Store, cfg config.Bootstrap
 func newTestBootstrapServiceWithPasskeys(t *testing.T, st *store.Store, audit AuditSink, emitToken func(string)) *BootstrapService {
 	t.Helper()
 	passkeys := newTestPasskeyService(t, st, audit)
-	return NewBootstrapService(st, testBootstrapCfg("", ""), testPasswordCfg(), discardLogger(), audit, emitToken, passkeys, testKey32())
+	return NewBootstrapService(st, discardLogger(), audit, emitToken, passkeys, testKey32())
 }
 
 // driveClaim completes a full BeginClaim -> FinishClaim ceremony via
@@ -65,54 +60,10 @@ func driveClaim(t *testing.T, svc *BootstrapService, token, email, name string, 
 	return svc.FinishClaim(t.Context(), sealed, jsonRequest(attResp), name)
 }
 
-func TestBootstrapService_Startup_EnvPath_CreatesAdmin(t *testing.T) {
-	st := openTestStore(t)
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("admin@example.com", "correct horse battery staple"), discardAudit{}, nil)
-
-	if err := svc.Startup(t.Context()); err != nil {
-		t.Fatalf("Startup: %v", err)
-	}
-
-	u, err := st.Users().GetByEmail(t.Context(), "admin@example.com")
-	if err != nil {
-		t.Fatalf("Users.GetByEmail: %v", err)
-	}
-	if u.Role != "admin" {
-		t.Fatalf("created user Role = %q, want admin", u.Role)
-	}
-	users, err := st.Users().List(t.Context())
-	if err != nil {
-		t.Fatalf("Users.List: %v", err)
-	}
-	if len(users) != 1 {
-		t.Fatalf("users after Startup = %d, want 1", len(users))
-	}
-}
-
-func TestBootstrapService_Startup_EnvPath_SecondCallIsNoOp(t *testing.T) {
-	st := openTestStore(t)
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("admin@example.com", "correct horse battery staple"), discardAudit{}, nil)
-
-	if err := svc.Startup(t.Context()); err != nil {
-		t.Fatalf("first Startup: %v", err)
-	}
-	if err := svc.Startup(t.Context()); err != nil {
-		t.Fatalf("second Startup: %v", err)
-	}
-
-	users, err := st.Users().List(t.Context())
-	if err != nil {
-		t.Fatalf("Users.List: %v", err)
-	}
-	if len(users) != 1 {
-		t.Fatalf("users after two Startup calls = %d, want 1 (second call must be a no-op)", len(users))
-	}
-}
-
 func TestBootstrapService_Startup_TokenPath_SetsHashAndEmitsToken(t *testing.T) {
 	st := openTestStore(t)
 	var captured string
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, func(token string) { captured = token })
+	svc := newTestBootstrapService(t, st, discardAudit{}, func(token string) { captured = token })
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("Startup: %v", err)
@@ -144,7 +95,7 @@ func TestBootstrapService_Startup_TokenPath_SetsHashAndEmitsToken(t *testing.T) 
 func TestBootstrapService_Startup_TokenPath_PendingTokenNotReemitted(t *testing.T) {
 	st := openTestStore(t)
 	var calls int
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, func(string) { calls++ })
+	svc := newTestBootstrapService(t, st, discardAudit{}, func(string) { calls++ })
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("first Startup: %v", err)
@@ -174,13 +125,12 @@ func TestBootstrapService_Startup_TokenPath_PendingTokenNotReemitted(t *testing.
 // default emitToken sink's message. The `BOOTSTRAP_TOKEN=<token>` prefix is
 // machine-greppable (scripts/smoke-test.sh scrapes it), and the instruction
 // that follows must name the real endpoint — there is no /bootstrap route
-// and no web UI.
+// and no web UI served at that path.
 func TestBootstrapService_Startup_TokenPath_LogNamesBootstrapAPI(t *testing.T) {
 	st := openTestStore(t)
 	var buf bytes.Buffer
 	// nil emitToken => the default logToken sink, which is what operators see.
-	svc := NewBootstrapService(st, testBootstrapCfg("", ""), testPasswordCfg(),
-		slog.New(slog.NewTextHandler(&buf, nil)), discardAudit{}, nil)
+	svc := NewBootstrapService(st, slog.New(slog.NewTextHandler(&buf, nil)), discardAudit{}, nil, nil, nil)
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("Startup: %v", err)
@@ -201,8 +151,7 @@ func TestBootstrapService_Startup_TokenPath_LogNamesBootstrapAPI(t *testing.T) {
 func TestBootstrapService_Startup_PendingTokenLogNamesBootstrapAPI(t *testing.T) {
 	st := openTestStore(t)
 	var buf bytes.Buffer
-	svc := NewBootstrapService(st, testBootstrapCfg("", ""), testPasswordCfg(),
-		slog.New(slog.NewTextHandler(&buf, nil)), discardAudit{}, nil)
+	svc := NewBootstrapService(st, slog.New(slog.NewTextHandler(&buf, nil)), discardAudit{}, nil, nil, nil)
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("first Startup: %v", err)
@@ -220,99 +169,6 @@ func TestBootstrapService_Startup_PendingTokenLogNamesBootstrapAPI(t *testing.T)
 		t.Errorf("second Startup log = %q, want it to name %q", got, bootstrapAPIPath)
 	}
 }
-
-func TestBootstrapService_Consume_HappyPath_CreatesAdminAndClearsToken(t *testing.T) {
-	st := openTestStore(t)
-	var token string
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), NewAuditWriter(st), func(tok string) { token = tok })
-	if err := svc.Startup(t.Context()); err != nil {
-		t.Fatalf("Startup: %v", err)
-	}
-
-	u, err := svc.Consume(t.Context(), token, "admin@example.com", "correct horse battery staple")
-	if err != nil {
-		t.Fatalf("Consume: %v", err)
-	}
-	if u.Role != "admin" || u.Email != "admin@example.com" {
-		t.Fatalf("Consume returned %+v, want Role=admin Email=admin@example.com", u)
-	}
-
-	bs, err := st.Bootstrap().Get(t.Context())
-	if err != nil {
-		t.Fatalf("Bootstrap.Get: %v", err)
-	}
-	if bs.TokenHash != "" {
-		t.Fatal("Bootstrap.Get: TokenHash not cleared after Consume")
-	}
-	if bs.ConsumedAt == 0 {
-		t.Fatal("Bootstrap.Get: ConsumedAt = 0, want set after Consume")
-	}
-
-	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "bootstrap.consumed"}, "", 10)
-	if err != nil {
-		t.Fatalf("ListPaginated: %v", err)
-	}
-	if len(page.Rows) != 1 {
-		t.Fatalf("bootstrap.consumed audit entries = %d, want 1", len(page.Rows))
-	}
-}
-
-func TestBootstrapService_Consume_WrongToken_NoAdminCreated(t *testing.T) {
-	st := openTestStore(t)
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, nil)
-	if err := svc.Startup(t.Context()); err != nil {
-		t.Fatalf("Startup: %v", err)
-	}
-
-	if _, err := svc.Consume(t.Context(), "wrong-token", "admin@example.com", "correct horse battery staple"); !errors.Is(err, ErrBootstrapToken) {
-		t.Fatalf("Consume (wrong token) error = %v, want ErrBootstrapToken", err)
-	}
-
-	users, err := st.Users().List(t.Context())
-	if err != nil {
-		t.Fatalf("Users.List: %v", err)
-	}
-	if len(users) != 0 {
-		t.Fatalf("users after wrong-token Consume = %d, want 0", len(users))
-	}
-}
-
-func TestBootstrapService_Consume_AdminAlreadyExists_ReturnsClosed(t *testing.T) {
-	st := openTestStore(t)
-	seedUserWithPassword(t, st, "existing-admin@example.com", "admin", "some-password-1")
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, nil)
-
-	if _, err := svc.Consume(t.Context(), "any-token", "new-admin@example.com", "correct horse battery staple"); !errors.Is(err, ErrBootstrapClosed) {
-		t.Fatalf("Consume (admin exists) error = %v, want ErrBootstrapClosed", err)
-	}
-}
-
-func TestBootstrapService_Consume_AtomicGate_SecondConsumeFailsExactlyOneAdmin(t *testing.T) {
-	st := openTestStore(t)
-	var token string
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, func(tok string) { token = tok })
-	if err := svc.Startup(t.Context()); err != nil {
-		t.Fatalf("Startup: %v", err)
-	}
-
-	if _, err := svc.Consume(t.Context(), token, "admin@example.com", "correct horse battery staple"); err != nil {
-		t.Fatalf("first Consume: %v", err)
-	}
-
-	_, err := svc.Consume(t.Context(), token, "second-admin@example.com", "correct horse battery staple")
-	if !errors.Is(err, ErrBootstrapClosed) && !errors.Is(err, ErrBootstrapToken) {
-		t.Fatalf("second Consume error = %v, want ErrBootstrapClosed or ErrBootstrapToken", err)
-	}
-
-	users, err := st.Users().List(t.Context())
-	if err != nil {
-		t.Fatalf("Users.List: %v", err)
-	}
-	if len(users) != 1 {
-		t.Fatalf("users after two Consume calls with the same token = %d, want exactly 1", len(users))
-	}
-}
-
 func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
 	st := openTestStore(t) // service package's helper: migrated :memory: store
 	// Seed a non-admin user (simulating an OIDC signup) so len(users) > 0
@@ -324,7 +180,7 @@ func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
 	}
 
 	var emitted string
-	svc := NewBootstrapService(st, config.BootstrapCfg{}, testPasswordCfg(), discardLogger(), NewAuditWriter(st), func(tok string) { emitted = tok }, nil, nil)
+	svc := NewBootstrapService(st, discardLogger(), NewAuditWriter(st), func(tok string) { emitted = tok }, nil, nil)
 
 	if err := svc.Startup(t.Context()); err != nil {
 		t.Fatalf("Startup: %v", err)
@@ -336,7 +192,7 @@ func TestStartup_BootstrapsWhenUsersExistButNoAdmin(t *testing.T) {
 
 func TestBootstrapService_AdminExists(t *testing.T) {
 	st := openTestStore(t)
-	svc := newTestBootstrapService(t, st, testBootstrapCfg("", ""), discardAudit{}, nil)
+	svc := newTestBootstrapService(t, st, discardAudit{}, nil)
 
 	ok, err := svc.AdminExists(t.Context())
 	if err != nil {
@@ -346,7 +202,7 @@ func TestBootstrapService_AdminExists(t *testing.T) {
 		t.Fatal("AdminExists = true on empty store, want false")
 	}
 
-	seedUserWithPassword(t, st, "admin@example.com", "admin", "some-password-1")
+	seedUser(t, st, "admin@example.com", "admin")
 
 	ok, err = svc.AdminExists(t.Context())
 	if err != nil {
@@ -373,8 +229,8 @@ func TestBootstrapService_FinishClaim_CreatesAdminAndFirstPasskey(t *testing.T) 
 	if u.Role != "admin" || u.Email != "admin@example.com" {
 		t.Fatalf("FinishClaim returned %+v, want Role=admin Email=admin@example.com", u)
 	}
-	if u.PasswordHash != "" {
-		t.Errorf("FinishClaim: PasswordHash = %q, want empty (credential-less admin, M1)", u.PasswordHash)
+	if u.OIDCSubject != "" {
+		t.Errorf("FinishClaim: OIDCSubject = %q, want empty (passkey-only admin)", u.OIDCSubject)
 	}
 
 	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), u.ID)
@@ -455,7 +311,7 @@ func TestBootstrapService_BeginClaim_WrongTokenRejected(t *testing.T) {
 
 func TestBootstrapService_BeginClaim_AdminAlreadyExists_ReturnsClosed(t *testing.T) {
 	st := openTestStore(t)
-	seedUserWithPassword(t, st, "existing-admin@example.com", "admin", "some-password-1")
+	seedUser(t, st, "existing-admin@example.com", "admin")
 	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(string) {})
 
 	if _, _, err := svc.BeginClaim(t.Context(), "any-token", "new-admin@example.com"); !errors.Is(err, ErrBootstrapClosed) {

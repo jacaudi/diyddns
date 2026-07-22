@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/descope/virtualwebauthn"
 
@@ -77,58 +78,39 @@ func jarPost(t *testing.T, client *http.Client, url string, body any, csrf strin
 	return jarDo(t, client, http.MethodPost, url, body, csrf)
 }
 
-// jarLoginAndCSRF logs email/password in via client (so the session cookie
-// lands in its jar) and returns the CSRF token from /api/v1/auth/me.
-func jarLoginAndCSRF(t *testing.T, client *http.Client, h fullHarness, email, password string) string {
+// jarSeedSession mints a real DB-backed browser session for the user with
+// email, injects the cookie into client's jar (so subsequent requests replay
+// it exactly as a browser would), and returns the session's CSRF token. Login
+// is now a passkey ceremony, so authenticated-flow tests seed the session
+// directly via SessionManager rather than POSTing credentials.
+func jarSeedSession(t *testing.T, client *http.Client, h fullHarness, email string) string {
 	t.Helper()
-	status, _, body := jarPost(t, client, h.srv.URL+"/api/v1/auth/login", map[string]string{
-		"email": email, "password": password,
-	}, "")
-	if status != http.StatusOK {
-		t.Fatalf("login: status = %d, body=%s", status, body)
-	}
-	status, _, meBody := jarDo(t, client, http.MethodGet, h.srv.URL+"/api/v1/auth/me", nil, "")
-	if status != http.StatusOK {
-		t.Fatalf("me: status = %d, body=%s", status, meBody)
-	}
-	var me struct {
-		CSRF string `json:"csrf"`
-	}
-	if err := json.Unmarshal(meBody, &me); err != nil {
-		t.Fatalf("decode me: %v", err)
-	}
-	return me.CSRF
-}
-
-// seedAdminWithPassword creates an admin user with an argon2id password
-// hash — mirrors devices_test.go/auth_ops_test.go's seedAuthUserWithPassword
-// but with Role "admin", needed by this file's admin-recovery test.
-func seedAdminWithPassword(t *testing.T, st *store.Store, email, password string) store.User {
-	t.Helper()
-	hash, err := auth.HashPassword(password, auth.Argon2Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1})
+	u, err := h.st.Users().GetByEmail(context.Background(), email)
 	if err != nil {
-		t.Fatalf("hash password: %v", err)
+		t.Fatalf("jarSeedSession lookup %q: %v", email, err)
 	}
-	u, err := st.Users().Create(context.Background(), store.User{Email: email, Role: "admin", PasswordHash: hash})
+	sm := auth.NewSessionManager(h.st.Sessions(), h.st.Users(), time.Hour, time.Minute)
+	sess, err := sm.Create(context.Background(), u.ID, "", "")
 	if err != nil {
-		t.Fatalf("seed admin: %v", err)
+		t.Fatalf("jarSeedSession create for %q: %v", email, err)
 	}
-	return u
+	su, err := url.Parse(h.srv.URL)
+	if err != nil {
+		t.Fatalf("parse srv url: %v", err)
+	}
+	client.Jar.SetCookies(su, []*http.Cookie{{Name: authTestCookieName, Value: sess.ID}})
+	return sess.CSRFToken
 }
 
 // seedBootstrapToken plants a known bootstrap token on st's single-row
 // bootstrap record so a test can drive the passkey-based first-admin claim
 // (design D9) without invoking Startup (whose default token sink only logs
-// the token). VerifyPassword reads the argon2 params back out of the encoded
-// hash, so the params used here need not match the harness's — only the
-// plaintext token must round-trip.
+// the token). The bootstrap token is a high-entropy machine token hashed with
+// SHA-256 (auth.HashToken), matching Startup's own hashing so VerifyToken
+// round-trips the plaintext.
 func seedBootstrapToken(t *testing.T, st *store.Store, token string) {
 	t.Helper()
-	hash, err := auth.HashPassword(token, auth.Argon2Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1})
-	if err != nil {
-		t.Fatalf("hash bootstrap token: %v", err)
-	}
-	if err := st.Bootstrap().SetTokenHash(context.Background(), hash); err != nil {
+	if err := st.Bootstrap().SetTokenHash(context.Background(), auth.HashToken(token)); err != nil {
 		t.Fatalf("seed bootstrap token: %v", err)
 	}
 }
@@ -261,10 +243,10 @@ func TestPasskeyLoginBegin_ReturnsOptionsAndChallengeCookie(t *testing.T) {
 
 func TestPasskeyRegisterThenLogin_MintsSessionCookie(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "passkey@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "passkey@example.com", "user")
 
 	registerClient := jarClient(t)
-	csrf := jarLoginAndCSRF(t, registerClient, h, "passkey@example.com", "correct horse battery staple")
+	csrf := jarSeedSession(t, registerClient, h, "passkey@example.com")
 	authr, cred, _ := registerPasskeyHTTP(t, registerClient, h, csrf, "My Laptop")
 
 	// A fresh, cookie-free client proves the login ceremony below is
@@ -286,10 +268,10 @@ func TestPasskeyRegisterThenLogin_MintsSessionCookie(t *testing.T) {
 
 func TestDeletePasskey_LastOneReturns409(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "onlykey@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "onlykey@example.com", "user")
 
 	client := jarClient(t)
-	csrf := jarLoginAndCSRF(t, client, h, "onlykey@example.com", "correct horse battery staple")
+	csrf := jarSeedSession(t, client, h, "onlykey@example.com")
 	_, _, credID := registerPasskeyHTTP(t, client, h, csrf, "Only Key")
 
 	status, _, body := jarDo(t, client, http.MethodDelete, h.srv.URL+"/api/v1/account/passkeys/"+credID, nil, csrf)
@@ -300,9 +282,9 @@ func TestDeletePasskey_LastOneReturns409(t *testing.T) {
 
 func TestRecoveryRequest_UniformlyReturns200(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "known@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "known@example.com", "user")
 	client := jarClient(t)
-	csrf := jarLoginAndCSRF(t, client, h, "known@example.com", "correct horse battery staple")
+	csrf := jarSeedSession(t, client, h, "known@example.com")
 	registerPasskeyHTTP(t, client, h, csrf, "Recovery Key")
 
 	knownStatus, _, knownBody := jarDo(t, jarClient(t), http.MethodPost, h.srv.URL+"/api/v1/auth/recovery/request", map[string]string{
@@ -329,15 +311,15 @@ func TestRecoveryRequest_UniformlyReturns200(t *testing.T) {
 // to GrantService rather than BootstrapService.
 func TestAdminRecovery_IssuedLinkRedeemsViaRegisterEndpoint(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminWithPassword(t, h.st, "admin@example.com", "correct horse battery staple")
-	seedAuthUserWithPassword(t, h.st, "target@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin@example.com", "admin")
+	seedUser(t, h.st, "target@example.com", "user")
 
 	targetClient := jarClient(t)
-	targetCSRF := jarLoginAndCSRF(t, targetClient, h, "target@example.com", "correct horse battery staple")
+	targetCSRF := jarSeedSession(t, targetClient, h, "target@example.com")
 	registerPasskeyHTTP(t, targetClient, h, targetCSRF, "Old Key")
 
 	adminClient := jarClient(t)
-	adminCSRF := jarLoginAndCSRF(t, adminClient, h, "admin@example.com", "correct horse battery staple")
+	adminCSRF := jarSeedSession(t, adminClient, h, "admin@example.com")
 	targetID := mustUserID(t, h, "target@example.com")
 
 	status, _, body := jarPost(t, adminClient, h.srv.URL+"/api/v1/admin/users/"+targetID+"/recovery", nil, adminCSRF)
@@ -424,8 +406,8 @@ func TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint(t *testing.T) {
 	if admin.Role != "admin" {
 		t.Errorf("created user role = %q, want admin", admin.Role)
 	}
-	if admin.PasswordHash != "" {
-		t.Errorf("bootstrap-claimed admin has a password hash, want none (passkey-only)")
+	if admin.OIDCSubject != "" {
+		t.Errorf("bootstrap-claimed admin is OIDC-linked (%q), want none (passkey-only)", admin.OIDCSubject)
 	}
 	count, err := h.st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), admin.ID)
 	if err != nil {

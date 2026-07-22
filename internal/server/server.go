@@ -61,10 +61,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Auth.Session.TTL, cfg.Auth.Session.SlideWindow)
 
 	audit := service.NewAuditWriter(st)
-	authSvc, err := service.NewAuthService(st, sessions, cfg.Auth.Password, audit)
-	if err != nil {
-		return nil, nil, fmt.Errorf("server: %w", err)
-	}
+	authSvc := service.NewAuthService(sessions, audit)
 
 	oidcMgr := oidc.NewManager(cfg.Auth.OIDC, cfg.Server.BaseURL, log)
 	if cfg.Auth.OIDC.Enabled && cfg.Auth.OIDC.Required {
@@ -116,9 +113,9 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		Devices:   service.NewDeviceService(st, key, verifier, audit),
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
-		Bootstrap: service.NewBootstrapService(st, cfg.Auth.Bootstrap, cfg.Auth.Password, log, audit, nil, passkeySvc, key),
+		Bootstrap: service.NewBootstrapService(st, log, audit, nil, passkeySvc, key),
 		OIDC:      oidcSvc,
-		Admin:     service.NewAdminService(st, cfg.Auth.Password, audit, grantSvc),
+		Admin:     service.NewAdminService(st, audit, grantSvc),
 		Passkey:   passkeySvc,
 		Grants:    grantSvc,
 		Mailer:    mailer,

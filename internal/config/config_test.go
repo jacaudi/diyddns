@@ -149,21 +149,6 @@ func TestLoad_AuthDefaults(t *testing.T) {
 	if cfg.Auth.HMAC.SecretKey != "" {
 		t.Errorf("HMAC.SecretKey = %q, want empty by default", cfg.Auth.HMAC.SecretKey)
 	}
-	if cfg.Auth.Password.Argon2Time != 3 {
-		t.Errorf("Password.Argon2Time = %d, want 3", cfg.Auth.Password.Argon2Time)
-	}
-	if cfg.Auth.Password.Argon2MemoryKiB != 65536 {
-		t.Errorf("Password.Argon2MemoryKiB = %d, want 65536", cfg.Auth.Password.Argon2MemoryKiB)
-	}
-	if cfg.Auth.Password.Argon2Parallelism != 2 {
-		t.Errorf("Password.Argon2Parallelism = %d, want 2", cfg.Auth.Password.Argon2Parallelism)
-	}
-	if cfg.Auth.Password.MinLength != 12 {
-		t.Errorf("Password.MinLength = %d, want 12", cfg.Auth.Password.MinLength)
-	}
-	if cfg.Auth.Bootstrap.AdminEmail != "" || cfg.Auth.Bootstrap.AdminPassword != "" {
-		t.Errorf("Bootstrap = %+v, want empty by default", cfg.Auth.Bootstrap)
-	}
 }
 
 func TestLoad_RejectsNonceTTLBelowSkew(t *testing.T) {
@@ -188,21 +173,6 @@ func TestLoad_HMACSecretKeyEnvBinding(t *testing.T) {
 	cfg := mustLoadWithDB(t)
 	if cfg.Auth.HMAC.SecretKey != want {
 		t.Errorf("Auth.HMAC.SecretKey = %q, want %q (env var DIYDDNS_AUTH_HMAC_SECRET_KEY was dropped)", cfg.Auth.HMAC.SecretKey, want)
-	}
-}
-
-// TestLoad_BootstrapAdminEmailEnvAlias asserts the spec §5C env-var name
-// DIYDDNS_BOOTSTRAP_ADMIN_EMAIL binds to auth.bootstrap.admin_email, distinct from
-// the auto-derived DIYDDNS_AUTH_BOOTSTRAP_ADMIN_EMAIL.
-func TestLoad_BootstrapAdminEmailEnvAlias(t *testing.T) {
-	t.Setenv("DIYDDNS_BOOTSTRAP_ADMIN_EMAIL", "admin@example.com")
-	t.Setenv("DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD", "hunter2hunter2")
-	cfg := mustLoadWithDB(t)
-	if cfg.Auth.Bootstrap.AdminEmail != "admin@example.com" {
-		t.Errorf("Bootstrap.AdminEmail = %q, want admin@example.com", cfg.Auth.Bootstrap.AdminEmail)
-	}
-	if cfg.Auth.Bootstrap.AdminPassword != "hunter2hunter2" {
-		t.Errorf("Bootstrap.AdminPassword = %q, want hunter2hunter2", cfg.Auth.Bootstrap.AdminPassword)
 	}
 }
 

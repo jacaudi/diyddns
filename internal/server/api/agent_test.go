@@ -86,21 +86,6 @@ func seedAgentUser(t *testing.T, st *store.Store, email string) store.User {
 	return u
 }
 
-// seedAgentUserWithPassword creates a user with an argon2id password hash
-// for enroll/credentials tests. Cheap argon2id params keep the test fast.
-func seedAgentUserWithPassword(t *testing.T, st *store.Store, email, password string) store.User {
-	t.Helper()
-	hash, err := auth.HashPassword(password, auth.Argon2Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1})
-	if err != nil {
-		t.Fatalf("hash password: %v", err)
-	}
-	u, err := st.Users().Create(t.Context(), store.User{Email: email, Role: "user", PasswordHash: hash})
-	if err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	return u
-}
-
 // postJSON POSTs body (marshaled to JSON) to url with no auth headers,
 // reads and closes the response body itself, and returns the status code
 // plus raw response bytes so callers never have to manage the response
@@ -201,62 +186,6 @@ func TestEnrollCode_InvalidCodeReturns401(t *testing.T) {
 	status, body := postJSON(t, h.srv.URL+"/agent/v1/enroll/code", map[string]string{"code": "never-issued"})
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401, body=%s", status, body)
-	}
-}
-
-func TestEnrollCredentials_GoodCredsWork(t *testing.T) {
-	h := newAgentHarness(t)
-	seedAgentUserWithPassword(t, h.st, "creds-user@example.com", "correct horse battery staple")
-
-	status, body := postJSON(t, h.srv.URL+"/agent/v1/enroll/credentials", map[string]string{
-		"email":    "creds-user@example.com",
-		"password": "correct horse battery staple",
-		"hostname": "desktop",
-	})
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200, body=%s", status, body)
-	}
-	var got enrollResult
-	decodeJSON(t, body, &got)
-	if got.DeviceID == "" {
-		t.Fatal("empty device_id")
-	}
-	secretBytes, err := base64.StdEncoding.DecodeString(got.Secret)
-	if err != nil {
-		t.Fatalf("secret is not valid base64: %v", err)
-	}
-	if len(secretBytes) == 0 {
-		t.Fatal("empty secret")
-	}
-}
-
-func TestEnrollCredentials_BadCredsReturns401SameShapeAsBadCode(t *testing.T) {
-	h := newAgentHarness(t)
-	seedAgentUserWithPassword(t, h.st, "creds-user@example.com", "correct horse battery staple")
-
-	credsStatus, badCredsBody := postJSON(t, h.srv.URL+"/agent/v1/enroll/credentials", map[string]string{
-		"email":    "creds-user@example.com",
-		"password": "wrong-password",
-	})
-	if credsStatus != http.StatusUnauthorized {
-		t.Fatalf("bad creds status = %d, want 401, body=%s", credsStatus, badCredsBody)
-	}
-
-	codeStatus, badCodeBody := postJSON(t, h.srv.URL+"/agent/v1/enroll/code", map[string]string{"code": "never-issued"})
-	if codeStatus != http.StatusUnauthorized {
-		t.Fatalf("bad code status = %d, want 401, body=%s", codeStatus, badCodeBody)
-	}
-
-	var badCredsProblem, badCodeProblem map[string]any
-	if err := json.Unmarshal(badCredsBody, &badCredsProblem); err != nil {
-		t.Fatalf("bad creds body not JSON: %v", err)
-	}
-	if err := json.Unmarshal(badCodeBody, &badCodeProblem); err != nil {
-		t.Fatalf("bad code body not JSON: %v", err)
-	}
-	if badCredsProblem["detail"] != badCodeProblem["detail"] {
-		t.Fatalf("uniform 401 message violated: creds detail=%v, code detail=%v",
-			badCredsProblem["detail"], badCodeProblem["detail"])
 	}
 }
 

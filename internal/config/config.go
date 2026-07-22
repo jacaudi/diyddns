@@ -57,12 +57,10 @@ type EmailSection struct {
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
-// HMAC signing, password hashing, first-run bootstrap, and WebAuthn passkeys.
+// HMAC signing, single-provider OIDC, and WebAuthn passkeys.
 type Auth struct {
 	Session          SessionCfg
 	HMAC             HMACCfg
-	Password         PasswordCfg
-	Bootstrap        BootstrapCfg
 	OIDC             OIDCCfg
 	WebAuthn         WebAuthnCfg
 	HideLocalLoginUI bool `mapstructure:"hide_local_login_ui"`
@@ -85,20 +83,6 @@ type HMACCfg struct {
 	SkewWindow time.Duration `mapstructure:"skew_window"`
 	NonceTTL   time.Duration `mapstructure:"nonce_ttl"`
 	SecretKey  string        `mapstructure:"secret_key"` // base64 of 32 bytes; decoded via DecodeSecretKey at startup
-}
-
-// PasswordCfg holds argon2id hashing parameters and password policy.
-type PasswordCfg struct {
-	Argon2Time        uint32 `mapstructure:"argon2_time"`
-	Argon2MemoryKiB   uint32 `mapstructure:"argon2_memory_kib"`
-	Argon2Parallelism uint8  `mapstructure:"argon2_parallelism"`
-	MinLength         int    `mapstructure:"min_length"`
-}
-
-// BootstrapCfg holds the first-run admin account settings.
-type BootstrapCfg struct {
-	AdminEmail    string `mapstructure:"admin_email"`
-	AdminPassword string `mapstructure:"admin_password"`
 }
 
 // OIDCCfg holds single-provider OpenID Connect settings. client_secret is
@@ -132,31 +116,25 @@ type WebAuthnCfg struct {
 // Env binding is explicit: config.Load has no viper.AutomaticEnv(), so every
 // key MUST be listed here or its DIYDDNS_* env var is silently ignored.
 var keyDefaults = map[string]any{
-	"server.listen":                    ":8080",
-	"server.base_url":                  "",
-	"database.path":                    "",
-	"logging.level":                    "info",
-	"logging.format":                   "json",
-	"logging.output":                   "stderr",
-	"auth.session.cookie_name":         "diyddns_session",
-	"auth.session.cookie_secure":       true,
-	"auth.session.cookie_samesite":     "lax",
-	"auth.session.ttl":                 "720h",
-	"auth.session.slide_window":        "168h",
-	"auth.hmac.skew_window":            "120s",
-	"auth.hmac.nonce_ttl":              "120s",
-	"auth.hmac.secret_key":             "",
-	"auth.password.argon2_time":        3,
-	"auth.password.argon2_memory_kib":  65536,
-	"auth.password.argon2_parallelism": 2,
-	"auth.password.min_length":         12,
-	"auth.bootstrap.admin_email":       "",
-	"auth.bootstrap.admin_password":    "",
-	"auth.oidc.enabled":                false,
-	"auth.oidc.required":               false,
-	"auth.oidc.issuer":                 "",
-	"auth.oidc.client_id":              "",
-	"auth.oidc.client_secret":          "",
+	"server.listen":                ":8080",
+	"server.base_url":              "",
+	"database.path":                "",
+	"logging.level":                "info",
+	"logging.format":               "json",
+	"logging.output":               "stderr",
+	"auth.session.cookie_name":     "diyddns_session",
+	"auth.session.cookie_secure":   true,
+	"auth.session.cookie_samesite": "lax",
+	"auth.session.ttl":             "720h",
+	"auth.session.slide_window":    "168h",
+	"auth.hmac.skew_window":        "120s",
+	"auth.hmac.nonce_ttl":          "120s",
+	"auth.hmac.secret_key":         "",
+	"auth.oidc.enabled":            false,
+	"auth.oidc.required":           false,
+	"auth.oidc.issuer":             "",
+	"auth.oidc.client_id":          "",
+	"auth.oidc.client_secret":      "",
 	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
 	// (viper delivers env values as a single string, not []string). Configure
 	// scopes via YAML or flags; the default covers the common case.
@@ -188,14 +166,6 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		if err := v.BindEnv(key); err != nil {
 			return Server{}, fmt.Errorf("config: bind env %s: %w", key, err)
 		}
-	}
-	// Explicit aliases for the spec §5C bootstrap env-var names, distinct from
-	// the auto-derived DIYDDNS_AUTH_BOOTSTRAP_* names above.
-	if err := v.BindEnv("auth.bootstrap.admin_email", "DIYDDNS_BOOTSTRAP_ADMIN_EMAIL"); err != nil {
-		return Server{}, fmt.Errorf("config: bind env DIYDDNS_BOOTSTRAP_ADMIN_EMAIL: %w", err)
-	}
-	if err := v.BindEnv("auth.bootstrap.admin_password", "DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD"); err != nil {
-		return Server{}, fmt.Errorf("config: bind env DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD: %w", err)
 	}
 
 	if configPath != "" {
