@@ -112,7 +112,16 @@ func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID st
 // admin taking an intentional action) and mints a "recovery" grant. The
 // self-service path (RequestSelfServiceRecovery) deliberately does NOT revoke
 // at issue — see mintRecoveryGrant.
+//
+// It refuses (ErrWebAuthnUnavailable) when s.passkeys is nil: the minted
+// link would 404 at redeem, since the register routes are gated off
+// deps.Passkey != nil (server.go) — mirroring the same guard
+// RedeemBegin/RedeemFinish already apply, just earlier, before a dead link
+// is ever handed to an admin.
 func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string) (string, error) {
+	if s.passkeys == nil {
+		return "", fmt.Errorf("service.IssueRecovery: %w", ErrWebAuthnUnavailable)
+	}
 	if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, userID); err != nil {
 		return "", fmt.Errorf("service.IssueRecovery: %w", err)
 	}
@@ -123,11 +132,26 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string
 	return link, nil
 }
 
+// selfServiceRecoveryTimeout bounds the detached goroutine
+// RequestSelfServiceRecovery spawns to perform its account-existence-
+// sensitive work: generous enough for a real SMTP round-trip (plus the
+// dial-timeout floor in internal/email's smtpMailer), but bounded so the
+// goroutine can never leak forever if a downstream call wedges.
+const selfServiceRecoveryTimeout = 30 * time.Second
+
 // RequestSelfServiceRecovery is the pre-auth "Lost your passkey?" entry
-// point. It ALWAYS returns nil — the caller's response never distinguishes
-// success from any of the guard failures below, so the endpoint cannot be
-// used to enumerate accounts. It proceeds (mints a grant, emails the link,
-// notifies admins) only when every one of these holds:
+// point. It ALWAYS returns nil IMMEDIATELY — before doing any
+// account-specific work — so the caller's response is uniform in BOTH
+// content and latency, and can never be used to enumerate accounts. A slow
+// path (a real SMTP send takes 100s of ms) that ran on the caller's own
+// request path would otherwise leak account existence through response
+// timing alone, even with a uniform response body/status; the entire
+// account-existence-sensitive body below therefore runs in a detached
+// goroutine, on its own timeout context (never ctx, which is canceled the
+// moment the HTTP handler returns).
+//
+// That body proceeds (mints a grant, emails the link, notifies admins) only
+// when every one of these holds:
 //   - the mailer is enabled (SMTP configured, D11)
 //   - the account exists
 //   - the account already has at least one passkey (SGE I2 — self-service
@@ -140,23 +164,35 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string
 // by mailbox possession, so a pre-auth request from anyone who merely knows
 // an email address can never lock that account out. Send failures are logged
 // (audit email.send_failed) and never surfaced.
-func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEmail, ip string) error {
+func (s *GrantService) RequestSelfServiceRecovery(_ context.Context, targetEmail, ip string) error {
+	//nolint:gosec // G118: deliberate — ctx is the REQUEST context, canceled the instant the HTTP handler returns; using it here would abort doSelfServiceRecovery mid-flight and reopen exactly the account-enumeration timing channel this fix closes. doSelfServiceRecovery derives its own bounded context.Background()-rooted timeout instead (see its doc comment).
+	go s.doSelfServiceRecovery(targetEmail, ip)
+	return nil
+}
+
+// doSelfServiceRecovery is RequestSelfServiceRecovery's detached-goroutine
+// body — see that method's doc comment for why it must never run on the
+// caller's path.
+func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
+	ctx, cancel := context.WithTimeout(context.Background(), selfServiceRecoveryTimeout)
+	defer cancel()
+
 	if s.mailer == nil || !s.mailer.Enabled() {
-		return nil
+		return
 	}
 	u, err := s.st.Users().GetByEmail(ctx, targetEmail)
 	if err != nil {
-		return nil
+		return
 	}
 	count, err := s.st.WebAuthnCredentials().CountWebAuthnCredentials(ctx, u.ID)
 	if err != nil || count == 0 {
-		return nil
+		return
 	}
 
 	link, err := s.mintRecoveryGrant(ctx, u.ID, u.ID)
 	if err != nil {
 		s.log.Error("self-service recovery: issue failed", "err", err)
-		return nil
+		return
 	}
 
 	subj, body := email.RecoveryLinkBody(link)
@@ -167,7 +203,7 @@ func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEma
 	admins, err := s.st.Users().List(ctx)
 	if err != nil {
 		s.log.Error("self-service recovery: list admins failed", "err", err)
-		return nil
+		return
 	}
 	adminSubj, adminBody := email.AdminNotifyBody(u.Email)
 	for _, a := range admins {
@@ -178,7 +214,6 @@ func (s *GrantService) RequestSelfServiceRecovery(ctx context.Context, targetEma
 			s.audit.Log(ctx, store.AuditEntry{EventType: "email.send_failed", TargetType: "user", TargetID: a.ID, IP: ip})
 		}
 	}
-	return nil
 }
 
 // validGrant looks up token's grant and reports whether it is currently

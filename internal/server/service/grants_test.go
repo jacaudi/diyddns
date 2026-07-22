@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/descope/virtualwebauthn"
 
@@ -16,9 +18,20 @@ import (
 
 // fakeMailer is a test double for email.Mailer: Send records every call
 // instead of contacting a server, and Enabled is set by the test.
+// RequestSelfServiceRecovery now runs its account-existence-sensitive work
+// (including Send) in a detached goroutine (design fix wave, closing the
+// account-enumeration timing channel — see grants.go), so Send may be
+// invoked concurrently with a test's own goroutine reading sent: both the
+// mutex and sendCh exist to make that race-safe and deterministic rather
+// than requiring a sleep-and-hope poll.
 type fakeMailer struct {
 	enabled bool
-	sent    []sentEmail
+	// sendCh, when non-nil, additionally receives every sentEmail so a test
+	// can block on the goroutine actually calling Send instead of racing it.
+	sendCh chan sentEmail
+
+	mu   sync.Mutex
+	sent []sentEmail
 }
 
 type sentEmail struct{ to, subject, body string }
@@ -26,11 +39,65 @@ type sentEmail struct{ to, subject, body string }
 func (m *fakeMailer) Enabled() bool { return m.enabled }
 
 func (m *fakeMailer) Send(_ context.Context, to, subject, body string) error {
-	m.sent = append(m.sent, sentEmail{to: to, subject: subject, body: body})
+	e := sentEmail{to: to, subject: subject, body: body}
+	m.mu.Lock()
+	m.sent = append(m.sent, e)
+	m.mu.Unlock()
+	if m.sendCh != nil {
+		m.sendCh <- e
+	}
 	return nil
 }
 
+// Sent returns a snapshot of every email recorded so far, safe to call
+// concurrently with Send.
+func (m *fakeMailer) Sent() []sentEmail {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]sentEmail(nil), m.sent...)
+}
+
 var _ email.Mailer = (*fakeMailer)(nil)
+
+// waitForSend blocks until ch delivers a sentEmail or timeout elapses,
+// failing the test in the latter case. Used to deterministically wait for
+// RequestSelfServiceRecovery's detached goroutine to reach a Send call,
+// rather than racing it.
+func waitForSend(t *testing.T, ch <-chan sentEmail, timeout time.Duration) sentEmail {
+	t.Helper()
+	select {
+	case e := <-ch:
+		return e
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for Send")
+		return sentEmail{}
+	}
+}
+
+// assertNoSendWithin waits window for a send on ch and fails the test if one
+// arrives — used to prove a guard-failure path (unknown account, no
+// passkey, mailer disabled) never reaches Send, while still giving the
+// detached goroutine time to actually run and hit that guard.
+func assertNoSendWithin(t *testing.T, ch <-chan sentEmail, window time.Duration) {
+	t.Helper()
+	select {
+	case e := <-ch:
+		t.Fatalf("unexpected send: %+v", e)
+	case <-time.After(window):
+	}
+}
+
+// selfServiceRecoveryWaitTimeout is the safety-net upper bound for
+// waitForSend: the detached goroutine's guard checks are local DB lookups
+// with no network I/O, so this is only ever hit if the goroutine never runs
+// at all (a real regression), not normal jitter.
+const selfServiceRecoveryWaitTimeout = 5 * time.Second
+
+// selfServiceRecoveryNoSendWindow is how long assertNoSendWithin actually
+// waits before concluding a guard path never sends — long enough for the
+// detached goroutine's local DB lookups to complete, short enough to keep
+// the "no send" tests fast.
+const selfServiceRecoveryNoSendWindow = 300 * time.Millisecond
 
 // newTestGrantService builds a GrantService bound to st, using the fixed
 // base URL "https://ddns.example.com" so extractToken can round-trip a
@@ -140,6 +207,21 @@ func TestGrantService_InviteRedeem_UserGainsPasskeyAndGrantConsumed(t *testing.T
 	}
 }
 
+// TestGrantService_IssueRecovery_NilPasskeys_ReturnsErrWebAuthnUnavailable
+// proves IssueRecovery refuses to mint a recovery link when WebAuthn isn't
+// configured (s.passkeys == nil) — such a link would 404 at redeem, since
+// the register routes are gated off deps.Passkey != nil (server.go). Mirrors
+// the same guard RedeemBegin/RedeemFinish already apply.
+func TestGrantService_IssueRecovery_NilPasskeys_ReturnsErrWebAuthnUnavailable(t *testing.T) {
+	st := openTestStore(t)
+	grants := newTestGrantService(t, st, nil, &fakeMailer{}, NewAuditWriter(st))
+	u := seedUser(t, st, "alice@example.com", "user")
+
+	if _, err := grants.IssueRecovery(t.Context(), "admin-id", u.ID); !errors.Is(err, ErrWebAuthnUnavailable) {
+		t.Fatalf("IssueRecovery with nil passkeys: err = %v, want ErrWebAuthnUnavailable", err)
+	}
+}
+
 func TestGrantService_RecoveryRedeem_RevokesThenRegistersFresh(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})
@@ -190,20 +272,18 @@ func TestGrantService_RecoveryRedeem_RevokesThenRegistersFresh(t *testing.T) {
 
 func TestGrantService_RequestSelfServiceRecovery_UnknownEmail_NoEmailStillNil(t *testing.T) {
 	st := openTestStore(t)
-	mailer := &fakeMailer{enabled: true}
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
 	grants := newTestGrantService(t, st, nil, mailer, discardAudit{})
 
 	if err := grants.RequestSelfServiceRecovery(t.Context(), "nobody@example.com", "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
-	if len(mailer.sent) != 0 {
-		t.Errorf("emails sent = %d, want 0 (unknown account, no enumeration)", len(mailer.sent))
-	}
+	assertNoSendWithin(t, mailer.sendCh, selfServiceRecoveryNoSendWindow)
 }
 
 func TestGrantService_RequestSelfServiceRecovery_OIDCOnlyNoPasskey_NoEmailNoGrant(t *testing.T) {
 	st := openTestStore(t)
-	mailer := &fakeMailer{enabled: true}
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
 	grants := newTestGrantService(t, st, nil, mailer, NewAuditWriter(st))
 	u, err := st.Users().Create(t.Context(), store.User{
 		Email: "oidc-only@example.com", Role: "user", OIDCProvider: "https://idp", OIDCSubject: "sub-1",
@@ -215,9 +295,7 @@ func TestGrantService_RequestSelfServiceRecovery_OIDCOnlyNoPasskey_NoEmailNoGran
 	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
-	if len(mailer.sent) != 0 {
-		t.Errorf("emails sent = %d, want 0 (I2 guard: no existing passkey)", len(mailer.sent))
-	}
+	assertNoSendWithin(t, mailer.sendCh, selfServiceRecoveryNoSendWindow)
 
 	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "passkey.recovery_issued"}, "", 10)
 	if err != nil {
@@ -231,7 +309,7 @@ func TestGrantService_RequestSelfServiceRecovery_OIDCOnlyNoPasskey_NoEmailNoGran
 func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})
-	mailer := &fakeMailer{enabled: true}
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
 	grants := newTestGrantService(t, st, passkeys, mailer, discardAudit{})
 
 	u := seedUser(t, st, "alice@example.com", "user")
@@ -243,11 +321,12 @@ func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
 
-	if len(mailer.sent) != 2 {
-		t.Fatalf("emails sent = %d, want 2 (user + admin): %+v", len(mailer.sent), mailer.sent)
-	}
+	first := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+	second := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+	sent := []sentEmail{first, second}
+
 	var gotUser, gotAdmin bool
-	for _, m := range mailer.sent {
+	for _, m := range sent {
 		switch m.to {
 		case u.Email:
 			gotUser = true
@@ -256,7 +335,7 @@ func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t
 		}
 	}
 	if !gotUser || !gotAdmin {
-		t.Errorf("expected emails to %q and %q, got %+v", u.Email, admin.Email, mailer.sent)
+		t.Errorf("expected emails to %q and %q, got %+v", u.Email, admin.Email, sent)
 	}
 
 	// Confirm-then-revoke: the request must NOT revoke the user's existing
@@ -274,7 +353,7 @@ func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t
 func TestGrantService_SelfServiceRecoveryRedeem_RevokesOldRegistersOne(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})
-	mailer := &fakeMailer{enabled: true}
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
 	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
 
 	u := seedUser(t, st, "alice@example.com", "user")
@@ -284,12 +363,11 @@ func TestGrantService_SelfServiceRecoveryRedeem_RevokesOldRegistersOne(t *testin
 	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
-	// The self-service link is emailed to the user (first send); recover its
-	// token to drive the redeem, exactly as a user clicking the link would.
-	if len(mailer.sent) == 0 {
-		t.Fatal("no email sent")
-	}
-	token := extractToken(t, extractLinkFromBody(t, mailer.sent[0].body))
+	// The self-service link is emailed to the user first (before any
+	// admin-notify sends); wait for that send and recover its token to drive
+	// the redeem, exactly as a user clicking the link would.
+	userSend := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+	token := extractToken(t, extractLinkFromBody(t, userSend.body))
 
 	if err := driveRedeem(t, grants, token, "New Key", rp); err != nil {
 		t.Fatalf("driveRedeem: %v", err)
@@ -336,6 +414,48 @@ func TestGrantService_InviteRedeem_DoesNotRevokeExistingPasskeys(t *testing.T) {
 	}
 }
 
+// slowMailer is a test double whose Send blocks until release is closed,
+// simulating a real SMTP round-trip (100s of ms). Used to prove
+// RequestSelfServiceRecovery's response latency does not depend on
+// account-specific work (the account-enumeration timing channel this fix
+// closes) — the caller must get its nil back long before Send unblocks.
+type slowMailer struct {
+	enabled bool
+	release <-chan struct{}
+}
+
+func (m *slowMailer) Enabled() bool { return m.enabled }
+
+func (m *slowMailer) Send(_ context.Context, _, _, _ string) error {
+	<-m.release
+	return nil
+}
+
+var _ email.Mailer = (*slowMailer)(nil)
+
+func TestGrantService_RequestSelfServiceRecovery_ReturnsImmediately_BeforeSendCompletes(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // let the detached goroutine's Send unblock so it doesn't leak past the test
+	mailer := &slowMailer{enabled: true, release: release}
+	grants := newTestGrantService(t, st, passkeys, mailer, discardAudit{})
+
+	u := seedUser(t, st, "alice@example.com", "user")
+	rp := testRP()
+	registerPasskey(t, passkeys, u.ID, "Existing Key", rp)
+
+	start := time.Now()
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("RequestSelfServiceRecovery took %v to return, want near-instant — the account-existence-sensitive work (including the slow Send) must run in a detached goroutine, not on the caller's path, or response latency leaks whether the account exists", elapsed)
+	}
+}
+
 func TestGrantService_RequestSelfServiceRecovery_NilMailer_NoPanicNilError(t *testing.T) {
 	st := openTestStore(t)
 	// A nil email.Mailer must be treated as "not configured" — same uniform
@@ -350,7 +470,7 @@ func TestGrantService_RequestSelfServiceRecovery_NilMailer_NoPanicNilError(t *te
 func TestGrantService_RequestSelfServiceRecovery_MailerDisabled_NoEmailNoGrant(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})
-	mailer := &fakeMailer{enabled: false}
+	mailer := &fakeMailer{enabled: false, sendCh: make(chan sentEmail, 4)}
 	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
 
 	u := seedUser(t, st, "alice@example.com", "user")
@@ -360,9 +480,7 @@ func TestGrantService_RequestSelfServiceRecovery_MailerDisabled_NoEmailNoGrant(t
 	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
-	if len(mailer.sent) != 0 {
-		t.Errorf("emails sent = %d, want 0 (mailer disabled)", len(mailer.sent))
-	}
+	assertNoSendWithin(t, mailer.sendCh, selfServiceRecoveryNoSendWindow)
 	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "passkey.recovery_issued"}, "", 10)
 	if err != nil {
 		t.Fatalf("ListPaginated: %v", err)

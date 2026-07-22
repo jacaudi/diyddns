@@ -305,6 +305,8 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 		return huma.Error422UnprocessableEntity("role must be 'admin' or 'user'")
 	case errors.Is(err, service.ErrInvalidEmail):
 		return huma.Error422UnprocessableEntity("invalid email address")
+	case errors.Is(err, service.ErrWebAuthnUnavailable):
+		return huma.Error503ServiceUnavailable("passkey authentication is not configured")
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)

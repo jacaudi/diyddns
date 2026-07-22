@@ -40,7 +40,9 @@ func openTestStore(t *testing.T) *store.Store {
 }
 
 // seedUser creates and returns a user with the given email and role and no
-// password hash. Reused by later service test files in this package.
+// credential (no local password exists; a passkey is added separately, if
+// needed, via the test's own registration flow). Reused by later service
+// test files in this package.
 func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 	t.Helper()
 	u, err := st.Users().Create(t.Context(), store.User{Email: email, Role: role})

@@ -226,9 +226,10 @@ func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) 
 // pool would deadlock a transaction wrapping these repos): re-check
 // AdminExists (closes the concurrent-double-admin race, mirroring Consume)
 // -> verify the passkey in memory (no DB write) -> Bootstrap.Consume (the
-// atomic single-row gate) -> create the credential-less admin (NOT the
-// password-hashing createAdmin — M1) -> persist the credential. Verifying
-// before consuming means an abandoned ceremony never spends the token; the
+// atomic single-row gate) -> create the credential-less admin (a local
+// password never exists — the passkey persisted below is the only
+// credential) -> persist the credential. Verifying before consuming means an
+// abandoned ceremony never spends the token; the
 // only residual risk is the credential INSERT failing after the admin
 // INSERT succeeds (a single local write), which is logged BOOTSTRAP CRITICAL
 // — recovery is deleting the admin + bootstrap rows and restarting (Startup

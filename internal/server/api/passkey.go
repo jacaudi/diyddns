@@ -117,6 +117,18 @@ func passkeyOptions(body []byte, cookie http.Cookie) *passkeyOptionsOutput {
 	return &passkeyOptionsOutput{SetCookie: cookie, ContentType: "application/json", Body: body}
 }
 
+// loginFinishOutput carries the new session cookie AND clears the sealed
+// WebAuthn challenge cookie login/begin set — two Set-Cookie headers in one
+// response. huma emits one header per slice element (via AppendHeader) for a
+// slice-typed header field, unlike sessionCookieOutput's single scalar
+// http.Cookie field (SetHeader, which would overwrite a second value rather
+// than adding it) — login/finish is the one op that needs both cookies at
+// once, so it gets its own output type rather than generalizing
+// sessionCookieOutput for a single caller.
+type loginFinishOutput struct {
+	SetCookie []http.Cookie `header:"Set-Cookie"`
+}
+
 // webauthnFinishInput is the wire shape shared by every WebAuthn finish op:
 // the raw PublicKeyCredential JSON navigator.credentials.create()/get()
 // produced, forwarded byte-for-byte to go-webauthn's
@@ -265,14 +277,17 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Path:          "/api/v1/auth/passkey/login/finish",
 		DefaultStatus: http.StatusOK,
 		Middlewares:   huma.Middlewares{loginMetaMiddleware(), webauthnMetaMiddleware()},
-	}, func(ctx context.Context, in *webauthnFinishInput) (*sessionCookieOutput, error) {
+	}, func(ctx context.Context, in *webauthnFinishInput) (*loginFinishOutput, error) {
 		lmeta := loginMetaFrom(ctx)
 		wmeta := webauthnMetaFrom(ctx, in.RawBody)
 		sess, err := deps.Passkey.FinishLogin(ctx, wmeta.challenge, wmeta.req, lmeta.ip, lmeta.ua)
 		if err != nil {
 			return nil, passkeyErr(ctx, deps, "finish passkey login", err)
 		}
-		return &sessionCookieOutput{SetCookie: sessionCookie(deps.Cfg.Session, sess.ID, 0, lmeta.tls)}, nil
+		return &loginFinishOutput{SetCookie: []http.Cookie{
+			sessionCookie(deps.Cfg.Session, sess.ID, 0, lmeta.tls),
+			passkeyChallengeCookie(deps.Cfg.Session, "", -1, false),
+		}}, nil
 	})
 
 	huma.Register(a, huma.Operation{

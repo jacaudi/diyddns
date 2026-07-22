@@ -6,10 +6,21 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/smtp"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
 )
+
+// defaultDialTimeout bounds how long dial waits for the underlying TCP
+// connect (and, for implicit TLS, the handshake) to complete before giving
+// up. Without this, a hung/unreachable SMTP host could block the caller
+// (RequestSelfServiceRecovery's background goroutine, see grants.go)
+// indefinitely — the goroutine's own 30s context.WithTimeout is the outer
+// bound, but a per-connection floor keeps one slow host from eating the
+// whole budget before Send even gets a chance to retry or fail cleanly.
+const defaultDialTimeout = 10 * time.Second
 
 // smtpMailer sends email over SMTP using net/smtp, honoring cfg.TLS:
 //   - "implicit" dials directly over TLS (SMTPS, typically port 465).
@@ -29,6 +40,16 @@ type smtpMailer struct {
 	// an injection seam so tests can trust a self-signed cert. See
 	// export_test.go's NewSMTPForTest.
 	tlsConfig *tls.Config
+	// dialTimeout bounds the connect step in dial (see defaultDialTimeout).
+	// Production always sets it via New(); tests can inject a shorter value
+	// via export_test.go's NewSMTPForTestWithDial to prove the bound is
+	// enforced without waiting out a real timeout.
+	dialTimeout time.Duration
+	// dialFunc, when non-nil, replaces the connect step dial otherwise
+	// performs with (&net.Dialer{}).DialContext — an injection seam (like
+	// tlsConfig above) so tests can simulate a hung host deterministically,
+	// without real network I/O. Production never sets it.
+	dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func (m *smtpMailer) Enabled() bool { return true }
@@ -53,7 +74,7 @@ func (m *smtpMailer) Send(ctx context.Context, to, subject, body string) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
-	c, err := m.dial(addr)
+	c, err := m.dial(ctx, addr)
 	if err != nil {
 		m.log.ErrorContext(ctx, "email.send failed", "host", m.cfg.Host, "to", to, "error", err)
 		return err
@@ -69,27 +90,37 @@ func (m *smtpMailer) Send(ctx context.Context, to, subject, body string) error {
 	return nil
 }
 
-// dial establishes the transport-level connection and wraps it in an
-// *smtp.Client, per cfg.TLS. Implicit TLS dials directly over TLS; starttls
-// and none both dial plaintext (starttls upgrades the connection later, in
+// dial establishes the transport-level connection, bounded by dialTimeout,
+// and wraps it in an *smtp.Client, per cfg.TLS. Implicit TLS completes the
+// TLS handshake as part of the same bounded window; starttls and none both
+// connect plaintext (starttls upgrades the connection later, in
 // sendEnvelope, once the client has confirmed the server offers it).
-func (m *smtpMailer) dial(addr string) (*smtp.Client, error) {
-	if m.cfg.TLS == "implicit" {
-		conn, err := tls.Dial("tcp", addr, m.clientTLSConfig())
-		if err != nil {
-			return nil, fmt.Errorf("email: dial %s over tls: %w", addr, err)
-		}
-		c, err := smtp.NewClient(conn, m.cfg.Host)
-		if err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("email: create smtp client for %s: %w", addr, err)
-		}
-		return c, nil
-	}
+func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, m.dialTimeout)
+	defer cancel()
 
-	c, err := smtp.Dial(addr)
+	connect := m.dialFunc
+	if connect == nil {
+		connect = (&net.Dialer{}).DialContext
+	}
+	conn, err := connect(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("email: dial %s: %w", addr, err)
+	}
+
+	if m.cfg.TLS == "implicit" {
+		tlsConn := tls.Client(conn, m.clientTLSConfig())
+		if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("email: dial %s over tls: %w", addr, err)
+		}
+		conn = tlsConn
+	}
+
+	c, err := smtp.NewClient(conn, m.cfg.Host)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("email: create smtp client for %s: %w", addr, err)
 	}
 	return c, nil
 }

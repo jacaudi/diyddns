@@ -28,7 +28,7 @@ func New(cfg config.EmailSection, log *slog.Logger) Mailer {
 	if !cfg.Enabled {
 		return &noopMailer{log: log}
 	}
-	return &smtpMailer{cfg: cfg, log: log}
+	return &smtpMailer{cfg: cfg, log: log, dialTimeout: defaultDialTimeout}
 }
 
 // noopMailer is returned when the email subsystem is disabled. Send never

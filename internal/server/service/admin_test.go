@@ -11,13 +11,29 @@ import (
 // newAdminSvc returns a fresh in-memory store and an AdminService bound to
 // it, using a real audit writer (so guard paths that write audit entries
 // exercise the real sink, not a discard). grants has a nil PasskeyService:
-// UpdateUser/DeleteUser never touch it, and IssueInvite (which CreateUserInvite
-// drives) doesn't need a ceremony — only RedeemBegin/RedeemFinish do.
+// UpdateUser/DeleteUser never touch it, and the role/email validation guards
+// CreateUserInvite runs before its own passkeys check fire first for the
+// "rejects bad input" tests below — but CreateUserInvite now also refuses to
+// mint a link when passkeys are nil (see ErrWebAuthnUnavailable, a dead link
+// would 404 at redeem), so tests exercising an actual successful invite need
+// newAdminSvcWithPasskeys instead.
 func newAdminSvc(t *testing.T) (*store.Store, *AdminService) {
 	t.Helper()
 	st := openTestStore(t)
 	audit := NewAuditWriter(st)
 	grants := NewGrantService(st, nil, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
+	return st, NewAdminService(st, audit, grants)
+}
+
+// newAdminSvcWithPasskeys is newAdminSvc but with a real PasskeyService
+// wired into grants, for tests that need CreateUserInvite to actually mint a
+// redeemable link.
+func newAdminSvcWithPasskeys(t *testing.T) (*store.Store, *AdminService) {
+	t.Helper()
+	st := openTestStore(t)
+	audit := NewAuditWriter(st)
+	passkeys := newTestPasskeyService(t, st, audit)
+	grants := NewGrantService(st, passkeys, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
 	return st, NewAdminService(st, audit, grants)
 }
 
@@ -40,7 +56,7 @@ func TestAdminService_CreateUserInvite_RejectsInvalidEmail(t *testing.T) {
 }
 
 func TestAdminService_CreateUserInvite_CredentiallessUserAndRedeemableLink(t *testing.T) {
-	st, svc := newAdminSvc(t)
+	st, svc := newAdminSvcWithPasskeys(t)
 	admin := seedUser(t, st, "admin@x.com", "admin")
 
 	u, link, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user")
@@ -67,6 +83,20 @@ func TestAdminService_CreateUserInvite_CredentiallessUserAndRedeemableLink(t *te
 	}
 	if grant.UserID != u.ID || grant.Reason != "invite" || grant.UsedAt != 0 {
 		t.Errorf("grant = %+v, want UserID=%q Reason=invite UsedAt=0", grant, u.ID)
+	}
+}
+
+// TestAdminService_CreateUserInvite_NilPasskeys_ReturnsErrWebAuthnUnavailable
+// proves CreateUserInvite refuses to mint an invite link when WebAuthn isn't
+// configured — such a link would 404 at redeem (register routes are gated
+// off deps.Passkey != nil, server.go). newAdminSvc's grants has a nil
+// PasskeyService.
+func TestAdminService_CreateUserInvite_NilPasskeys_ReturnsErrWebAuthnUnavailable(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "admin@x.com", "admin")
+
+	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user"); !errors.Is(err, ErrWebAuthnUnavailable) {
+		t.Fatalf("CreateUserInvite with nil passkeys: err = %v, want ErrWebAuthnUnavailable", err)
 	}
 }
 

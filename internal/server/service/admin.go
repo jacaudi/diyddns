@@ -88,7 +88,12 @@ func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, rol
 	if _, err := mail.ParseAddress(email); err != nil {
 		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidEmail)
 	}
-	if s.grants == nil {
+	// s.grants itself may be non-nil while its passkeys dependency is (design
+	// server.go leaves PasskeyService nil when hide_local_login_ui tolerates
+	// an unresolved RP) — checking only s.grants == nil would let a dead
+	// invite link (404s at redeem, register routes gated off
+	// deps.Passkey != nil) slip through, so this checks both.
+	if s.grants == nil || s.grants.passkeys == nil {
 		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrWebAuthnUnavailable)
 	}
 
@@ -105,7 +110,7 @@ func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, rol
 	return u, link, nil
 }
 
-// UpdateUser applies a partial update (role / disabled / password) with lockout
+// UpdateUser applies a partial update (role / disabled) with lockout
 // guards. Disabling a user also revokes their active sessions.
 func (s *AdminService) UpdateUser(ctx context.Context, actorID, targetID string, p UpdateUserParams) (store.User, error) {
 	u, err := s.st.Users().GetByID(ctx, targetID)

@@ -264,6 +264,19 @@ func TestPasskeyRegisterThenLogin_MintsSessionCookie(t *testing.T) {
 	if sessionCookie.Value == "" {
 		t.Fatal("session cookie has empty value")
 	}
+
+	// login/begin set the sealed challenge cookie; login/finish must clear it
+	// (mirroring register/finish's own cleanup) rather than leaving it to
+	// linger client-side for its full 300s MaxAge. Not a security issue
+	// (single-use is enforced server-side via claimChallenge), but a stray
+	// cookie inconsistency this fix closes.
+	challengeCookie := findCookie(header, webauthnChallengeCookieName)
+	if challengeCookie == nil {
+		t.Fatalf("no %s cookie cleared after passkey login/finish; headers=%v", webauthnChallengeCookieName, header)
+	}
+	if challengeCookie.MaxAge >= 0 {
+		t.Errorf("challenge cookie MaxAge = %d, want <0 (cleared)", challengeCookie.MaxAge)
+	}
 }
 
 func TestDeletePasskey_LastOneReturns409(t *testing.T) {

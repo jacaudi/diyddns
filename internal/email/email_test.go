@@ -364,6 +364,37 @@ func TestSmtpMailer_Send_RespectsCanceledContext(t *testing.T) {
 	}
 }
 
+// TestSmtpMailer_Send_DialTimeoutBounds drives Send with an injected dial
+// function that blocks until its context is done (simulating a hung SMTP
+// host that never completes the TCP handshake) and a short dialTimeout, and
+// asserts Send returns promptly with a wrapped context.DeadlineExceeded
+// rather than hanging indefinitely. The fake proves this file's code
+// actually threads a bounded context down to the dial step — real
+// net.Dialer/tls.Dialer connect-timeout behavior is the stdlib's own
+// responsibility, not re-tested here.
+func TestSmtpMailer_Send_DialTimeoutBounds(t *testing.T) {
+	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	cfg := config.EmailSection{Enabled: true, Host: "unreachable.invalid", Port: 25, From: "noreply@example.com", TLS: "none"}
+	m := email.NewSMTPForTestWithDial(cfg, debugLogger(), 50*time.Millisecond, dialFunc)
+
+	start := time.Now()
+	err := m.Send(t.Context(), "user@example.com", "subject", "body")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected Send to fail when the dial never returns before dialTimeout")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Send took %v, want bounded by the 50ms dial timeout (dial never returns on its own)", elapsed)
+	}
+}
+
 func TestRecoveryLinkBody_ContainsLink(t *testing.T) {
 	const link = "https://ddns.example.com/recover/abc123"
 	subject, body := email.RecoveryLinkBody(link)
