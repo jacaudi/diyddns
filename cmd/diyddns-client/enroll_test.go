@@ -218,46 +218,10 @@ func TestEnrollCmd_Code_EndToEnd(t *testing.T) {
 	}
 }
 
-func TestEnrollCmd_User_EndToEnd_EnvPassword(t *testing.T) {
-	t.Setenv("DIYDDNS_ENROLL_PASSWORD", "s3cret")
-	var gotEmail, gotPassword, gotOS string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-			OS       string `json:"os"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		gotEmail, gotPassword, gotOS = body.Email, body.Password, body.OS
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"device_id": "dev-user", "secret": base64.StdEncoding.EncodeToString([]byte("k")),
-		})
-	}))
-	defer srv.Close()
-
-	dir := t.TempDir()
-	credPath := filepath.Join(dir, "credentials.json")
-	cmd := newEnrollCmd()
-	cmd.SetArgs([]string{"--user", "me@example.com", "--server", srv.URL, "--credentials-file", credPath})
-	cmd.SetErr(&nopWriter{})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("enroll --user: %v", err)
-	}
-	if gotEmail != "me@example.com" || gotPassword != "s3cret" {
-		t.Errorf("server saw %q/%q", gotEmail, gotPassword)
-	}
-	if gotOS == "" {
-		t.Error("expected OS metadata to be sent (runtime.GOOS)")
-	}
-	if _, err := credentials.Load(credPath); err != nil {
-		t.Errorf("credentials not written: %v", err)
-	}
-}
-
 func TestEnrollCmd_ModeSelection(t *testing.T) {
 	t.Run("mutually exclusive", func(t *testing.T) {
 		cmd := newEnrollCmd()
-		cmd.SetArgs([]string{"--code", "x", "--user", "me@example.com", "--server", "https://x"})
+		cmd.SetArgs([]string{"--code", "x", "--oidc", "--server", "https://x"})
 		cmd.SetErr(&nopWriter{})
 		if err := cmd.ExecuteContext(context.Background()); err == nil {
 			t.Fatal("want error when two modes are set")
@@ -281,18 +245,6 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 		}
 		if err.Error() != "enrollment code must not be empty" {
 			t.Errorf("err = %q, want the specific empty-code message (not the generic default)", err.Error())
-		}
-	})
-	t.Run("explicit empty user gets a specific error, not the generic default", func(t *testing.T) {
-		cmd := newEnrollCmd()
-		cmd.SetArgs([]string{"--user", "", "--server", "https://x"})
-		cmd.SetErr(&nopWriter{})
-		err := cmd.ExecuteContext(context.Background())
-		if err == nil {
-			t.Fatal("want error for --user \"\"")
-		}
-		if err.Error() != "user email must not be empty" {
-			t.Errorf("err = %q, want the specific empty-email message (not the generic default)", err.Error())
 		}
 	})
 }
