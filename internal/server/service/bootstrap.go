@@ -85,7 +85,7 @@ func NewBootstrapService(st *store.Store, log *slog.Logger, audit AuditSink, emi
 // info level. This is the delivery channel for the token — logging it here
 // is intentional (never log the token *hash*, or any password).
 func (s *BootstrapService) logToken(token string) {
-	s.log.Info(fmt.Sprintf("BOOTSTRAP_TOKEN=%s claim admin via POST /api/v1/auth/bootstrap with body token, email, password (single use)", token))
+	s.log.Info(fmt.Sprintf("BOOTSTRAP_TOKEN=%s claim the first admin at /register, which drives POST /api/v1/register/begin (single use)", token))
 }
 
 // AdminExists reports whether any user with role "admin" exists.
@@ -115,7 +115,7 @@ func (s *BootstrapService) Startup(ctx context.Context) error {
 
 	bs, err := s.st.Bootstrap().Get(ctx)
 	if err == nil && bs.TokenHash != "" && bs.ConsumedAt == 0 {
-		s.log.Info("bootstrap pending; claim admin via POST /api/v1/auth/bootstrap using the token from a previous start")
+		s.log.Info("bootstrap pending; claim the first admin at /register, which drives POST /api/v1/register/begin, using the token from a previous start")
 		return nil
 	}
 

@@ -32,9 +32,9 @@ tasks:
       - go test ./... -race
 
   smoke:
-    desc: "End-to-end backend smoke test (needs internet; pass -- --skip-discovery offline)"
+    desc: "End-to-end smoke test (needs internet; pass -- -skip-discovery offline)"
     cmds:
-      - "{{.TASKFILE_DIR}}/scripts/smoke-test.sh {{.CLI_ARGS}}"
+      - go test -tags smoke ./internal/smoke/ -v -timeout 5m {{.CLI_ARGS}}
 
   lint:
     desc: Run golangci-lint

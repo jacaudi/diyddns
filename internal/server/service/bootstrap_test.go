@@ -13,10 +13,16 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// bootstrapAPIPath is the only route that can claim the first admin. The
-// operator-facing log messages must name it, so a first-run operator is not
-// sent to a route that does not exist.
-const bootstrapAPIPath = "POST /api/v1/auth/bootstrap"
+// bootstrapAPIPath is the route that begins the first-admin claim ceremony.
+// The operator-facing log messages must name it, so a first-run operator is
+// not sent to a route that does not exist.
+//
+// Claiming is a WebAuthn registration ceremony, so this is deliberately
+// asserted against the real registered path rather than a remembered one:
+// the previous password-era endpoint (POST /api/v1/auth/bootstrap) no longer
+// exists, and a stale constant here would let the log go on naming it while
+// the test still passed.
+const bootstrapAPIPath = "POST /api/v1/register/begin"
 
 // discardLogger returns a *slog.Logger that writes nowhere, for tests that
 // don't assert on log output.
