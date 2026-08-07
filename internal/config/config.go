@@ -9,6 +9,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strings"
@@ -237,7 +238,7 @@ func validateEmail(cfg Server) error {
 func (a Auth) ResolveWebAuthn(baseURL string) (rpID, rpOrigin string, err error) {
 	rpID, rpOrigin = a.WebAuthn.RPID, a.WebAuthn.RPOrigin
 	if rpID != "" && rpOrigin != "" {
-		return rpID, rpOrigin, nil
+		return rpID, rpOrigin, validateRPID(rpID)
 	}
 	if baseURL == "" {
 		return "", "", fmt.Errorf("config: auth.webauthn.rp_id/rp_origin not set and server.base_url is empty")
@@ -255,7 +256,27 @@ func (a Auth) ResolveWebAuthn(baseURL string) (rpID, rpOrigin string, err error)
 	if rpOrigin == "" {
 		rpOrigin = u.Scheme + "://" + u.Host
 	}
-	return rpID, rpOrigin, nil
+	return rpID, rpOrigin, validateRPID(rpID)
+}
+
+// validateRPID rejects an IP-address Relying Party ID. The WebAuthn spec
+// requires the RP ID to be a valid domain string, and browsers enforce it —
+// but nothing on the server side does, so without this check the server
+// boots, the pages render, register/begin returns 200 with real-looking
+// options, and the ceremony only fails in the browser with a generic
+// "SecurityError: The operation is insecure" that names neither the RP ID
+// nor the address. Fail closed at startup, and name the fix in the message.
+//
+// Note that 127.0.0.1 is a *trustworthy origin* but not a *valid RP ID*, so
+// it is not interchangeable with localhost here even though both are loopback.
+func validateRPID(rpID string) error {
+	if net.ParseIP(rpID) == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"config: WebAuthn RP ID %q is an IP address, which browsers reject "+
+			"(the spec requires a domain name); use a hostname such as localhost "+
+			"in server.base_url, or set auth.webauthn.rp_id explicitly", rpID)
 }
 
 // DecodeSecretKey decodes the base64 AEAD master key and requires exactly 32

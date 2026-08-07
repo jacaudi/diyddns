@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,9 +59,15 @@ func build(t *testing.T, repoRoot, outDir, cmdName string) string {
 	return out
 }
 
-// freeAddr asks the kernel for an unused loopback port and returns it as
-// host:port. Loopback is not incidental: WebAuthn requires a secure context,
-// and 127.0.0.1 is the only one available without TLS.
+// freePort reserves an unused loopback port and returns it. Loopback is not
+// incidental: WebAuthn requires a secure context, and loopback is the only
+// one available without TLS.
+//
+// The listener binds 127.0.0.1 but every URL uses "localhost", because the
+// two are NOT interchangeable for WebAuthn: 127.0.0.1 is a trustworthy
+// origin but not a valid RP ID, and the server now refuses to start with an
+// IP-derived RP ID. Using the address for both is what this harness did
+// before, which meant it passed against a configuration no browser accepts.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -74,13 +81,25 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-func host(t *testing.T, addr string) string {
+// browserBaseURL turns a bind address into the URL a browser would use:
+// always the "localhost" hostname, never the bound IP. See freeAddr.
+func browserBaseURL(t *testing.T, addr string) string {
 	t.Helper()
-	h, _, err := net.SplitHostPort(addr)
+	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatalf("SplitHostPort(%q): %v", addr, err)
 	}
-	return h
+	return "http://localhost:" + port
+}
+
+// rpIDFor returns the Relying Party ID matching browserBaseURL's host.
+func rpIDFor(t *testing.T, addr string) string {
+	t.Helper()
+	u, err := url.Parse(browserBaseURL(t, addr))
+	if err != nil {
+		t.Fatalf("parse base URL: %v", err)
+	}
+	return u.Hostname()
 }
 
 // server wraps the running subprocess and its captured log.
@@ -109,7 +128,7 @@ func (s *server) Write(p []byte) (int, error) {
 func startServer(t *testing.T, repoRoot, bin, addr string) *server {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "smoke.db")
-	baseURL := "http://" + addr
+	baseURL := browserBaseURL(t, addr)
 
 	s := &server{}
 	cmd := exec.Command(bin, "serve", "--config", filepath.Join(repoRoot, "config.example.yaml"))

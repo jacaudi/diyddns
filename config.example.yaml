@@ -28,7 +28,7 @@ server:
 
   # Public base URL of this server. Default "" (unset). Only REQUIRED when
   # auth.oidc.enabled is true, where it forms the OIDC redirect_uri.
-  base_url: "http://127.0.0.1:8080"
+  base_url: "http://localhost:8080"
 
 database:
   # REQUIRED. Path to the SQLite database file; it is created on first run
@@ -92,36 +92,50 @@ auth:
     # session. Default "168h" (7 days).
     slide_window: "168h"
 
-  password:
-    # argon2id cost parameters for local password hashing. The defaults are
-    # the shipped values; raise memory/time on capable hardware.
-    argon2_time: 3 # Default 3.
-    argon2_memory_kib: 65536 # Default 65536 (64 MiB).
-    argon2_parallelism: 2 # Default 2.
-    min_length: 12 # Minimum accepted password length. Default 12.
+  # NOTE: there is no auth.password or auth.bootstrap section. Local password
+  # authentication was removed in favour of multi-passkey WebAuthn, and with it
+  # the env-provisioned bootstrap admin. The first admin is now claimed through
+  # a passkey ceremony:
+  #
+  #   1. Start the server. It mints a single-use token and logs
+  #        BOOTSTRAP_TOKEN=<token> claim the first admin at /register ...
+  #      The plaintext is printed exactly once and cannot be reprinted.
+  #   2. Open /register in a browser, enter the token AND an admin email
+  #      (the email is what selects first-run setup over an invite redeem),
+  #      and register a passkey.
+  #
+  # This cannot be driven by curl: a WebAuthn ceremony needs an authenticator
+  # to sign a challenge. See internal/smoke for a scripted equivalent.
 
-  bootstrap:
-    # Headless first-admin creation. If BOTH are set and no admin exists yet,
-    # the server creates that admin at startup. Leave both empty (the
-    # default) to use the interactive path instead: the server mints a
-    # single-use token and logs
+  webauthn:
+    # Relying Party ID and origin. Both default to being derived from
+    # server.base_url, which is the recommended setup — leave them empty.
     #
-    #     BOOTSTRAP_TOKEN=<token> claim admin via POST /api/v1/auth/bootstrap ...
+    # GOTCHA: the RP ID MUST be a domain name. An IP address is not a valid
+    # RP ID under the WebAuthn spec and every browser rejects it, reporting
+    # only a generic "SecurityError: The operation is insecure" that names
+    # neither the RP ID nor the address. The server now refuses to start in
+    # that configuration rather than let it fail in the browser.
     #
-    # which you redeem with
+    # So: use http://localhost:8080, NOT http://127.0.0.1:8080. They are the
+    # same machine but 127.0.0.1 is a trustworthy *origin* and not a valid
+    # *RP ID* — the two are not interchangeable here.
     #
-    #     curl -X POST http://127.0.0.1:8080/api/v1/auth/bootstrap \
-    #       -H 'Content-Type: application/json' \
-    #       -d '{"token":"<token>","email":"you@example.com","password":"..."}'
-    #
-    # The token's plaintext is printed exactly once and cannot be reprinted.
-    #
-    # These two keys have EXTRA env aliases beyond the derived
-    # DIYDDNS_AUTH_BOOTSTRAP_* names: DIYDDNS_BOOTSTRAP_ADMIN_EMAIL and
-    # DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD. Use the env vars — a password in a
-    # config file outlives its usefulness.
-    admin_email: ""
-    admin_password: ""
+    # The browser's address bar must also match the RP ID: browsing to
+    # 127.0.0.1 while the RP ID is "localhost" fails with an origin mismatch.
+    rp_id: ""
+    rp_origin: ""
+
+    # Shown in the browser's passkey prompt. Default "DIYDDNS".
+    rp_display_name: "DIYDDNS"
+
+    # How long a ceremony may stay open. Default "120s".
+    timeout: "120s"
+
+  # Default false. When true the passkey block is omitted from /login, leaving
+  # OIDC as the only offered path. The /login route still responds.
+  hide_local_login_ui: false
+
 
   oidc:
     # Single-provider OpenID Connect. Default false (disabled). When enabled,
