@@ -7,6 +7,11 @@
 # Worktrees
 .worktrees/
 
+# Design docs and implementation plans are working documents kept local to the
+# maintainer's machine, not tracked in the repo.
+docs/designs/
+docs/plans/
+
 # Go
 *.test
 *.out

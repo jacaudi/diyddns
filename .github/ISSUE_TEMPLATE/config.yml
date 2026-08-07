@@ -3,6 +3,3 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/jacaudi/diyddns/security/advisories/new
     about: Report a vulnerability privately. Do NOT open a public issue.
-  - name: Design spec
-    url: https://github.com/jacaudi/diyddns/blob/main/docs/plans/2026-05-01-diyddns-design.md
-    about: Read the design spec before opening a feature request.

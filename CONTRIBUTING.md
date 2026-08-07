@@ -4,9 +4,11 @@ Thanks for your interest in DIYDDNS.
 
 ## Before you start
 
-- Read the design spec: [docs/plans/2026-05-01-diyddns-design.md](docs/plans/2026-05-01-diyddns-design.md).
 - Open an issue describing the change you want to make before writing code,
-  unless it's a small fix.
+  unless it's a small fix. The design spec and implementation plans are working
+  documents kept outside this repository, so the issue thread is where design
+  intent gets shared — ask there if the reasoning behind an area isn't obvious
+  from the code.
 
 ## Local development
 

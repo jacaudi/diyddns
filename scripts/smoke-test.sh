@@ -94,11 +94,11 @@ done
 # On success it sets SESSION_COOKIE and CSRF_TOKEN, which every subsequent
 # authenticated request uses.
 #
-# PLAN 10 REPLACES THIS FUNCTION WHOLESALE. The multi-passkey WebAuthn work
-# (docs/plans/2026-07-21-diyddns-10-passkeys-local-auth-implementation.md)
-# deletes POST /api/v1/auth/login and email/password auth entirely. The rest
-# of this script depends only on the two variables set here, so the flip is
-# an edit to this one function — do not inline any of it into the steps below.
+# THE PLANNED PASSKEY WORK REPLACES THIS FUNCTION WHOLESALE: multi-passkey
+# WebAuthn deletes POST /api/v1/auth/login and email/password auth entirely.
+# The rest of this script depends only on the two variables set here, so the
+# flip is an edit to this one function — do not inline any of it into the
+# steps below.
 acquire_admin_session() {
 	step "scrape BOOTSTRAP_TOKEN from the server log"
 	# The token is base64url (auth.RandToken uses RawURLEncoding): no padding,
