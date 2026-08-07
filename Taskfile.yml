@@ -36,6 +36,11 @@ tasks:
     cmds:
       - go test -tags smoke ./internal/smoke/ -v -timeout 5m {{.CLI_ARGS}}
 
+  smoke:browser:
+    desc: "Browser smoke test — drives the real pages and passkey.js (needs node/npx)"
+    cmds:
+      - go test -tags browser ./internal/smoke/ -v -timeout 10m {{.CLI_ARGS}}
+
   lint:
     desc: Run golangci-lint
     cmds:
