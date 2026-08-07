@@ -128,27 +128,51 @@ func TestSaveConcurrentNoForceExactlyOneWins(t *testing.T) {
 	}
 
 	// No leaked .tmp.* files from either the winner or any loser.
-	entries, err := os.ReadDir(filepath.Dir(path))
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp.") {
-			t.Errorf("leaked tmp file after race: %s", e.Name())
-		}
+	assertNoTmpFiles(t, filepath.Dir(path))
+}
+
+// TestSaveLeavesNoTmpSibling is a characterization test, not a regression test:
+// it passes both before and after the switch to a single deferred cleanup,
+// because every publish path already removed its temporary file. It is here to
+// pin the property down — a stranded tmp file holds a complete, live device
+// secret at mode 0600, so a future refactor of the publish path must not be
+// able to start leaking one silently.
+func TestSaveLeavesNoTmpSibling(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		force bool
+	}{
+		{"non-force", false},
+		{"force", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "credentials.json")
+			if tc.force {
+				// force replaces an existing file, so seed one for it to take over.
+				if err := Save(path, Credentials{DeviceID: "seed"}, false); err != nil {
+					t.Fatalf("seed Save: %v", err)
+				}
+			}
+			if err := Save(path, Credentials{DeviceID: "d"}, tc.force); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			assertNoTmpFiles(t, dir)
+		})
 	}
 }
 
-// TestSaveUniqueTmpNames is a narrower unit check that randSuffix() actually
-// varies -- a fixed suffix would silently reintroduce the tmp-file half of #21
-// even with the os.Link fix in place.
-func TestSaveUniqueTmpNames(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 20; i++ {
-		s := randSuffix()
-		if seen[s] {
-			t.Fatalf("randSuffix produced a duplicate after %d calls: %q", i, s)
+// assertNoTmpFiles fails the test if dir holds any leftover Save temporary
+// file. Each one would contain a complete device secret.
+func assertNoTmpFiles(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("leaked tmp file: %s", e.Name())
 		}
-		seen[s] = true
 	}
 }
