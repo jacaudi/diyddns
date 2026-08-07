@@ -157,7 +157,13 @@
     const opts = await api("POST", "/api/v1/register/begin", beginBody);
     const publicKey = decodeCreationOptions(opts.publicKey);
     const cred = await navigator.credentials.create({ publicKey: publicKey });
-    const finishBody = Object.assign(encodeCredential(cred), { token: token, name: name });
+    // The finish endpoint routes on the token exactly as begin routes on the
+    // email: a token means "redeem a grant", its absence means "bootstrap
+    // claim". Sending it unconditionally put the bootstrap flow into the
+    // grant path, which then failed with ErrGrantInvalid. Keep the two calls
+    // agreeing about which flow they are in.
+    const finishBody = Object.assign(encodeCredential(cred), { name: name });
+    if (!email) finishBody.token = token;
     await api("POST", "/api/v1/register/finish", finishBody);
     setStatus(status, "Passkey created. Signing you in...");
     window.location.href = "/account";
