@@ -133,3 +133,9 @@ a:hover { text-decoration: underline; }
 .passkey-list li:last-child { border-bottom: none; }
 .passkey-list .actions { display: flex; gap: 6px; }
 .passkey-list button { font-size: 12.5px; padding: 5px 9px; }
+
+/* Inline help under a form field. */
+.small {
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+}

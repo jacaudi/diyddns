@@ -363,9 +363,15 @@ func TestAdminRecovery_IssuedLinkRedeemsViaRegisterEndpoint(t *testing.T) {
 	attResp := virtualwebauthn.CreateAttestationResponse(rp, authr, cred, *attOpts)
 	finishBody := mergeField(t, mergeField(t, attResp, "token", token), "name", "New Key")
 
-	status, _, finishRespBody := jarPost(t, redeemClient, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
+	status, finishHeader, finishRespBody := jarPost(t, redeemClient, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
 	if status != http.StatusOK {
 		t.Fatalf("register finish (grant redeem): status = %d, want 200, body=%s", status, finishRespBody)
+	}
+	// Same contract as the bootstrap claim: a completed ceremony signs the
+	// user in rather than bouncing them to /login to re-prove the credential
+	// they just registered.
+	if cookie := findCookie(finishHeader, authTestCookieName); cookie == nil || cookie.Value == "" {
+		t.Errorf("register finish (grant redeem) set no session cookie; headers=%v", finishHeader)
 	}
 }
 
@@ -407,9 +413,18 @@ func TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint(t *testing.T) {
 	// No token merged in — a token-less finish body routes to FinishClaim.
 	finishBody := mergeField(t, attResp, "name", "First Admin Key")
 
-	status, _, finishRespBody := jarPost(t, client, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
+	status, finishHeader, finishRespBody := jarPost(t, client, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
 	if status != http.StatusOK {
 		t.Fatalf("register finish (bootstrap claim): status = %d, want 200, body=%s", status, finishRespBody)
+	}
+
+	// A successful claim must sign the operator in. The ceremony has just
+	// cryptographically proven possession of the credential, and passkey.js
+	// tells the user "Signing you in..." then navigates to /account — without
+	// a session that redirects straight back to /login, so a first-run
+	// operator is made to authenticate with the passkey they just created.
+	if cookie := findCookie(finishHeader, authTestCookieName); cookie == nil || cookie.Value == "" {
+		t.Errorf("register finish (bootstrap claim) set no session cookie; headers=%v", finishHeader)
 	}
 
 	admin, err := h.st.Users().GetByEmail(t.Context(), "firstadmin@example.com")

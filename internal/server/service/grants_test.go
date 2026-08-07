@@ -139,8 +139,17 @@ func extractLinkFromBody(t *testing.T, body string) string {
 }
 
 // driveRedeem completes a full RedeemBegin -> RedeemFinish ceremony for
-// token via virtualwebauthn, returning whatever RedeemFinish returns.
+// token via virtualwebauthn, returning RedeemFinish's error. Callers that
+// need the redeemed user use driveRedeemUser.
 func driveRedeem(t *testing.T, grants *GrantService, token, name string, rp virtualwebauthn.RelyingParty) error {
+	t.Helper()
+	_, err := driveRedeemUser(t, grants, token, name, rp)
+	return err
+}
+
+// driveRedeemUser is driveRedeem plus the user RedeemFinish resolved, so a
+// caller can assert the session-minting caller gets a real identity back.
+func driveRedeemUser(t *testing.T, grants *GrantService, token, name string, rp virtualwebauthn.RelyingParty) (store.User, error) {
 	t.Helper()
 
 	_, optsJSON, sealed, err := grants.RedeemBegin(t.Context(), token)

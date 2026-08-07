@@ -9,7 +9,13 @@
     </div>
     <div class="field">
       <label for="register-email">Email</label>
-      <input class="input" id="register-email" name="email" type="email" autocomplete="email" placeholder="only needed for first-run admin setup">
+      <input class="input" id="register-email" name="email" type="email" autocomplete="email"
+             placeholder="you@example.com — required for first-run admin setup">
+      <p class="muted small">
+        Leave blank only if you followed an invite or recovery link. Setting up
+        the first admin? Enter the email the account should use — it is what
+        tells the server this is first-run setup rather than a redeem.
+      </p>
     </div>
     <div class="field">
       <label for="register-name">Passkey name</label>

@@ -56,9 +56,22 @@ func New(deps Deps) http.Handler {
 	h := &handler{pages: pages, deps: deps}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", h.handleRoot)
 	mux.HandleFunc("GET /login", h.handleLogin)
 	mux.HandleFunc("GET /register", h.handleRegister)
 	mux.HandleFunc("GET /account", h.requireSession(h.handleAccount))
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
+}
+
+// handleRoot sends the bare base URL somewhere useful instead of 404ing.
+// There is no dashboard yet, so /account is the closest thing to a home
+// page; requireSession redirects on to /login when there is no session, so
+// this needs no session check of its own.
+//
+// The "/{$}" pattern matches ONLY the root path — a bare "/" in Go's
+// ServeMux is a catch-all prefix and would swallow every unmatched URL,
+// turning genuine 404s into redirects.
+func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }
