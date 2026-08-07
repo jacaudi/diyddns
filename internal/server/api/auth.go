@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -10,30 +9,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/jacaudi/diyddns/internal/config"
-	"github.com/jacaudi/diyddns/internal/server/service"
 )
-
-// errLoginUnauthorized is the single message returned for every login
-// failure — unknown email, wrong password, disabled account, or an
-// OIDC-only account with no local password — mirroring
-// service.AuthService.Login's own uniform errInvalidCreds so neither the
-// error nor the response shape reveals which check failed.
-const errLoginUnauthorized = "invalid email or password"
-
-// errPasswordChangeInvalid is the single message returned for every
-// ChangePassword failure — wrong old password or a new password that
-// fails the minimum-length policy — mapped to a uniform 422 (design §8's
-// canonical code for the analogous "don't leak which" validation case,
-// matching the bootstrap-default path). service.errInvalidCreds is
-// unexported, so this package cannot (and, per the design's uniform-failure
-// philosophy used by login/enroll, should not) distinguish the two.
-const errPasswordChangeInvalid = "invalid old password or new password"
-
-// errBootstrapInvalid is returned for bootstrap validation failures (bad
-// email format, password below the minimum length) — anything that is not
-// the token-closed or token-mismatch case, which get their own uniform
-// messages below.
-const errBootstrapInvalid = "invalid bootstrap request: check email format and password length"
 
 // loginMetaKey is the unexported context key type login's pre-handler
 // middleware uses to forward request metadata to the business handler. It
@@ -103,22 +79,8 @@ type sessionCookieOutput struct {
 }
 
 // emptyOutput is the 200-with-no-body response shape for operations that
-// only need to report success: password change and bootstrap.
+// only need to report success (e.g. passkey rename/delete).
 type emptyOutput struct{}
-
-type loginInput struct {
-	Body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-}
-
-type passwordInput struct {
-	Body struct {
-		OldPassword string `json:"old_password"`
-		NewPassword string `json:"new_password"`
-	}
-}
 
 type meUser struct {
 	ID    string `json:"id"`
@@ -135,32 +97,12 @@ type meOutput struct {
 	Body meResponse
 }
 
-type bootstrapInput struct {
-	Body struct {
-		Token    string `json:"token"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-}
-
-// registerAuthOps registers the browser auth + bootstrap operations onto
-// apiAPI: login/bootstrap carry no session/CSRF guard (pre-session);
-// logout/me require a session; password requires a session and CSRF.
+// registerAuthOps registers the browser session operations onto apiAPI:
+// logout and me both require a session. Local password login and change
+// were removed with the Plan 10 flip — login is now a passkey ceremony
+// (registerPasskeyOps) or OIDC (registerOIDCOps), and bootstrap is claimed
+// via passkey (passkey.go's register begin/finish).
 func registerAuthOps(a huma.API, deps ServerDeps) {
-	huma.Register(a, huma.Operation{
-		Method:        http.MethodPost,
-		Path:          "/api/v1/auth/login",
-		DefaultStatus: http.StatusOK, // huma defaults to 204 for bodyless outputs; login returns 200 with only a Set-Cookie header
-		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
-	}, func(ctx context.Context, in *loginInput) (*sessionCookieOutput, error) {
-		meta := loginMetaFrom(ctx)
-		sess, err := deps.Auth.Login(ctx, in.Body.Email, in.Body.Password, meta.ip, meta.ua)
-		if err != nil {
-			return nil, huma.Error401Unauthorized(errLoginUnauthorized)
-		}
-		return &sessionCookieOutput{SetCookie: sessionCookie(deps.Cfg.Session, sess.ID, 0, meta.tls)}, nil
-	})
-
 	huma.Register(a, huma.Operation{
 		Method:        http.MethodPost,
 		Path:          "/api/v1/auth/logout",
@@ -186,40 +128,6 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 			User: meUser{ID: u.ID, Email: u.Email, Role: u.Role},
 			CSRF: sess.CSRFToken,
 		}}, nil
-	})
-
-	huma.Register(a, huma.Operation{
-		Method:        http.MethodPost,
-		Path:          "/api/v1/auth/password",
-		DefaultStatus: http.StatusOK,
-		Middlewares: huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			csrfMiddleware(a),
-		},
-	}, func(ctx context.Context, in *passwordInput) (*emptyOutput, error) {
-		u := UserFrom(ctx)
-		if err := deps.Auth.ChangePassword(ctx, u.ID, in.Body.OldPassword, in.Body.NewPassword); err != nil {
-			return nil, huma.Error422UnprocessableEntity(errPasswordChangeInvalid)
-		}
-		return &emptyOutput{}, nil
-	})
-
-	huma.Register(a, huma.Operation{
-		Method:        http.MethodPost,
-		Path:          "/api/v1/auth/bootstrap",
-		DefaultStatus: http.StatusOK,
-	}, func(ctx context.Context, in *bootstrapInput) (*emptyOutput, error) {
-		if _, err := deps.Bootstrap.Consume(ctx, in.Body.Token, in.Body.Email, in.Body.Password); err != nil {
-			switch {
-			case errors.Is(err, service.ErrBootstrapClosed):
-				return nil, huma.Error410Gone("bootstrap already completed")
-			case errors.Is(err, service.ErrBootstrapToken):
-				return nil, huma.Error401Unauthorized("invalid bootstrap token")
-			default:
-				return nil, huma.Error422UnprocessableEntity(errBootstrapInvalid)
-			}
-		}
-		return &emptyOutput{}, nil
 	})
 
 	registerOIDCOps(a, deps)

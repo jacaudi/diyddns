@@ -13,6 +13,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -36,6 +37,9 @@ type ServerDeps struct {
 	Bootstrap *service.BootstrapService
 	OIDC      *service.OIDCService
 	Admin     *service.AdminService
+	Passkey   *service.PasskeyService // nil until the WebAuthn Relying Party is resolved (fail-closed, Task 9) — passkey ops are only registered when non-nil, see Build
+	Grants    *service.GrantService   // nil alongside Passkey — see Build
+	Mailer    email.Mailer            // SMTP transport backing GrantService's self-service recovery emails; nil until Task 9 wires it
 	OIDCMgr   *oidc.Manager
 	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
 	Cfg       config.Auth
@@ -54,6 +58,16 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	registerDeviceOps(apiAPI, deps)
 	registerDeviceMgmtOps(apiAPI, deps)
 	registerAdminOps(apiAPI, deps)
+	// Passkey ops depend on BOTH Passkey and Grants being wired (register/begin
+	// and /finish drive a grant redeem via Grants; account passkey management
+	// drives Passkey directly). Both are nil until the WebAuthn Relying Party
+	// is resolved (Task 9) — registering these routes against a nil service
+	// would panic the first request, so the whole vertical stays off the mux
+	// until construction succeeds, matching Bootstrap/Admin's existing
+	// nil-tolerant pattern for their own passkey-dependent paths.
+	if deps.Passkey != nil && deps.Grants != nil {
+		registerPasskeyOps(apiAPI, deps)
+	}
 
 	RegisterHealth(mux, deps.Log, deps.Store)
 }

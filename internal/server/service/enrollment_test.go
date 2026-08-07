@@ -22,12 +22,6 @@ func testKey32() []byte {
 	return bytes.Repeat([]byte{0x42}, 32)
 }
 
-// testArgon2Params returns cheap argon2id params so password tests run fast.
-// Reused by later service test files in this package.
-func testArgon2Params() auth.Argon2Params {
-	return auth.Argon2Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1}
-}
-
 // openTestStore returns a Store backed by a fresh in-memory SQLite database
 // with migrations applied, closed automatically at test cleanup. Reused by
 // later service test files in this package.
@@ -46,26 +40,12 @@ func openTestStore(t *testing.T) *store.Store {
 }
 
 // seedUser creates and returns a user with the given email and role and no
-// password hash. Reused by later service test files in this package.
+// credential (no local password exists; a passkey is added separately, if
+// needed, via the test's own registration flow). Reused by later service
+// test files in this package.
 func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 	t.Helper()
 	u, err := st.Users().Create(t.Context(), store.User{Email: email, Role: role})
-	if err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	return u
-}
-
-// seedUserWithPassword creates and returns a user with an argon2id password
-// hash for the given plaintext password. Reused by later service test files
-// in this package.
-func seedUserWithPassword(t *testing.T, st *store.Store, email, role, password string) store.User {
-	t.Helper()
-	hash, err := auth.HashPassword(password, testArgon2Params())
-	if err != nil {
-		t.Fatalf("hash password: %v", err)
-	}
-	u, err := st.Users().Create(t.Context(), store.User{Email: email, Role: role, PasswordHash: hash})
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
@@ -213,81 +193,6 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 	}
 }
 
-func TestEnrollCredentials_GoodPassword(t *testing.T) {
-	st := openTestStore(t)
-	usr := seedUserWithPassword(t, st, "a@b.co", "user", "correct horse battery staple")
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
-
-	res, err := svc.EnrollCredentials(t.Context(), "a@b.co", "correct horse battery staple", ClientMeta{Hostname: "lp", OS: "linux"})
-	if err != nil {
-		t.Fatalf("EnrollCredentials: %v", err)
-	}
-	if res.DeviceID == "" || len(res.Secret) == 0 {
-		t.Fatalf("EnrollCredentials returned incomplete result: %+v", res)
-	}
-
-	dev, err := st.Devices().GetByID(t.Context(), res.DeviceID)
-	if err != nil {
-		t.Fatalf("Devices.GetByID: %v", err)
-	}
-	if dev.UserID != usr.ID || dev.Label != "lp" {
-		t.Fatalf("stored device = %+v, want UserID=%q Label=lp", dev, usr.ID)
-	}
-
-	got, err := auth.OpenSecret(testKey32(), dev.SecretHash)
-	if err != nil {
-		t.Fatalf("OpenSecret: %v", err)
-	}
-	if !bytes.Equal(got, res.Secret) {
-		t.Fatal("stored sealed secret must decrypt to the returned secret")
-	}
-}
-
-func TestEnrollCredentials_DefaultLabelWhenNoHostname(t *testing.T) {
-	st := openTestStore(t)
-	seedUserWithPassword(t, st, "a@b.co", "user", "correct horse battery staple")
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
-
-	res, err := svc.EnrollCredentials(t.Context(), "a@b.co", "correct horse battery staple", ClientMeta{})
-	if err != nil {
-		t.Fatalf("EnrollCredentials: %v", err)
-	}
-	dev, err := st.Devices().GetByID(t.Context(), res.DeviceID)
-	if err != nil {
-		t.Fatalf("Devices.GetByID: %v", err)
-	}
-	if dev.Label != "device" {
-		t.Fatalf("Label = %q, want default %q", dev.Label, "device")
-	}
-}
-
-func TestEnrollCredentials_WrongPasswordErrors(t *testing.T) {
-	st := openTestStore(t)
-	seedUserWithPassword(t, st, "a@b.co", "user", "correct horse battery staple")
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
-
-	if _, err := svc.EnrollCredentials(t.Context(), "a@b.co", "wrong-password", ClientMeta{}); err == nil {
-		t.Fatal("expected error for wrong password")
-	}
-
-	ds, err := st.Devices().ListByUser(t.Context(), "nonexistent-user-id")
-	if err != nil {
-		t.Fatalf("Devices.ListByUser: %v", err)
-	}
-	if len(ds) != 0 {
-		t.Fatalf("expected no devices, got %d", len(ds))
-	}
-}
-
-func TestEnrollCredentials_UnknownEmailErrors(t *testing.T) {
-	st := openTestStore(t)
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
-
-	if _, err := svc.EnrollCredentials(t.Context(), "nobody@b.co", "whatever", ClientMeta{}); err == nil {
-		t.Fatal("expected error for unknown email")
-	}
-}
-
 func TestEnrollForUser_MintsSealedDeviceWithAudit(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "u@x.com", "user")
@@ -307,18 +212,5 @@ func TestEnrollForUser_MintsSealedDeviceWithAudit(t *testing.T) {
 	}
 	if dev.UserID != usr.ID || dev.Label != "homelab" {
 		t.Fatalf("device not created correctly: %+v", dev)
-	}
-}
-
-func TestEnrollCredentials_DisabledUserErrors(t *testing.T) {
-	st := openTestStore(t)
-	usr := seedUserWithPassword(t, st, "a@b.co", "user", "correct horse battery staple")
-	if err := st.Users().SetDisabled(t.Context(), usr.ID, true); err != nil {
-		t.Fatalf("SetDisabled: %v", err)
-	}
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
-
-	if _, err := svc.EnrollCredentials(t.Context(), "a@b.co", "correct horse battery staple", ClientMeta{}); err == nil {
-		t.Fatal("expected error for disabled user")
 	}
 }

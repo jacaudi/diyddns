@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 	"time"
@@ -15,9 +16,8 @@ func TestUserCreateAndGetByID(t *testing.T) {
 	s, ctx := newTestStore(t)
 
 	u := User{
-		Email:        "alice@example.com",
-		PasswordHash: "hash1",
-		Role:         roleAdmin,
+		Email: "alice@example.com",
+		Role:  roleAdmin,
 	}
 	created, err := s.Users().Create(ctx, u)
 	if err != nil {
@@ -48,9 +48,6 @@ func TestUserCreateAndGetByID(t *testing.T) {
 	}
 	if got.Email != created.Email {
 		t.Errorf("GetByID: Email = %q, want %q", got.Email, created.Email)
-	}
-	if got.PasswordHash != created.PasswordHash {
-		t.Errorf("GetByID: PasswordHash = %q, want %q", got.PasswordHash, created.PasswordHash)
 	}
 	if got.CreatedAt != created.CreatedAt {
 		t.Errorf("GetByID: CreatedAt = %d, want %d", got.CreatedAt, created.CreatedAt)
@@ -146,9 +143,8 @@ func TestUserUpdate(t *testing.T) {
 	s, ctx := newTestStore(t)
 
 	u := User{
-		Email:        "eve@example.com",
-		PasswordHash: "oldhash",
-		Role:         roleUser,
+		Email: "eve@example.com",
+		Role:  roleUser,
 	}
 	created, err := s.Users().Create(ctx, u)
 	if err != nil {
@@ -159,7 +155,8 @@ func TestUserUpdate(t *testing.T) {
 	time.Sleep(time.Second)
 
 	created.Email = "eve-updated@example.com"
-	created.PasswordHash = "newhash"
+	created.OIDCProvider = "https://idp.example.com"
+	created.OIDCSubject = "sub-123"
 	created.Role = roleAdmin
 	if err := s.Users().Update(ctx, created); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -172,8 +169,8 @@ func TestUserUpdate(t *testing.T) {
 	if got.Email != "eve-updated@example.com" {
 		t.Errorf("Update: Email = %q, want %q", got.Email, "eve-updated@example.com")
 	}
-	if got.PasswordHash != "newhash" {
-		t.Errorf("Update: PasswordHash = %q, want %q", got.PasswordHash, "newhash")
+	if got.OIDCSubject != "sub-123" {
+		t.Errorf("Update: OIDCSubject = %q, want %q", got.OIDCSubject, "sub-123")
 	}
 	if got.Role != roleAdmin {
 		t.Errorf("Update: Role = %q, want %q", got.Role, roleAdmin)
@@ -271,6 +268,173 @@ func TestUserDeleteNotFound(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Delete: got %v, want errors.Is(err, ErrNotFound)", err)
+	}
+}
+
+func TestUserWebAuthnHandleRoundTrip(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "handle-alice@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	handle := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	if err := s.Users().SetWebAuthnHandle(ctx, u.ID, handle); err != nil {
+		t.Fatalf("SetWebAuthnHandle: %v", err)
+	}
+
+	got, err := s.Users().GetByWebAuthnHandle(ctx, handle)
+	if err != nil {
+		t.Fatalf("GetByWebAuthnHandle: %v", err)
+	}
+	if got.ID != u.ID {
+		t.Errorf("GetByWebAuthnHandle: ID = %q, want %q", got.ID, u.ID)
+	}
+}
+
+func TestUserSetWebAuthnHandleNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	err := s.Users().SetWebAuthnHandle(ctx, "nonexistent-id", []byte{0x01})
+	if err == nil {
+		t.Fatal("SetWebAuthnHandle: expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetWebAuthnHandle: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestUserGetByWebAuthnHandleUnknownReturnsErrNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.Users().GetByWebAuthnHandle(ctx, []byte{0x11, 0x22})
+	if err == nil {
+		t.Fatal("GetByWebAuthnHandle: expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWebAuthnHandle: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestUserSetWebAuthnHandleUniqueness(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u1, err := s.Users().Create(ctx, User{Email: "handle-uniq-1@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 1: %v", err)
+	}
+	u2, err := s.Users().Create(ctx, User{Email: "handle-uniq-2@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 2: %v", err)
+	}
+
+	// A shared non-nil handle must collide on the second SetWebAuthnHandle.
+	handle := []byte{0x01, 0x02, 0x03}
+	if err := s.Users().SetWebAuthnHandle(ctx, u1.ID, handle); err != nil {
+		t.Fatalf("SetWebAuthnHandle u1: %v", err)
+	}
+	err = s.Users().SetWebAuthnHandle(ctx, u2.ID, handle)
+	if err == nil {
+		t.Fatal("SetWebAuthnHandle u2 with duplicate handle: expected error, got nil")
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("SetWebAuthnHandle u2 with duplicate handle: got %v, want ErrConflict", err)
+	}
+
+	// Two users left with NULL handles (never set) must NOT collide:
+	// SQLite treats multiple NULLs as distinct under a UNIQUE index. Both
+	// u3 and u4 have never had a handle set, and creating both succeeds above;
+	// this is the NULL-non-collision half of the requirement.
+	u3, err := s.Users().Create(ctx, User{Email: "handle-uniq-3@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 3 (NULL handle): %v", err)
+	}
+	u4, err := s.Users().Create(ctx, User{Email: "handle-uniq-4@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user 4 (NULL handle): %v", err)
+	}
+	if u3.ID == "" || u4.ID == "" {
+		t.Fatal("expected both NULL-handle users to be created without conflict")
+	}
+}
+
+func TestUserGetByWebAuthnHandleEmptyRejected(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.Users().GetByWebAuthnHandle(ctx, nil)
+	if err == nil {
+		t.Fatal("GetByWebAuthnHandle(nil): expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWebAuthnHandle(nil): got %v, want ErrNotFound", err)
+	}
+
+	_, err = s.Users().GetByWebAuthnHandle(ctx, []byte{})
+	if err == nil {
+		t.Fatal("GetByWebAuthnHandle(empty): expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWebAuthnHandle(empty): got %v, want ErrNotFound", err)
+	}
+}
+
+// TestUserGetWebAuthnHandle_RoundTrip covers the forward lookup companion to
+// GetByWebAuthnHandle: PasskeyService needs to read a user's *existing*
+// handle back (by user ID) before registering a second passkey, so that
+// every credential a user registers shares the one handle value baked into
+// their authenticators — a mismatched handle across credentials would make
+// GetByWebAuthnHandle unable to resolve the user for whichever credential's
+// login doesn't carry the (overwritten) latest handle.
+func TestUserGetWebAuthnHandle_RoundTrip(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "handle-getter@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	handle := []byte{0x01, 0x02, 0x03, 0x04}
+	if err := s.Users().SetWebAuthnHandle(ctx, u.ID, handle); err != nil {
+		t.Fatalf("SetWebAuthnHandle: %v", err)
+	}
+
+	got, err := s.Users().GetWebAuthnHandle(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetWebAuthnHandle: %v", err)
+	}
+	if !bytes.Equal(got, handle) {
+		t.Errorf("GetWebAuthnHandle = %x, want %x", got, handle)
+	}
+}
+
+// TestUserGetWebAuthnHandle_NilWhenUnset covers a user that has never
+// registered a passkey: the handle column is NULL, and the getter must
+// report that as a nil/empty slice rather than an error, so callers can use
+// len(handle)==0 to decide "mint a new one".
+func TestUserGetWebAuthnHandle_NilWhenUnset(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "handle-unset@example.com", Role: roleUser})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	got, err := s.Users().GetWebAuthnHandle(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetWebAuthnHandle: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("GetWebAuthnHandle = %x, want empty", got)
+	}
+}
+
+func TestUserGetWebAuthnHandle_UnknownUserReturnsErrNotFound(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	_, err := s.Users().GetWebAuthnHandle(ctx, "nonexistent-id")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetWebAuthnHandle: got %v, want ErrNotFound", err)
 	}
 }
 

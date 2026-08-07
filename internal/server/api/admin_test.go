@@ -1,33 +1,13 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/store"
 )
-
-// seedAdminUser creates a user with role "admin" and an argon2id password
-// hash. Mirrors seedAuthUserWithPassword (auth_ops_test.go) but sets
-// Role: "admin" — kept as a separate helper rather than adding a role
-// parameter to the shared one, since that would force every existing
-// non-admin call site to change for a need only this file has.
-func seedAdminUser(t *testing.T, st *store.Store, email, password string) store.User {
-	t.Helper()
-	hash, err := auth.HashPassword(password, auth.Argon2Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1})
-	if err != nil {
-		t.Fatalf("hash password: %v", err)
-	}
-	u, err := st.Users().Create(context.Background(), store.User{Email: email, Role: "admin", PasswordHash: hash})
-	if err != nil {
-		t.Fatalf("seed admin user: %v", err)
-	}
-	return u
-}
 
 // seedAudit appends n audit-log rows so admin/audit pagination has rows to
 // walk. The rows' content is irrelevant to the pagination assertions.
@@ -44,18 +24,18 @@ func seedAudit(t *testing.T, st *store.Store, n int) {
 
 func TestAdminListUsers_RequiresAdmin(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminUser(t, h.st, "admin1@example.com", "correct horse battery staple")
-	seedAuthUserWithPassword(t, h.st, "user1@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin1@example.com", "admin")
+	seedUser(t, h.st, "user1@example.com", "user")
 
 	// Non-admin -> 403
-	userCookie, _ := loginAndGetCSRF(t, h, "user1@example.com", "correct horse battery staple")
+	userCookie, _ := sessionFor(t, h, "user1@example.com")
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/users", nil, userCookie, "")
 	if status != http.StatusForbidden {
 		t.Fatalf("user: status = %d, want 403, body=%s", status, body)
 	}
 
 	// Admin -> 200
-	adminCookie, _ := loginAndGetCSRF(t, h, "admin1@example.com", "correct horse battery staple")
+	adminCookie, _ := sessionFor(t, h, "admin1@example.com")
 	status, _, body = doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/users", nil, adminCookie, "")
 	if status != http.StatusOK {
 		t.Fatalf("admin: status = %d, want 200, body=%s", status, body)
@@ -72,12 +52,12 @@ func TestAdminListUsers_RequiresAdmin(t *testing.T) {
 
 func TestAdminCreateUser_RequiresCSRF(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminUser(t, h.st, "admin2@example.com", "correct horse battery staple")
-	seedAuthUserWithPassword(t, h.st, "user2@example.com", "correct horse battery staple")
-	adminCookie, adminCSRF := loginAndGetCSRF(t, h, "admin2@example.com", "correct horse battery staple")
-	userCookie, userCSRF := loginAndGetCSRF(t, h, "user2@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin2@example.com", "admin")
+	seedUser(t, h.st, "user2@example.com", "user")
+	adminCookie, adminCSRF := sessionFor(t, h, "admin2@example.com")
+	userCookie, userCSRF := sessionFor(t, h, "user2@example.com")
 
-	newUser := map[string]string{"email": "n@x.com", "password": "correcthorse12", "role": "user"}
+	newUser := map[string]string{"email": "n@x.com", "role": "user"}
 
 	// Admin, no CSRF -> 403
 	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/users", newUser, adminCookie, "")
@@ -92,22 +72,34 @@ func TestAdminCreateUser_RequiresCSRF(t *testing.T) {
 		t.Fatalf("non-admin with csrf: status = %d, want 403, body=%s", status, body)
 	}
 
-	// Admin + CSRF -> 200
+	// Admin + CSRF -> 200. Admin user creation is now credential-less: the
+	// response carries the created user plus a one-time invite link (no
+	// password field in or out), and the created user has no credential yet.
 	status, _, body = doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/users", map[string]string{
-		"email": "n2@x.com", "password": "correcthorse12", "role": "user",
+		"email": "n2@x.com", "role": "user",
 	}, adminCookie, adminCSRF)
 	if status != http.StatusOK {
 		t.Fatalf("with csrf: status = %d, want 200, body=%s", status, body)
 	}
 	var got struct {
-		ID    string `json:"id"`
-		Email string `json:"email"`
+		User struct {
+			ID         string `json:"id"`
+			Email      string `json:"email"`
+			OIDCLinked bool   `json:"oidc_linked"`
+		} `json:"user"`
+		Link string `json:"link"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode create response: %v, body=%s", err, body)
 	}
-	if got.Email != "n2@x.com" {
-		t.Fatalf("email = %q, want n2@x.com", got.Email)
+	if got.User.Email != "n2@x.com" {
+		t.Fatalf("email = %q, want n2@x.com", got.User.Email)
+	}
+	if got.Link == "" {
+		t.Fatalf("create response missing invite link, body=%s", body)
+	}
+	if got.User.OIDCLinked {
+		t.Fatalf("credential-less user should not be reported oidc_linked, body=%s", body)
 	}
 }
 
@@ -115,8 +107,8 @@ func TestAdminCreateUser_RequiresCSRF(t *testing.T) {
 
 func TestAdminUpdateUser_LastAdmin_Conflict(t *testing.T) {
 	h := newFullHarness(t)
-	admin := seedAdminUser(t, h.st, "admin3@example.com", "correct horse battery staple")
-	adminCookie, csrf := loginAndGetCSRF(t, h, "admin3@example.com", "correct horse battery staple")
+	admin := seedUser(t, h.st, "admin3@example.com", "admin")
+	adminCookie, csrf := sessionFor(t, h, "admin3@example.com")
 
 	// Demoting the only enabled admin -> 409 (guard surfaced).
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/users/"+admin.ID, map[string]string{
@@ -131,9 +123,9 @@ func TestAdminUpdateUser_LastAdmin_Conflict(t *testing.T) {
 
 func TestAdminDeleteUser_Returns204(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminUser(t, h.st, "admin4@example.com", "correct horse battery staple")
-	target := seedAuthUserWithPassword(t, h.st, "target4@example.com", "correct horse battery staple")
-	adminCookie, csrf := loginAndGetCSRF(t, h, "admin4@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin4@example.com", "admin")
+	target := seedUser(t, h.st, "target4@example.com", "user")
+	adminCookie, csrf := sessionFor(t, h, "admin4@example.com")
 
 	status, _, body := doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/admin/users/"+target.ID, nil, adminCookie, csrf)
 	if status != http.StatusNoContent {
@@ -148,12 +140,12 @@ func TestAdminDeleteUser_Returns204(t *testing.T) {
 
 func TestAdminListDevices_IncludesUserID(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminUser(t, h.st, "admin5@example.com", "correct horse battery staple")
-	owner := seedAuthUserWithPassword(t, h.st, "owner5@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin5@example.com", "admin")
+	owner := seedUser(t, h.st, "owner5@example.com", "user")
 	if _, err := h.st.Devices().Create(t.Context(), store.Device{UserID: owner.ID, Label: "dev"}); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	adminCookie, _ := loginAndGetCSRF(t, h, "admin5@example.com", "correct horse battery staple")
+	adminCookie, _ := sessionFor(t, h, "admin5@example.com")
 
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/devices", nil, adminCookie, "")
 	if status != http.StatusOK {
@@ -178,9 +170,9 @@ func TestAdminListDevices_IncludesUserID(t *testing.T) {
 
 func TestAdminAudit_Paginated(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminUser(t, h.st, "admin6@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin6@example.com", "admin")
 	seedAudit(t, h.st, 3)
-	adminCookie, _ := loginAndGetCSRF(t, h, "admin6@example.com", "correct horse battery staple")
+	adminCookie, _ := sessionFor(t, h, "admin6@example.com")
 
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/audit?limit=2", nil, adminCookie, "")
 	if status != http.StatusOK {
@@ -202,8 +194,8 @@ func TestAdminAudit_Paginated(t *testing.T) {
 
 func TestAdminServer_OmitsClientSecret(t *testing.T) {
 	h := newFullHarness(t)
-	seedAdminUser(t, h.st, "admin7@example.com", "correct horse battery staple")
-	adminCookie, _ := loginAndGetCSRF(t, h, "admin7@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "admin7@example.com", "admin")
+	adminCookie, _ := sessionFor(t, h, "admin7@example.com")
 
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/server", nil, adminCookie, "")
 	if status != http.StatusOK {

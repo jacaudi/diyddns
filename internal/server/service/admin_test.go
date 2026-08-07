@@ -5,64 +5,98 @@ import (
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/auth"
-	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
 // newAdminSvc returns a fresh in-memory store and an AdminService bound to
-// it, using cheap argon2id params and a real audit writer (so guard paths
-// that write audit entries exercise the real sink, not a discard).
+// it, using a real audit writer (so guard paths that write audit entries
+// exercise the real sink, not a discard). grants has a nil PasskeyService:
+// UpdateUser/DeleteUser never touch it, and the role/email validation guards
+// CreateUserInvite runs before its own passkeys check fire first for the
+// "rejects bad input" tests below — but CreateUserInvite now also refuses to
+// mint a link when passkeys are nil (see ErrWebAuthnUnavailable, a dead link
+// would 404 at redeem), so tests exercising an actual successful invite need
+// newAdminSvcWithPasskeys instead.
 func newAdminSvc(t *testing.T) (*store.Store, *AdminService) {
 	t.Helper()
 	st := openTestStore(t)
-	pw := config.PasswordCfg{Argon2Time: 1, Argon2MemoryKiB: 8 * 1024, Argon2Parallelism: 1, MinLength: 8}
-	return st, NewAdminService(st, pw, NewAuditWriter(st))
+	audit := NewAuditWriter(st)
+	grants := NewGrantService(st, nil, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
+	return st, NewAdminService(st, audit, grants)
 }
 
-func TestAdminService_CreateUser_HashesPassword(t *testing.T) {
+// newAdminSvcWithPasskeys is newAdminSvc but with a real PasskeyService
+// wired into grants, for tests that need CreateUserInvite to actually mint a
+// redeemable link.
+func newAdminSvcWithPasskeys(t *testing.T) (*store.Store, *AdminService) {
+	t.Helper()
+	st := openTestStore(t)
+	audit := NewAuditWriter(st)
+	passkeys := newTestPasskeyService(t, st, audit)
+	grants := NewGrantService(st, passkeys, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
+	return st, NewAdminService(st, audit, grants)
+}
+
+func TestAdminService_CreateUserInvite_RejectsBadRole(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")
 
-	u, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "new@x", Password: "correcthorse12", Role: "user"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.PasswordHash == "" || u.PasswordHash == "correcthorse12" {
-		t.Fatal("password not hashed")
-	}
-	ok, err := auth.VerifyPassword(u.PasswordHash, "correcthorse12")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("hash does not verify")
-	}
-}
-
-func TestAdminService_CreateUser_RejectsBadRole(t *testing.T) {
-	st, svc := newAdminSvc(t)
-	admin := seedUser(t, st, "a@x", "admin")
-
-	if _, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "n@x", Password: "correcthorse12", Role: "superuser"}); !errors.Is(err, ErrInvalidRole) {
+	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "n@x.com", "superuser"); !errors.Is(err, ErrInvalidRole) {
 		t.Fatalf("err = %v, want ErrInvalidRole", err)
 	}
 }
 
-func TestAdminService_CreateUser_RejectsWeakPassword(t *testing.T) {
+func TestAdminService_CreateUserInvite_RejectsInvalidEmail(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")
 
-	if _, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "n@x", Password: "short", Role: "user"}); !errors.Is(err, ErrWeakPassword) {
-		t.Fatalf("err = %v, want ErrWeakPassword", err)
+	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "not-an-email", "user"); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("err = %v, want ErrInvalidEmail", err)
 	}
 }
 
-func TestAdminService_CreateUser_RejectsInvalidEmail(t *testing.T) {
-	st, svc := newAdminSvc(t)
-	admin := seedUser(t, st, "a@x", "admin")
+func TestAdminService_CreateUserInvite_CredentiallessUserAndRedeemableLink(t *testing.T) {
+	st, svc := newAdminSvcWithPasskeys(t)
+	admin := seedUser(t, st, "admin@x.com", "admin")
 
-	if _, err := svc.CreateUser(t.Context(), admin.ID, CreateUserParams{Email: "not-an-email", Password: "correcthorse12", Role: "user"}); !errors.Is(err, ErrInvalidEmail) {
-		t.Fatalf("err = %v, want ErrInvalidEmail", err)
+	u, link, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user")
+	if err != nil {
+		t.Fatalf("CreateUserInvite: %v", err)
+	}
+	if u.Email != "invitee@x.com" || u.Role != "user" {
+		t.Errorf("CreateUserInvite: user = %+v, want Email=invitee@x.com Role=user", u)
+	}
+	// Credential-less: the invited user has no passkey until they redeem the
+	// invite (and there is no local password to have; that concept is gone).
+	count, err := st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("CountWebAuthnCredentials: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("new invited user passkey count = %d, want 0 (credential-less)", count)
+	}
+
+	token := extractToken(t, link)
+	grant, err := st.AccountRecovery().Get(t.Context(), auth.HashToken(token))
+	if err != nil {
+		t.Fatalf("AccountRecovery.Get: %v", err)
+	}
+	if grant.UserID != u.ID || grant.Reason != "invite" || grant.UsedAt != 0 {
+		t.Errorf("grant = %+v, want UserID=%q Reason=invite UsedAt=0", grant, u.ID)
+	}
+}
+
+// TestAdminService_CreateUserInvite_NilPasskeys_ReturnsErrWebAuthnUnavailable
+// proves CreateUserInvite refuses to mint an invite link when WebAuthn isn't
+// configured — such a link would 404 at redeem (register routes are gated
+// off deps.Passkey != nil, server.go). newAdminSvc's grants has a nil
+// PasskeyService.
+func TestAdminService_CreateUserInvite_NilPasskeys_ReturnsErrWebAuthnUnavailable(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "admin@x.com", "admin")
+
+	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user"); !errors.Is(err, ErrWebAuthnUnavailable) {
+		t.Fatalf("CreateUserInvite with nil passkeys: err = %v, want ErrWebAuthnUnavailable", err)
 	}
 }
 
@@ -146,34 +180,6 @@ func TestAdminService_UpdateUser_DisableRevokesSessions(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("expected 0 remaining sessions, DeleteByUser removed %d more", n)
-	}
-}
-
-func TestAdminService_UpdateUser_PasswordOnOIDCOnly_Rejected(t *testing.T) {
-	st, svc := newAdminSvc(t)
-	admin := seedUser(t, st, "a@x", "admin")
-	// OIDC-only user: no password hash.
-	oidcUser, err := st.Users().Create(t.Context(), store.User{Email: "o@x", Role: "user", OIDCProvider: "https://idp", OIDCSubject: "sub1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pwNew := "correcthorse12"
-	if _, err := svc.UpdateUser(t.Context(), admin.ID, oidcUser.ID, UpdateUserParams{Password: &pwNew}); !errors.Is(err, ErrOIDCNoPassword) {
-		t.Fatalf("err = %v, want ErrOIDCNoPassword", err)
-	}
-}
-
-func TestAdminService_UpdateUser_RejectsWeakPassword(t *testing.T) {
-	st, svc := newAdminSvc(t)
-	admin := seedUser(t, st, "a@x", "admin")
-	// other must already have a local password so the OIDC-only guard does
-	// not fire before the length check under test.
-	other := seedUserWithPassword(t, st, "b@x", "user", "correcthorse12")
-
-	pwNew := "short"
-	if _, err := svc.UpdateUser(t.Context(), admin.ID, other.ID, UpdateUserParams{Password: &pwNew}); !errors.Is(err, ErrWeakPassword) {
-		t.Fatalf("err = %v, want ErrWeakPassword", err)
 	}
 }
 

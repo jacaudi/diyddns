@@ -32,12 +32,12 @@ func seedHistory(t *testing.T, st *store.Store, deviceID string, n int) {
 
 func TestPatchDevice_RenamesWithCSRF(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "patcha@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "patcha@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "old"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "patcha@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "patcha@example.com")
 
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/devices/"+dev.ID, map[string]string{
 		"label": "new",
@@ -52,12 +52,12 @@ func TestPatchDevice_RenamesWithCSRF(t *testing.T) {
 
 func TestPatchDevice_MissingCSRF_Forbidden(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "patchb@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "patchb@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "old"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, _ := loginAndGetCSRF(t, h, "patchb@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "patchb@example.com")
 
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/devices/"+dev.ID, map[string]string{
 		"label": "new",
@@ -69,7 +69,7 @@ func TestPatchDevice_MissingCSRF_Forbidden(t *testing.T) {
 
 func TestPatchDevice_NoSession_Unauthorized(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "patchc@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "patchc@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "old"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
@@ -85,13 +85,13 @@ func TestPatchDevice_NoSession_Unauthorized(t *testing.T) {
 
 func TestPatchDevice_ForeignDevice_NotFound(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "patchd@example.com", "correct horse battery staple")
-	userB := seedAuthUserWithPassword(t, h.st, "patche@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "patchd@example.com", "user")
+	userB := seedUser(t, h.st, "patche@example.com", "user")
 	other, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userB.ID, Label: "b-dev"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "patchd@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "patchd@example.com")
 
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/devices/"+other.ID, map[string]string{
 		"label": "x",
@@ -103,12 +103,12 @@ func TestPatchDevice_ForeignDevice_NotFound(t *testing.T) {
 
 func TestPatchDevice_EmptyLabel_UnprocessableEntity(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "patchf@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "patchf@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "old"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "patchf@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "patchf@example.com")
 
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/devices/"+dev.ID, map[string]string{
 		"label": "",
@@ -120,7 +120,7 @@ func TestPatchDevice_EmptyLabel_UnprocessableEntity(t *testing.T) {
 
 func TestPatchDevice_DuplicateLabel_Conflict(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "patchg@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "patchg@example.com", "user")
 	if _, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "taken"}); err != nil {
 		t.Fatalf("seed device 1: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestPatchDevice_DuplicateLabel_Conflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed device 2: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "patchg@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "patchg@example.com")
 
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/devices/"+dev2.ID, map[string]string{
 		"label": "taken",
@@ -140,12 +140,12 @@ func TestPatchDevice_DuplicateLabel_Conflict(t *testing.T) {
 
 func TestPatchDevice_EmptyBody_ReturnsCurrentDevice(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "patchh@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "patchh@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "unchanged"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "patchh@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "patchh@example.com")
 
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/devices/"+dev.ID, map[string]string{}, cookie, csrf)
 	if status != http.StatusOK {
@@ -160,12 +160,12 @@ func TestPatchDevice_EmptyBody_ReturnsCurrentDevice(t *testing.T) {
 
 func TestDeleteDevice_RemovesDevice(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "deletea@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "deletea@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "deletea@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "deletea@example.com")
 
 	status, _, body := doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/devices/"+dev.ID, nil, cookie, csrf)
 	if status != http.StatusNoContent {
@@ -179,12 +179,12 @@ func TestDeleteDevice_RemovesDevice(t *testing.T) {
 
 func TestDeleteDevice_MissingCSRF_Forbidden(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "deleteb@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "deleteb@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, _ := loginAndGetCSRF(t, h, "deleteb@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "deleteb@example.com")
 
 	status, _, body := doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/devices/"+dev.ID, nil, cookie, "")
 	if status != http.StatusForbidden {
@@ -194,7 +194,7 @@ func TestDeleteDevice_MissingCSRF_Forbidden(t *testing.T) {
 
 func TestDeleteDevice_NoSession_Unauthorized(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "deletec@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "deletec@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
@@ -208,13 +208,13 @@ func TestDeleteDevice_NoSession_Unauthorized(t *testing.T) {
 
 func TestDeleteDevice_ForeignDevice_NotFound(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "deleted@example.com", "correct horse battery staple")
-	userB := seedAuthUserWithPassword(t, h.st, "deletee@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "deleted@example.com", "user")
+	userB := seedUser(t, h.st, "deletee@example.com", "user")
 	other, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userB.ID, Label: "b-dev"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "deleted@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "deleted@example.com")
 
 	status, _, body := doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/devices/"+other.ID, nil, cookie, csrf)
 	if status != http.StatusNotFound {
@@ -226,12 +226,12 @@ func TestDeleteDevice_ForeignDevice_NotFound(t *testing.T) {
 
 func TestRotateSecret_ReturnsSecretOnce(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "rotatea@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "rotatea@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "rotatea@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "rotatea@example.com")
 
 	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/devices/"+dev.ID+"/rotate-secret", nil, cookie, csrf)
 	if status != http.StatusOK {
@@ -251,12 +251,12 @@ func TestRotateSecret_ReturnsSecretOnce(t *testing.T) {
 
 func TestRotateSecret_MissingCSRF_Forbidden(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "rotateb@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "rotateb@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, _ := loginAndGetCSRF(t, h, "rotateb@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "rotateb@example.com")
 
 	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/devices/"+dev.ID+"/rotate-secret", nil, cookie, "")
 	if status != http.StatusForbidden {
@@ -266,7 +266,7 @@ func TestRotateSecret_MissingCSRF_Forbidden(t *testing.T) {
 
 func TestRotateSecret_NoSession_Unauthorized(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "rotatec@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "rotatec@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
@@ -280,13 +280,13 @@ func TestRotateSecret_NoSession_Unauthorized(t *testing.T) {
 
 func TestRotateSecret_ForeignDevice_NotFound(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "rotated@example.com", "correct horse battery staple")
-	userB := seedAuthUserWithPassword(t, h.st, "rotatee@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "rotated@example.com", "user")
+	userB := seedUser(t, h.st, "rotatee@example.com", "user")
 	other, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userB.ID, Label: "b-dev"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, csrf := loginAndGetCSRF(t, h, "rotated@example.com", "correct horse battery staple")
+	cookie, csrf := sessionFor(t, h, "rotated@example.com")
 
 	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/devices/"+other.ID+"/rotate-secret", nil, cookie, csrf)
 	if status != http.StatusNotFound {
@@ -298,13 +298,13 @@ func TestRotateSecret_ForeignDevice_NotFound(t *testing.T) {
 
 func TestDeviceHistory_Paginated(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "hista@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "hista@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
 	seedHistory(t, h.st, dev.ID, 3)
-	cookie, _ := loginAndGetCSRF(t, h, "hista@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "hista@example.com")
 
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/devices/"+dev.ID+"/history?limit=2", nil, cookie, "")
 	if status != http.StatusOK {
@@ -324,7 +324,7 @@ func TestDeviceHistory_Paginated(t *testing.T) {
 
 func TestDeviceHistory_NoSession_Unauthorized(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "histb@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "histb@example.com", "user")
 	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "d"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
@@ -338,13 +338,13 @@ func TestDeviceHistory_NoSession_Unauthorized(t *testing.T) {
 
 func TestDeviceHistory_ForeignDevice_NotFound(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "histc@example.com", "correct horse battery staple")
-	userB := seedAuthUserWithPassword(t, h.st, "histd@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "histc@example.com", "user")
+	userB := seedUser(t, h.st, "histd@example.com", "user")
 	other, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userB.ID, Label: "b-dev"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	cookie, _ := loginAndGetCSRF(t, h, "histc@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "histc@example.com")
 
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/devices/"+other.ID+"/history", nil, cookie, "")
 	if status != http.StatusNotFound {

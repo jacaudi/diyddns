@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -8,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/descope/virtualwebauthn"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -28,12 +31,30 @@ type fullHarness struct {
 	st  *store.Store
 }
 
+// apiTestRP is the WebAuthn Relying Party identity every passkey ceremony
+// test in this package drives against — must match cfg.WebAuthn below.
+func apiTestRP() virtualwebauthn.RelyingParty {
+	return virtualwebauthn.RelyingParty{ID: "localhost", Name: "Test", Origin: "http://localhost:8080"}
+}
+
+// fakeMailer is a real-enough Mailer double for buildServerDeps: Enabled
+// reports true (so GrantService.RequestSelfServiceRecovery's mailer-enabled
+// gate doesn't short-circuit before this file's tests can observe the
+// account-exists/has-a-passkey checks that follow it) and Send always
+// succeeds without touching the network. mirrors discardAgentAudit's
+// no-op-double style (agent_test.go).
+type fakeMailer struct{}
+
+func (fakeMailer) Send(context.Context, string, string, string) error { return nil }
+func (fakeMailer) Enabled() bool                                      { return true }
+
 // buildServerDeps assembles every ServerDeps field common to the full-server
-// harness (agent HMAC surface, browser auth surface, device management) onto
-// a fresh :memory: store, WITHOUT registering it onto a mux. It is the single
-// place that "how the full server's non-OIDC deps are wired" lives, so both
-// newFullHarness and newOIDCHarness build from the same deps rather than each
-// hand-duplicating the ~10-field ServerDeps literal.
+// harness (agent HMAC surface, browser auth surface, device management,
+// passkey ceremonies) onto a fresh :memory: store, WITHOUT registering it
+// onto a mux. It is the single place that "how the full server's non-OIDC
+// deps are wired" lives, so both newFullHarness and newOIDCHarness build from
+// the same deps rather than each hand-duplicating the ~10-field ServerDeps
+// literal.
 func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	t.Helper()
 	st, err := store.Open(t.Context(), ":memory:")
@@ -58,16 +79,27 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 			TTL:          time.Hour,
 			SlideWindow:  time.Minute,
 		},
-		Password: cheapPasswordCfg(),
+		WebAuthn: config.WebAuthnCfg{
+			RPID: "localhost", RPOrigin: "http://localhost:8080", RPDisplayName: "Test", Timeout: 2 * time.Minute,
+		},
 	}
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Session.TTL, cfg.Session.SlideWindow)
-	authSvc, err := service.NewAuthService(st, sessions, cfg.Password, discardAgentAudit{})
-	if err != nil {
-		t.Fatalf("NewAuthService: %v", err)
-	}
+	authSvc := service.NewAuthService(sessions, discardAgentAudit{})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bootstrapSvc := service.NewBootstrapService(st, cfg.Bootstrap, cfg.Password, log, discardAgentAudit{}, nil)
-	adminSvc := service.NewAdminService(st, cfg.Password, discardAgentAudit{})
+
+	// One 32-byte master key seals both the agent HMAC envelope (via
+	// verifier) and every AEAD-sealed browser cookie (session challenge,
+	// bootstrap claim) below — mirrors production's single
+	// cfg.Auth.HMAC.SecretKey reused across auth.SealWithAAD call sites
+	// (e.g. oidc.go's flow cookie), domain-separated by AAD, not by key.
+	passkeySvc, err := service.NewPasskeyService(st, sessions, key, cfg.WebAuthn, cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, discardAgentAudit{})
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	mailer := fakeMailer{}
+	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log)
+	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
+	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc)
 
 	return st, api.ServerDeps{
 		Log:       log,
@@ -80,6 +112,9 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Auth:      authSvc,
 		Bootstrap: bootstrapSvc,
 		Admin:     adminSvc,
+		Passkey:   passkeySvc,
+		Grants:    grantsSvc,
+		Mailer:    mailer,
 		Cfg:       cfg,
 		Info:      version.Info{Version: "v1.2.3"},
 		HMACKey:   key,
@@ -87,9 +122,10 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 }
 
 // newFullHarness assembles the full server: agent HMAC surface (enroll,
-// checkin, self), browser auth surface (login, logout, me, password,
-// bootstrap), and the device management surface under test here. OIDC is
-// left unset (disabled) — see newOIDCHarness for the OIDC-enabled variant.
+// checkin, self), browser auth surface (logout, me, passkey + OIDC login,
+// passkey bootstrap claim), and the device management surface under test
+// here. OIDC is left unset (disabled) — see newOIDCHarness for the
+// OIDC-enabled variant.
 func newFullHarness(t *testing.T) fullHarness {
 	t.Helper()
 	st, deps := buildServerDeps(t)
@@ -133,33 +169,42 @@ func newOIDCHarness(t *testing.T, cfgOIDC config.OIDCCfg) fullHarness {
 	return fullHarness{srv: srv, st: st}
 }
 
-// loginAndGetCSRF logs email/password in via the real HTTP endpoint and
-// returns the session cookie plus the CSRF token from /api/v1/auth/me, so
-// device-op tests exercise the same cookie+CSRF path a browser would.
-func loginAndGetCSRF(t *testing.T, h fullHarness, email, password string) (*http.Cookie, string) {
+// seedUser creates a credential-less user (no password, no passkey) — the
+// password-free replacement for the old seedAuthUserWithPassword now that
+// local password auth is gone. role is "user" or "admin".
+func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 	t.Helper()
-	_, loginHeader, loginBody := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/auth/login", map[string]string{
-		"email": email, "password": password,
-	}, nil, "")
-	cookie := findCookie(loginHeader, authTestCookieName)
-	if cookie == nil {
-		t.Fatalf("no session cookie from login, body=%s", loginBody)
+	u, err := st.Users().Create(context.Background(), store.User{Email: email, Role: role})
+	if err != nil {
+		t.Fatalf("seed user %q: %v", email, err)
 	}
+	return u
+}
 
-	_, _, meBody := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/auth/me", nil, cookie, "")
-	var me struct {
-		CSRF string `json:"csrf"`
+// sessionFor mints a real DB-backed browser session for the already-seeded
+// user with email and returns the session cookie plus its CSRF token — the
+// password-free replacement for loginAndGetCSRF. Login is now a passkey
+// ceremony, so session-guarded tests seed the session directly via
+// SessionManager rather than POSTing credentials; the resulting cookie
+// authenticates through sessionMiddleware exactly as a browser's would.
+func sessionFor(t *testing.T, h fullHarness, email string) (*http.Cookie, string) {
+	t.Helper()
+	u, err := h.st.Users().GetByEmail(context.Background(), email)
+	if err != nil {
+		t.Fatalf("sessionFor lookup %q: %v", email, err)
 	}
-	if err := json.Unmarshal(meBody, &me); err != nil {
-		t.Fatalf("decode me: %v", err)
+	sm := auth.NewSessionManager(h.st.Sessions(), h.st.Users(), time.Hour, time.Minute)
+	sess, err := sm.Create(context.Background(), u.ID, "", "")
+	if err != nil {
+		t.Fatalf("sessionFor create for %q: %v", email, err)
 	}
-	return cookie, me.CSRF
+	return &http.Cookie{Name: authTestCookieName, Value: sess.ID}, sess.CSRFToken
 }
 
 func TestMintCode_LoggedInWithCSRFReturnsWorkingCode(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "mint@example.com", "correct horse battery staple")
-	cookie, csrf := loginAndGetCSRF(t, h, "mint@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "mint@example.com", "user")
+	cookie, csrf := sessionFor(t, h, "mint@example.com")
 
 	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/devices", map[string]string{
 		"label": "laptop",
@@ -191,8 +236,8 @@ func TestMintCode_LoggedInWithCSRFReturnsWorkingCode(t *testing.T) {
 
 func TestMintCode_WithoutCSRFReturns403(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "mint2@example.com", "correct horse battery staple")
-	cookie, _ := loginAndGetCSRF(t, h, "mint2@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "mint2@example.com", "user")
+	cookie, _ := sessionFor(t, h, "mint2@example.com")
 
 	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/devices", map[string]string{
 		"label": "laptop",
@@ -204,8 +249,8 @@ func TestMintCode_WithoutCSRFReturns403(t *testing.T) {
 
 func TestListDevices_ReturnsOnlyCallersDevices(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "lista@example.com", "correct horse battery staple")
-	userB := seedAuthUserWithPassword(t, h.st, "listb@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "lista@example.com", "user")
+	userB := seedUser(t, h.st, "listb@example.com", "user")
 
 	if _, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "a-laptop"}); err != nil {
 		t.Fatalf("seed device A: %v", err)
@@ -214,7 +259,7 @@ func TestListDevices_ReturnsOnlyCallersDevices(t *testing.T) {
 		t.Fatalf("seed device B: %v", err)
 	}
 
-	cookie, _ := loginAndGetCSRF(t, h, "lista@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "lista@example.com")
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/devices", nil, cookie, "")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", status, body)
@@ -237,15 +282,15 @@ func TestListDevices_ReturnsOnlyCallersDevices(t *testing.T) {
 
 func TestGetDevice_AnotherUsersDeviceReturns404(t *testing.T) {
 	h := newFullHarness(t)
-	seedAuthUserWithPassword(t, h.st, "geta@example.com", "correct horse battery staple")
-	userB := seedAuthUserWithPassword(t, h.st, "getb@example.com", "correct horse battery staple")
+	seedUser(t, h.st, "geta@example.com", "user")
+	userB := seedUser(t, h.st, "getb@example.com", "user")
 
 	devB, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userB.ID, Label: "b-laptop"})
 	if err != nil {
 		t.Fatalf("seed device B: %v", err)
 	}
 
-	cookie, _ := loginAndGetCSRF(t, h, "geta@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "geta@example.com")
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/devices/"+devB.ID, nil, cookie, "")
 	if status != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404, body=%s", status, body)
@@ -254,14 +299,14 @@ func TestGetDevice_AnotherUsersDeviceReturns404(t *testing.T) {
 
 func TestGetDevice_OwnDeviceReturns200(t *testing.T) {
 	h := newFullHarness(t)
-	userA := seedAuthUserWithPassword(t, h.st, "getown@example.com", "correct horse battery staple")
+	userA := seedUser(t, h.st, "getown@example.com", "user")
 
 	devA, err := h.st.Devices().Create(t.Context(), store.Device{UserID: userA.ID, Label: "own-laptop"})
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
 
-	cookie, _ := loginAndGetCSRF(t, h, "getown@example.com", "correct horse battery staple")
+	cookie, _ := sessionFor(t, h, "getown@example.com")
 	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/devices/"+devA.ID, nil, cookie, "")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", status, body)

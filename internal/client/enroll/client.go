@@ -213,35 +213,7 @@ func (c *Client) EnrollCode(ctx context.Context, code string) (Result, error) {
 	return c.doEnroll(ctx, "/agent/v1/enroll/code", payload)
 }
 
-// Meta is optional device metadata sent with credential enrollment so the
-// device row is populated before its first check-in. Empty fields are omitted.
-type Meta struct{ Hostname, OS, ClientVersion string }
-
-// EnrollCredentials enrolls this device with a user's email + password
-// (POST /agent/v1/enroll/credentials), sending optional device metadata. On
-// success it returns the new device id and its HMAC secret (wire base64).
-func (c *Client) EnrollCredentials(ctx context.Context, email, password string, meta Meta) (Result, error) {
-	payload, err := json.Marshal(struct { // #nosec G117 -- sending the password to POST /agent/v1/enroll/credentials over TLS is this function's intended purpose (credential enrollment); it is never logged.
-		Email         string `json:"email"`
-		Password      string `json:"password"`
-		Hostname      string `json:"hostname,omitempty"`
-		OS            string `json:"os,omitempty"`
-		ClientVersion string `json:"client_version,omitempty"`
-	}{
-		Email:         email,
-		Password:      password,
-		Hostname:      meta.Hostname,
-		OS:            meta.OS,
-		ClientVersion: meta.ClientVersion,
-	})
-	if err != nil {
-		return Result{}, fmt.Errorf("enroll: credentials marshal: %w", err)
-	}
-	return c.doEnroll(ctx, "/agent/v1/enroll/credentials", payload)
-}
-
-// doEnroll POSTs a JSON enrollment request and classifies the response. Both
-// code and credential enrollment share this contract: 200 →
+// doEnroll POSTs a JSON enrollment request and classifies the response: 200 →
 // {device_id, secret(base64)}; a uniform 401 → ErrEnrollUnauthorized; any
 // other non-2xx → ErrServer.
 func (c *Client) doEnroll(ctx context.Context, path string, payload []byte) (Result, error) {

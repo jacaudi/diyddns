@@ -20,9 +20,15 @@ Quickstart instructions will land alongside the first user-facing release. To
 try it now, copy [config.example.yaml](config.example.yaml), generate an HMAC
 key as documented there, and run `task build` followed by
 `diyddns-server serve --config config.yaml`. The startup log prints a
-single-use bootstrap token; claim the first admin by POSTing it to
-`/api/v1/auth/bootstrap`. `scripts/smoke-test.sh` (or `task smoke`) runs that
-whole path end to end.
+single-use bootstrap token; claim the first admin by opening `/register` and
+registering a passkey with that token.
+
+Note that passkeys require a **secure context** — browse to `127.0.0.1` or
+`localhost`, or terminate TLS in front of the server. A plain-HTTP LAN address
+will not work.
+
+`task smoke` runs that whole path end to end, driving the WebAuthn ceremony
+with a virtual authenticator.
 
 ## Documentation
 

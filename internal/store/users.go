@@ -11,7 +11,6 @@ import (
 type User struct {
 	ID           string
 	Email        string
-	PasswordHash string // empty when OIDC-only
 	Role         string // "admin" | "user"
 	OIDCProvider string // empty when not linked
 	OIDCSubject  string // empty when not linked
@@ -44,18 +43,17 @@ func scanString(ns sql.NullString) string {
 	return ""
 }
 
-const userColumns = `id, email, password_hash, role, oidc_provider, oidc_subject, disabled, created_at, updated_at`
+const userColumns = `id, email, role, oidc_provider, oidc_subject, disabled, created_at, updated_at`
 
 func scanUser(row interface {
 	Scan(dest ...any) error
 }) (User, error) {
 	var u User
-	var passwordHash, oidcProvider, oidcSubject sql.NullString
+	var oidcProvider, oidcSubject sql.NullString
 	var disabled int64
 	err := row.Scan(
 		&u.ID,
 		&u.Email,
-		&passwordHash,
 		&u.Role,
 		&oidcProvider,
 		&oidcSubject,
@@ -66,7 +64,6 @@ func scanUser(row interface {
 	if err != nil {
 		return User{}, err
 	}
-	u.PasswordHash = scanString(passwordHash)
 	u.OIDCProvider = scanString(oidcProvider)
 	u.OIDCSubject = scanString(oidcSubject)
 	u.Disabled = disabled != 0
@@ -85,11 +82,10 @@ func (r *UserRepo) Create(ctx context.Context, u User) (User, error) {
 	u.UpdatedAt = now
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, password_hash, role, oidc_provider, oidc_subject, disabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO users (id, email, role, oidc_provider, oidc_subject, disabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.ID,
 		u.Email,
-		nullIfEmpty(u.PasswordHash),
 		u.Role,
 		nullIfEmpty(u.OIDCProvider),
 		nullIfEmpty(u.OIDCSubject),
@@ -160,12 +156,11 @@ func (r *UserRepo) GetByOIDC(ctx context.Context, provider, subject string) (Use
 func (r *UserRepo) Update(ctx context.Context, u User) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE users
-		 SET email = ?, password_hash = ?, role = ?,
+		 SET email = ?, role = ?,
 		     oidc_provider = ?, oidc_subject = ?, disabled = ?,
 		     updated_at = ?
 		 WHERE id = ?`,
 		u.Email,
-		nullIfEmpty(u.PasswordHash),
 		u.Role,
 		nullIfEmpty(u.OIDCProvider),
 		nullIfEmpty(u.OIDCSubject),
@@ -224,6 +219,75 @@ func (r *UserRepo) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("users.Delete: %w", ErrNotFound)
 	}
 	return nil
+}
+
+// SetWebAuthnHandle sets the opaque per-user handle used to resolve a user
+// during discoverable (usernameless) passkey login. The handle is the lookup
+// key for GetByWebAuthnHandle and is enforced UNIQUE at the DB level.
+// Returns ErrNotFound if no row matched, ErrConflict if the handle is already
+// assigned to another user.
+func (r *UserRepo) SetWebAuthnHandle(ctx context.Context, userID string, handle []byte) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET webauthn_handle = ? WHERE id = ?`,
+		handle, userID,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("users.SetWebAuthnHandle: %w", ErrConflict)
+		}
+		return fmt.Errorf("users.SetWebAuthnHandle: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("users.SetWebAuthnHandle: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("users.SetWebAuthnHandle: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// GetByWebAuthnHandle fetches a user by their WebAuthn handle. An empty
+// handle is rejected before querying: webauthn_handle is NULL for every
+// user that has not registered a passkey, and an empty/nil argument must
+// never be treated as a match against those rows.
+// Returns ErrNotFound if handle is empty or no row exists.
+func (r *UserRepo) GetByWebAuthnHandle(ctx context.Context, handle []byte) (User, error) {
+	if len(handle) == 0 {
+		return User{}, fmt.Errorf("users.GetByWebAuthnHandle: %w", ErrNotFound)
+	}
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE webauthn_handle = ?`, handle,
+	)
+	u, err := scanUser(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, fmt.Errorf("users.GetByWebAuthnHandle: %w", ErrNotFound)
+		}
+		return User{}, fmt.Errorf("users.GetByWebAuthnHandle: %w", err)
+	}
+	return u, nil
+}
+
+// GetWebAuthnHandle returns the WebAuthn handle for userID, or nil if the
+// user has never registered a passkey (webauthn_handle is NULL). Callers
+// registering a second (or later) passkey for the same user must reuse this
+// exact value in the ceremony: the handle is baked into each authenticator's
+// resident credential at registration time, so every credential a user owns
+// must share the one handle stored on their row, or discoverable-login
+// resolution (GetByWebAuthnHandle) breaks for whichever credential's handle
+// isn't the one currently on the row.
+// Returns ErrNotFound if no such user exists.
+func (r *UserRepo) GetWebAuthnHandle(ctx context.Context, userID string) ([]byte, error) {
+	var handle []byte
+	err := r.db.QueryRowContext(ctx, `SELECT webauthn_handle FROM users WHERE id = ?`, userID).Scan(&handle)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("users.GetWebAuthnHandle: %w", ErrNotFound)
+		}
+		return nil, fmt.Errorf("users.GetWebAuthnHandle: %w", err)
+	}
+	return handle, nil
 }
 
 // List returns all users ordered by email ascending.

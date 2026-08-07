@@ -30,7 +30,7 @@ func TestOIDCLoginOrLink(t *testing.T) {
 
 	t.Run("verified email links existing local user", func(t *testing.T) {
 		st := openTestStore(t)
-		u, _ := st.Users().Create(t.Context(), store.User{Email: "b@x.com", Role: "user", PasswordHash: "h"})
+		u, _ := st.Users().Create(t.Context(), store.User{Email: "b@x.com", Role: "user"})
 		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s2", "b@x.com", true)
 		if err != nil {
 			t.Fatalf("link: %v", err)
@@ -42,7 +42,7 @@ func TestOIDCLoginOrLink(t *testing.T) {
 
 	t.Run("admin is never auto-linked", func(t *testing.T) {
 		st := openTestStore(t)
-		_, _ = st.Users().Create(t.Context(), store.User{Email: "admin@x.com", Role: "admin", PasswordHash: "h"})
+		_, _ = st.Users().Create(t.Context(), store.User{Email: "admin@x.com", Role: "admin"})
 		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s3", "admin@x.com", true); !errors.Is(err, ErrOIDCRejected) {
 			t.Fatalf("want ErrOIDCRejected for admin email, got %v", err)
 		}
@@ -50,7 +50,7 @@ func TestOIDCLoginOrLink(t *testing.T) {
 
 	t.Run("unverified email with existing account is rejected, not duplicated", func(t *testing.T) {
 		st := openTestStore(t)
-		_, _ = st.Users().Create(t.Context(), store.User{Email: "c@x.com", Role: "user", PasswordHash: "h"})
+		_, _ = st.Users().Create(t.Context(), store.User{Email: "c@x.com", Role: "user"})
 		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s4", "c@x.com", false); !errors.Is(err, ErrOIDCRejected) {
 			t.Fatalf("want ErrOIDCRejected, got %v", err)
 		}

@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -121,6 +123,46 @@ func TestSession_Destroy(t *testing.T) {
 	if _, _, err := sm.Authenticate(t.Context(), sess.ID); !errors.Is(err, ErrUnauthorized) {
 		t.Fatal("destroyed session must not authenticate")
 	}
+}
+
+func TestSession_AuthenticateRequest(t *testing.T) {
+	const cookieName = "diyddns_session"
+
+	sm, _ := newSM(store.User{ID: "u1"})
+	sess, err := sm.Create(t.Context(), "u1", "1.2.3.4", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid cookie returns user and session", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: sess.ID})
+
+		u, got, err := sm.AuthenticateRequest(r, cookieName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.ID != "u1" || got.ID != sess.ID {
+			t.Fatal("AuthenticateRequest returned wrong identity")
+		}
+	})
+
+	t.Run("missing cookie is unauthorized", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		if _, _, err := sm.AuthenticateRequest(r, cookieName); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("missing cookie must be ErrUnauthorized, got %v", err)
+		}
+	})
+
+	t.Run("unknown cookie value is unauthorized", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: "does-not-exist"})
+
+		if _, _, err := sm.AuthenticateRequest(r, cookieName); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("unknown cookie must be ErrUnauthorized, got %v", err)
+		}
+	})
 }
 
 func TestGenerateCSRFToken_Distinct(t *testing.T) {

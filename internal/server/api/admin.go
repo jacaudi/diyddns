@@ -15,22 +15,22 @@ import (
 // ---- user DTOs ----
 
 // adminUserView is an admin's view of a user account: includes role,
-// disabled state, and whether the account is OIDC-managed (no local
-// password) — never the password hash itself.
+// disabled state, and whether the account is linked to an OIDC identity —
+// keyed off OIDCSubject now that local passwords are gone (design I5).
 type adminUserView struct {
-	ID        string `json:"id"`
-	Email     string `json:"email"`
-	Role      string `json:"role"`
-	Disabled  bool   `json:"disabled"`
-	OIDCOnly  bool   `json:"oidc_only"` // true = no local password (OIDC-managed)
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID         string `json:"id"`
+	Email      string `json:"email"`
+	Role       string `json:"role"`
+	Disabled   bool   `json:"disabled"`
+	OIDCLinked bool   `json:"oidc_linked"` // true = account is linked to an OIDC identity
+	CreatedAt  int64  `json:"created_at"`
+	UpdatedAt  int64  `json:"updated_at"`
 }
 
 func newAdminUserView(u store.User) adminUserView {
 	return adminUserView{
 		ID: u.ID, Email: u.Email, Role: u.Role, Disabled: u.Disabled,
-		OIDCOnly: u.PasswordHash == "", CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
+		OIDCLinked: u.OIDCSubject != "", CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
 	}
 }
 
@@ -38,12 +38,21 @@ type listUsersOutput struct{ Body []adminUserView }
 
 type createUserInput struct {
 	Body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Email string `json:"email"`
+		Role  string `json:"role"`
 	}
 }
-type createUserOutput struct{ Body adminUserView }
+
+// createUserResponse carries the newly-created (credential-less) user plus
+// the one-time invite link the admin shows the user out of band — the user
+// registers their first passkey by redeeming it (design D15). Local password
+// creation is gone: an admin-created account has no credential until the
+// invite is redeemed.
+type createUserResponse struct {
+	User adminUserView `json:"user"`
+	Link string        `json:"link"`
+}
+type createUserOutput struct{ Body createUserResponse }
 
 // updateUserInput is the partial-update body of PATCH
 // /api/v1/admin/users/{id}. A nil field means "leave unchanged".
@@ -52,7 +61,6 @@ type updateUserInput struct {
 	Body struct {
 		Role     *string `json:"role,omitempty"`
 		Disabled *bool   `json:"disabled,omitempty"`
-		Password *string `json:"password,omitempty"`
 	}
 }
 type updateUserOutput struct{ Body adminUserView }
@@ -63,6 +71,22 @@ type deleteUserInput struct {
 
 // deleteUserOutput carries no body; huma emits 204 via DefaultStatus.
 type deleteUserOutput struct{}
+
+// issueRecoveryInput carries the {id} path parameter of POST
+// /api/v1/admin/users/{id}/recovery.
+type issueRecoveryInput struct {
+	ID string `path:"id"`
+}
+
+// issueRecoveryResponse is the one-time registration-grant link an admin
+// shows the user out of band (design §7's admin-recovery path) — the same
+// shape a future admin-invite response will carry (I1, folded into
+// create-user in a later task), kept local to this op since no second
+// consumer exists yet.
+type issueRecoveryResponse struct {
+	Link string `json:"link"`
+}
+type issueRecoveryOutput struct{ Body issueRecoveryResponse }
 
 // ---- admin devices DTO (adds user_id to the non-secret device view) ----
 
@@ -163,13 +187,11 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
 	}, func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
 		actor := UserFrom(ctx)
-		u, err := deps.Admin.CreateUser(ctx, actor.ID, service.CreateUserParams{
-			Email: in.Body.Email, Password: in.Body.Password, Role: in.Body.Role,
-		})
+		u, link, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
 		if err != nil {
 			return nil, adminErr(ctx, deps, "create user", err)
 		}
-		return &createUserOutput{Body: newAdminUserView(u)}, nil
+		return &createUserOutput{Body: createUserResponse{User: newAdminUserView(u), Link: link}}, nil
 	})
 
 	huma.Register(a, huma.Operation{
@@ -177,7 +199,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	}, func(ctx context.Context, in *updateUserInput) (*updateUserOutput, error) {
 		actor := UserFrom(ctx)
 		u, err := deps.Admin.UpdateUser(ctx, actor.ID, in.ID, service.UpdateUserParams{
-			Role: in.Body.Role, Disabled: in.Body.Disabled, Password: in.Body.Password,
+			Role: in.Body.Role, Disabled: in.Body.Disabled,
 		})
 		if err != nil {
 			return nil, adminErr(ctx, deps, "update user", err)
@@ -193,6 +215,24 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			return nil, adminErr(ctx, deps, "delete user", err)
 		}
 		return &deleteUserOutput{}, nil
+	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/recovery", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
+	}, func(ctx context.Context, in *issueRecoveryInput) (*issueRecoveryOutput, error) {
+		actor := UserFrom(ctx)
+		// GrantService.IssueRecovery does not itself check that in.ID names a
+		// real user (it only issues a grant + revokes credentials for
+		// whatever id it's given) — this pre-check keeps the 404-on-bad-id
+		// behavior consistent with this file's other {id}-scoped endpoints.
+		if _, err := deps.Store.Users().GetByID(ctx, in.ID); err != nil {
+			return nil, adminErr(ctx, deps, "issue recovery", err)
+		}
+		link, err := deps.Grants.IssueRecovery(ctx, actor.ID, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "issue recovery", err)
+		}
+		return &issueRecoveryOutput{Body: issueRecoveryResponse{Link: link}}, nil
 	})
 
 	huma.Register(a, huma.Operation{
@@ -261,14 +301,12 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 		return huma.Error409Conflict("cannot remove the last admin")
 	case errors.Is(err, service.ErrSelfLockout):
 		return huma.Error409Conflict("cannot disable or delete your own account")
-	case errors.Is(err, service.ErrOIDCNoPassword):
-		return huma.Error409Conflict("user is OIDC-managed; no local password")
 	case errors.Is(err, service.ErrInvalidRole):
 		return huma.Error422UnprocessableEntity("role must be 'admin' or 'user'")
-	case errors.Is(err, service.ErrWeakPassword):
-		return huma.Error422UnprocessableEntity("password does not meet the minimum length policy")
 	case errors.Is(err, service.ErrInvalidEmail):
 		return huma.Error422UnprocessableEntity("invalid email address")
+	case errors.Is(err, service.ErrWebAuthnUnavailable):
+		return huma.Error503ServiceUnavailable("passkey authentication is not configured")
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)

@@ -149,21 +149,6 @@ func TestLoad_AuthDefaults(t *testing.T) {
 	if cfg.Auth.HMAC.SecretKey != "" {
 		t.Errorf("HMAC.SecretKey = %q, want empty by default", cfg.Auth.HMAC.SecretKey)
 	}
-	if cfg.Auth.Password.Argon2Time != 3 {
-		t.Errorf("Password.Argon2Time = %d, want 3", cfg.Auth.Password.Argon2Time)
-	}
-	if cfg.Auth.Password.Argon2MemoryKiB != 65536 {
-		t.Errorf("Password.Argon2MemoryKiB = %d, want 65536", cfg.Auth.Password.Argon2MemoryKiB)
-	}
-	if cfg.Auth.Password.Argon2Parallelism != 2 {
-		t.Errorf("Password.Argon2Parallelism = %d, want 2", cfg.Auth.Password.Argon2Parallelism)
-	}
-	if cfg.Auth.Password.MinLength != 12 {
-		t.Errorf("Password.MinLength = %d, want 12", cfg.Auth.Password.MinLength)
-	}
-	if cfg.Auth.Bootstrap.AdminEmail != "" || cfg.Auth.Bootstrap.AdminPassword != "" {
-		t.Errorf("Bootstrap = %+v, want empty by default", cfg.Auth.Bootstrap)
-	}
 }
 
 func TestLoad_RejectsNonceTTLBelowSkew(t *testing.T) {
@@ -188,21 +173,6 @@ func TestLoad_HMACSecretKeyEnvBinding(t *testing.T) {
 	cfg := mustLoadWithDB(t)
 	if cfg.Auth.HMAC.SecretKey != want {
 		t.Errorf("Auth.HMAC.SecretKey = %q, want %q (env var DIYDDNS_AUTH_HMAC_SECRET_KEY was dropped)", cfg.Auth.HMAC.SecretKey, want)
-	}
-}
-
-// TestLoad_BootstrapAdminEmailEnvAlias asserts the spec §5C env-var name
-// DIYDDNS_BOOTSTRAP_ADMIN_EMAIL binds to auth.bootstrap.admin_email, distinct from
-// the auto-derived DIYDDNS_AUTH_BOOTSTRAP_ADMIN_EMAIL.
-func TestLoad_BootstrapAdminEmailEnvAlias(t *testing.T) {
-	t.Setenv("DIYDDNS_BOOTSTRAP_ADMIN_EMAIL", "admin@example.com")
-	t.Setenv("DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD", "hunter2hunter2")
-	cfg := mustLoadWithDB(t)
-	if cfg.Auth.Bootstrap.AdminEmail != "admin@example.com" {
-		t.Errorf("Bootstrap.AdminEmail = %q, want admin@example.com", cfg.Auth.Bootstrap.AdminEmail)
-	}
-	if cfg.Auth.Bootstrap.AdminPassword != "hunter2hunter2" {
-		t.Errorf("Bootstrap.AdminPassword = %q, want hunter2hunter2", cfg.Auth.Bootstrap.AdminPassword)
 	}
 }
 
@@ -267,6 +237,103 @@ func TestLoad_OIDCValidation(t *testing.T) {
 		base(v)
 		if _, err := config.Load(v, ""); err != nil {
 			t.Fatalf("Load with OIDC disabled: %v", err)
+		}
+	})
+}
+
+func TestLoad_WebAuthnEmailDefaults(t *testing.T) {
+	cfg := mustLoadWithDB(t)
+	if cfg.Auth.WebAuthn.RPID != "" {
+		t.Errorf("WebAuthn.RPID = %q, want empty by default", cfg.Auth.WebAuthn.RPID)
+	}
+	if cfg.Auth.WebAuthn.RPOrigin != "" {
+		t.Errorf("WebAuthn.RPOrigin = %q, want empty by default", cfg.Auth.WebAuthn.RPOrigin)
+	}
+	if cfg.Auth.WebAuthn.RPDisplayName != "DIYDDNS" {
+		t.Errorf("WebAuthn.RPDisplayName = %q, want DIYDDNS", cfg.Auth.WebAuthn.RPDisplayName)
+	}
+	if cfg.Auth.WebAuthn.Timeout != 120*time.Second {
+		t.Errorf("WebAuthn.Timeout = %v, want 120s", cfg.Auth.WebAuthn.Timeout)
+	}
+	if cfg.Auth.HideLocalLoginUI {
+		t.Error("Auth.HideLocalLoginUI = true, want false by default")
+	}
+	if cfg.Email.Enabled {
+		t.Error("Email.Enabled = true, want false by default")
+	}
+	if cfg.Email.TLS != "starttls" {
+		t.Errorf("Email.TLS = %q, want starttls", cfg.Email.TLS)
+	}
+}
+
+// TestLoad_EmailHostEnvBinding is the regression guard for the pattern noted
+// on keyDefaults: config.Load has no viper.AutomaticEnv(), so every email.*
+// key MUST be registered in keyDefaults or its DIYDDNS_* env var is silently
+// dropped.
+func TestLoad_EmailHostEnvBinding(t *testing.T) {
+	t.Setenv("DIYDDNS_EMAIL_HOST", "smtp.example.com")
+	cfg := mustLoadWithDB(t)
+	if cfg.Email.Host != "smtp.example.com" {
+		t.Errorf("Email.Host = %q, want smtp.example.com (env var DIYDDNS_EMAIL_HOST was dropped)", cfg.Email.Host)
+	}
+}
+
+// TestLoad_EmailTLSValidation mirrors TestLoad_OIDCValidation: email.tls is
+// only validated when email.enabled is true, and must be one of the three
+// values the internal/email package understands (starttls, implicit, none).
+func TestLoad_EmailTLSValidation(t *testing.T) {
+	t.Run("enabled with invalid tls value is an error", func(t *testing.T) {
+		v := viper.New()
+		v.Set("database.path", ":memory:")
+		v.Set("email.enabled", true)
+		v.Set("email.tls", "tls") // old/typo value, not in the enum
+		if _, err := config.Load(v, ""); err == nil {
+			t.Fatal("expected error for email.enabled with invalid email.tls")
+		}
+	})
+
+	t.Run("enabled with each valid tls value loads clean", func(t *testing.T) {
+		for _, tls := range []string{"starttls", "implicit", "none"} {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("email.enabled", true)
+			v.Set("email.tls", tls)
+			if _, err := config.Load(v, ""); err != nil {
+				t.Errorf("Load with email.tls=%q: %v", tls, err)
+			}
+		}
+	})
+
+	t.Run("disabled skips validation even with a garbage tls value", func(t *testing.T) {
+		v := viper.New()
+		v.Set("database.path", ":memory:")
+		v.Set("email.enabled", false)
+		v.Set("email.tls", "not-a-real-value")
+		if _, err := config.Load(v, ""); err != nil {
+			t.Fatalf("Load with email disabled: %v", err)
+		}
+	})
+}
+
+func TestAuth_ResolveWebAuthn(t *testing.T) {
+	t.Run("derives rpID and origin from baseURL", func(t *testing.T) {
+		var a config.Auth
+		rpID, rpOrigin, err := a.ResolveWebAuthn("https://ddns.example.com")
+		if err != nil {
+			t.Fatalf("ResolveWebAuthn: %v", err)
+		}
+		if rpID != "ddns.example.com" {
+			t.Errorf("rpID = %q, want ddns.example.com", rpID)
+		}
+		if rpOrigin != "https://ddns.example.com" {
+			t.Errorf("rpOrigin = %q, want https://ddns.example.com", rpOrigin)
+		}
+	})
+
+	t.Run("empty baseURL and empty explicit fields is an error", func(t *testing.T) {
+		var a config.Auth
+		if _, _, err := a.ResolveWebAuthn(""); err == nil {
+			t.Fatal("expected error when neither rp fields nor baseURL are set")
 		}
 	})
 }
