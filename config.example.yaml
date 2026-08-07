@@ -1,0 +1,151 @@
+# DIYDDNS server — example configuration.
+#
+# Copy to config.yaml and run:
+#
+#     diyddns-server serve --config config.yaml
+#
+# Every key below is optional EXCEPT the two marked REQUIRED. Anything you
+# omit falls back to the default shown in its comment (the defaults are
+# defined in internal/config/config.go, keyDefaults).
+#
+# Precedence, highest first:
+#
+#     command-line flag  >  DIYDDNS_* env var  >  this file  >  built-in default
+#
+# Env var names are the dotted key upper-cased with dots replaced by
+# underscores, prefixed DIYDDNS_ — e.g. auth.hmac.secret_key is
+# DIYDDNS_AUTH_HMAC_SECRET_KEY. Binding is explicit, not automatic; the two
+# exceptions and one unsupported key are called out inline below.
+#
+# There is no ${file:...} or ${env:...} indirection — values are read
+# literally. To keep a secret out of this file, set its env var instead.
+
+server:
+  # HTTP listen address. Default ":8080". Also settable via `--listen`.
+  # The server speaks plain HTTP only — there is no TLS listener. Terminate
+  # TLS at a reverse proxy in front of it.
+  listen: "127.0.0.1:8080"
+
+  # Public base URL of this server. Default "" (unset). Only REQUIRED when
+  # auth.oidc.enabled is true, where it forms the OIDC redirect_uri.
+  base_url: "http://127.0.0.1:8080"
+
+database:
+  # REQUIRED. Path to the SQLite database file; it is created on first run
+  # along with its schema. The server refuses to start without it
+  # ("config: database.path is required").
+  path: "/var/lib/diyddns/diyddns.db"
+
+logging:
+  level: "info" # debug | info | warn | error. Default "info".
+  format: "json" # json | text. Default "json".
+  # stderr | stdout | a file path (opened append-only, mode 0600).
+  # Default "stderr".
+  output: "stderr"
+
+auth:
+  hmac:
+    # REQUIRED in practice. Base64 of exactly 32 random bytes; it is the AEAD
+    # master key that seals device secrets and enrollment codes. Config load
+    # tolerates an empty value, but the server then FAILS CLOSED at startup:
+    # "server: config: auth.hmac.secret_key must decode to 32 bytes, got 0".
+    #
+    # Generate one with:
+    #
+    #     head -c 32 /dev/urandom | base64
+    #
+    # Rotating this key invalidates every enrolled device. Prefer supplying it
+    # via DIYDDNS_AUTH_HMAC_SECRET_KEY rather than committing it here.
+    secret_key: "REPLACE_ME_WITH_BASE64_OF_32_RANDOM_BYTES"
+
+    # How far an agent's signed request timestamp may drift from server time.
+    # Default "120s".
+    skew_window: "120s"
+    # How long a used request nonce is remembered for replay rejection.
+    # Default "120s". MUST be >= skew_window or startup fails.
+    nonce_ttl: "120s"
+
+  session:
+    # Browser session cookie name. Default "diyddns_session".
+    cookie_name: "diyddns_session"
+
+    # Default TRUE. GOTCHA: the session cookie is emitted with the Secure
+    # attribute whenever the request arrived over TLS *or* this is true
+    # (internal/server/api/auth.go, sessionCookie), so a plain-HTTP server
+    # still sets Secure by default. Browsers treat http://localhost and
+    # http://127.0.0.1 as trustworthy origins and will store it, so local
+    # testing works — but a browser pointed at http://<lan-ip>:PORT will
+    # SILENTLY DISCARD the session cookie and every login will appear to
+    # fail. If you are testing off-box over plain HTTP, set this to false;
+    # otherwise put TLS in front and leave it true.
+    cookie_secure: true
+
+    # Default "lax". NOTE: currently inert — sessionCookie hardcodes
+    # SameSite=Lax. The value is only echoed back by the admin config
+    # endpoint. Left here because it is a real config key; do not expect
+    # changing it to change the cookie.
+    cookie_samesite: "lax"
+
+    # Absolute session lifetime. Default "720h" (30 days).
+    ttl: "720h"
+    # Sliding-renewal window: activity within this window extends the
+    # session. Default "168h" (7 days).
+    slide_window: "168h"
+
+  password:
+    # argon2id cost parameters for local password hashing. The defaults are
+    # the shipped values; raise memory/time on capable hardware.
+    argon2_time: 3 # Default 3.
+    argon2_memory_kib: 65536 # Default 65536 (64 MiB).
+    argon2_parallelism: 2 # Default 2.
+    min_length: 12 # Minimum accepted password length. Default 12.
+
+  bootstrap:
+    # Headless first-admin creation. If BOTH are set and no admin exists yet,
+    # the server creates that admin at startup. Leave both empty (the
+    # default) to use the interactive path instead: the server mints a
+    # single-use token and logs
+    #
+    #     BOOTSTRAP_TOKEN=<token> claim admin via POST /api/v1/auth/bootstrap ...
+    #
+    # which you redeem with
+    #
+    #     curl -X POST http://127.0.0.1:8080/api/v1/auth/bootstrap \
+    #       -H 'Content-Type: application/json' \
+    #       -d '{"token":"<token>","email":"you@example.com","password":"..."}'
+    #
+    # The token's plaintext is printed exactly once and cannot be reprinted.
+    #
+    # These two keys have EXTRA env aliases beyond the derived
+    # DIYDDNS_AUTH_BOOTSTRAP_* names: DIYDDNS_BOOTSTRAP_ADMIN_EMAIL and
+    # DIYDDNS_BOOTSTRAP_ADMIN_PASSWORD. Use the env vars — a password in a
+    # config file outlives its usefulness.
+    admin_email: ""
+    admin_password: ""
+
+  oidc:
+    # Single-provider OpenID Connect. Default false (disabled). When enabled,
+    # issuer + client_id + client_secret + server.base_url are all REQUIRED
+    # and startup fails without them.
+    enabled: false
+
+    # Fail closed: when true, a failed discovery at startup aborts the
+    # server instead of retrying in the background. Default false.
+    required: false
+
+    issuer: "" # e.g. "https://idp.example.com"
+    client_id: ""
+    # Prefer DIYDDNS_AUTH_OIDC_CLIENT_SECRET; never logged.
+    client_secret: ""
+
+    # Default ["openid", "profile", "email"]. MUST include "openid".
+    # This is the one key with NO env-var support — viper delivers env values
+    # as a single string, so DIYDDNS_AUTH_OIDC_SCOPES is ignored. Set it here.
+    scopes: ["openid", "profile", "email"]
+
+    # Link an OIDC identity to an existing local account with the same
+    # verified email. Default true.
+    auto_link_by_email: true
+    # Allow a brand-new account to be created on first OIDC login.
+    # Default true.
+    allow_oidc_signup: true

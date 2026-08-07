@@ -1,14 +1,21 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
+
+// bootstrapAPIPath is the only route that can claim the first admin. The
+// operator-facing log messages must name it, so a first-run operator is not
+// sent to a route that does not exist.
+const bootstrapAPIPath = "POST /api/v1/auth/bootstrap"
 
 // discardLogger returns a *slog.Logger that writes nowhere, for tests that
 // don't assert on log output.
@@ -127,6 +134,57 @@ func TestBootstrapService_Startup_TokenPath_PendingTokenNotReemitted(t *testing.
 	}
 	if firstHash.TokenHash != secondHash.TokenHash {
 		t.Fatal("second Startup replaced the pending token hash, want it left unchanged")
+	}
+}
+
+// TestBootstrapService_Startup_TokenPath_LogNamesBootstrapAPI pins the
+// default emitToken sink's message. The `BOOTSTRAP_TOKEN=<token>` prefix is
+// machine-greppable (scripts/smoke-test.sh scrapes it), and the instruction
+// that follows must name the real endpoint — there is no /bootstrap route
+// and no web UI.
+func TestBootstrapService_Startup_TokenPath_LogNamesBootstrapAPI(t *testing.T) {
+	st := openTestStore(t)
+	var buf bytes.Buffer
+	// nil emitToken => the default logToken sink, which is what operators see.
+	svc := NewBootstrapService(st, testBootstrapCfg("", ""), testPasswordCfg(),
+		slog.New(slog.NewTextHandler(&buf, nil)), discardAudit{}, nil)
+
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "BOOTSTRAP_TOKEN=") {
+		t.Errorf("Startup log = %q, want it to contain the greppable %q prefix", got, "BOOTSTRAP_TOKEN=")
+	}
+	if !strings.Contains(got, bootstrapAPIPath) {
+		t.Errorf("Startup log = %q, want it to name %q", got, bootstrapAPIPath)
+	}
+}
+
+// TestBootstrapService_Startup_PendingTokenLogNamesBootstrapAPI covers the
+// second message: on a restart with an unconsumed token the plaintext cannot
+// be reprinted, so the reminder must still point at the real endpoint.
+func TestBootstrapService_Startup_PendingTokenLogNamesBootstrapAPI(t *testing.T) {
+	st := openTestStore(t)
+	var buf bytes.Buffer
+	svc := NewBootstrapService(st, testBootstrapCfg("", ""), testPasswordCfg(),
+		slog.New(slog.NewTextHandler(&buf, nil)), discardAudit{}, nil)
+
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("first Startup: %v", err)
+	}
+	buf.Reset() // isolate the second call's output from the minted-token line
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("second Startup: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "bootstrap pending") {
+		t.Fatalf("second Startup log = %q, want the pending-token reminder", got)
+	}
+	if !strings.Contains(got, bootstrapAPIPath) {
+		t.Errorf("second Startup log = %q, want it to name %q", got, bootstrapAPIPath)
 	}
 }
 

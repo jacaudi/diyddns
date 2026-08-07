@@ -46,9 +46,9 @@ type BootstrapService struct {
 // NewBootstrapService constructs a BootstrapService. pw supplies the
 // argon2id cost parameters (shared with AuthService) and minimum password
 // length policy. emitToken delivers the freshly-minted bootstrap token to
-// its operator-facing destination; pass nil to default to logging
-// `BOOTSTRAP_TOKEN=<token> visit /bootstrap to claim admin (single use)` at
-// info level. Tests inject a capturing sink instead.
+// its operator-facing destination; pass nil to default to logToken, which
+// prints the token and the endpoint that redeems it at info level. Tests
+// inject a capturing sink instead.
 func NewBootstrapService(st *store.Store, cfg config.BootstrapCfg, pw config.PasswordCfg, log *slog.Logger, audit AuditSink, emitToken func(token string)) *BootstrapService {
 	s := &BootstrapService{
 		st:           st,
@@ -70,7 +70,7 @@ func NewBootstrapService(st *store.Store, cfg config.BootstrapCfg, pw config.Pas
 // info level. This is the delivery channel for the token — logging it here
 // is intentional (never log the token *hash*, or any password).
 func (s *BootstrapService) logToken(token string) {
-	s.log.Info(fmt.Sprintf("BOOTSTRAP_TOKEN=%s visit /bootstrap to claim admin (single use)", token))
+	s.log.Info(fmt.Sprintf("BOOTSTRAP_TOKEN=%s claim admin via POST /api/v1/auth/bootstrap with body token, email, password (single use)", token))
 }
 
 // AdminExists reports whether any user with role "admin" exists.
@@ -108,7 +108,7 @@ func (s *BootstrapService) Startup(ctx context.Context) error {
 
 	bs, err := s.st.Bootstrap().Get(ctx)
 	if err == nil && bs.TokenHash != "" && bs.ConsumedAt == 0 {
-		s.log.Info("bootstrap pending; visit /bootstrap to claim admin")
+		s.log.Info("bootstrap pending; claim admin via POST /api/v1/auth/bootstrap using the token from a previous start")
 		return nil
 	}
 
