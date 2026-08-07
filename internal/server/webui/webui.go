@@ -56,9 +56,42 @@ func New(deps Deps) http.Handler {
 	h := &handler{pages: pages, deps: deps}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /login", h.handleLogin)
-	mux.HandleFunc("GET /register", h.handleRegister)
-	mux.HandleFunc("GET /account", h.requireSession(h.handleAccount))
-	mux.Handle("GET /static/", http.FileServerFS(staticFS))
+	mux.HandleFunc(patternRoot, h.handleRoot)
+	mux.HandleFunc(patternLogin, h.handleLogin)
+	mux.HandleFunc(patternRegister, h.handleRegister)
+	mux.HandleFunc(patternAccount, h.requireSession(h.handleAccount))
+	mux.Handle(patternStatic, http.FileServerFS(staticFS))
 	return mux
+}
+
+// The ServeMux patterns this package serves. patternRoot uses "{$}" so it
+// matches ONLY "/" — a bare "/" is a prefix match in Go's ServeMux and would
+// swallow every unmatched URL, including /api and /agent.
+const (
+	patternRoot     = "GET /{$}"
+	patternLogin    = "GET /login"
+	patternRegister = "GET /register"
+	patternAccount  = "GET /account"
+	patternStatic   = "GET /static/"
+)
+
+// Patterns returns every pattern New's handler serves, so the server that
+// mounts it can forward exactly these and no more. Without this the two route
+// lists live in separate files and drift: a route added here but not
+// forwarded there is simply unreachable, which is how GET / kept 404ing after
+// it was added.
+func Patterns() []string {
+	return []string{patternRoot, patternLogin, patternRegister, patternAccount, patternStatic}
+}
+
+// handleRoot sends the bare base URL somewhere useful instead of 404ing.
+// There is no dashboard yet, so /account is the closest thing to a home
+// page; requireSession redirects on to /login when there is no session, so
+// this needs no session check of its own.
+//
+// The "/{$}" pattern matches ONLY the root path — a bare "/" in Go's
+// ServeMux is a catch-all prefix and would swallow every unmatched URL,
+// turning genuine 404s into redirects.
+func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
 }

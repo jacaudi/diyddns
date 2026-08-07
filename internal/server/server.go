@@ -129,11 +129,15 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	// patterns; mounting the same patterns on the outer mux forwards matching
 	// requests straight into it. Distinct prefixes from /api, /agent,
 	// /healthz, /readyz — no collision.
+	// Every pattern the webui mux serves must ALSO be forwarded here, or the
+	// inner route is unreachable — the two lists are the same knowledge in
+	// two files, so webui.Patterns is the single source and this loop copies
+	// it rather than restating it. (A "/" catch-all instead would swallow
+	// unmatched /api and /agent URLs.)
 	webHandler := webui.New(webui.Deps{Sessions: sessions, Cfg: cfg, Log: log})
-	mux.Handle("GET /login", webHandler)
-	mux.Handle("GET /register", webHandler)
-	mux.Handle("GET /account", webHandler)
-	mux.Handle("GET /static/", webHandler)
+	for _, pattern := range webui.Patterns() {
+		mux.Handle(pattern, webHandler)
+	}
 
 	chain := middleware.Chain(mux,
 		middleware.RequestID,

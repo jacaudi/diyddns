@@ -267,48 +267,48 @@ func (s *GrantService) RedeemBegin(ctx context.Context, token string) (string, [
 // passkeys; a corner-case existing one is kept). A store failure after
 // Consume spends the grant without completing registration — the admin must
 // re-issue; this is documented, not a hang, and logged at CRITICAL.
-func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie string, r *http.Request, name string) error {
+func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie string, r *http.Request, name string) (store.User, error) {
 	if s.passkeys == nil {
-		return ErrWebAuthnUnavailable
+		return store.User{}, ErrWebAuthnUnavailable
 	}
 	grant, err := s.validGrant(ctx, token)
 	if err != nil {
-		return err
+		return store.User{}, err
 	}
 
 	sess, err := s.passkeys.openSession(sealedCookie)
 	if err != nil {
-		return err
+		return store.User{}, err
 	}
 	if !s.passkeys.claimChallenge(sess.Challenge, sess.Expires) {
-		return ErrPasskeyVerification
+		return store.User{}, ErrPasskeyVerification
 	}
 
 	u, err := s.st.Users().GetByID(ctx, grant.UserID)
 	if err != nil {
-		return fmt.Errorf("service.RedeemFinish: %w", err)
+		return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)
 	}
 	cred, err := s.passkeys.verifyRegistration(u.Email, sess.UserID, sess, r)
 	if err != nil {
-		return err
+		return store.User{}, err
 	}
 
 	if _, err := s.st.AccountRecovery().Consume(ctx, auth.HashToken(token), store.NowUnix()); err != nil {
-		return ErrGrantInvalid
+		return store.User{}, ErrGrantInvalid
 	}
 
 	if grant.Reason == "recovery" {
 		if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, grant.UserID); err != nil {
 			s.log.Error("GRANT CRITICAL: recovery grant consumed but passkey revoke failed; admin must re-issue",
 				"err", err, "user_id", grant.UserID)
-			return fmt.Errorf("service.RedeemFinish: %w", err)
+			return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)
 		}
 	}
 
 	if _, err := s.passkeys.persistCredential(ctx, grant.UserID, sess.UserID, cred, name); err != nil {
 		s.log.Error("GRANT CRITICAL: grant consumed but credential persist failed; admin must re-issue",
 			"err", err, "user_id", grant.UserID)
-		return fmt.Errorf("service.RedeemFinish: %w", err)
+		return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)
 	}
 
 	if grant.Reason == "recovery" {
@@ -317,5 +317,5 @@ func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie str
 			TargetType: "user", TargetID: grant.UserID,
 		})
 	}
-	return nil
+	return u, nil
 }

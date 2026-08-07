@@ -54,7 +54,7 @@ func TestSmoke(t *testing.T) {
 	clientBin := build(t, repoRoot, binDir, "diyddns-client")
 
 	addr := freeAddr(t)
-	baseURL := "http://" + addr
+	baseURL := browserBaseURL(t, addr)
 	srv := startServer(t, repoRoot, serverBin, addr)
 
 	step(t, "wait for GET /healthz")
@@ -75,7 +75,7 @@ func TestSmoke(t *testing.T) {
 	// server.base_url, or every assertion fails origin validation.
 	rp := virtualwebauthn.RelyingParty{
 		Name:   "DIYDDNS",
-		ID:     host(t, addr),
+		ID:     rpIDFor(t, addr),
 		Origin: baseURL,
 	}
 

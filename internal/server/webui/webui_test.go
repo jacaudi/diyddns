@@ -208,3 +208,32 @@ func TestStaticAssets_ServedUnderStaticPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestRoot_RedirectsInsteadOf404 covers the bare base URL. There is no
+// dashboard yet, so / used to 404 — a first-run operator visiting the address
+// they were given dead-ended. It must redirect, and it must NOT become a
+// catch-all: Go's ServeMux treats a bare "/" as a prefix match, which would
+// turn every genuine 404 into a redirect too.
+func TestRoot_RedirectsInsteadOf404(t *testing.T) {
+	deps, _ := testDeps(t)
+	h := New(deps)
+
+	t.Run("root redirects", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("GET / = %d, want %d", rec.Code, http.StatusSeeOther)
+		}
+		if loc := rec.Header().Get("Location"); loc != "/account" {
+			t.Errorf("Location = %q, want /account", loc)
+		}
+	})
+
+	t.Run("unknown paths still 404", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/no-such-page", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET /no-such-page = %d, want 404 (root must not be a catch-all)", rec.Code)
+		}
+	})
+}

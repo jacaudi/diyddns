@@ -422,8 +422,22 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/register/finish",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{webauthnMetaMiddleware()},
-	}, func(ctx context.Context, in *webauthnFinishInput) (*sessionCookieOutput, error) {
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(), webauthnMetaMiddleware()},
+	}, registerFinishHandler(deps))
+}
+
+// registerFinishHandler completes a bootstrap claim or a grant redeem and
+// signs the user in. Extracted from registerPasskeyOps to keep that function
+// under the project's gocyclo threshold (.golangci.yml, min-complexity: 15).
+//
+// Which flow this is comes from the token, exactly as register/begin decides
+// from the email: a token means "redeem a grant", its absence means
+// "bootstrap claim". The two endpoints MUST agree — a caller that sends the
+// token on finish but the email on begin starts a bootstrap claim and ends
+// in the grant path, which fails with a message about an invalid link.
+func registerFinishHandler(deps ServerDeps) func(context.Context, *webauthnFinishInput) (*loginFinishOutput, error) {
+	return func(ctx context.Context, in *webauthnFinishInput) (*loginFinishOutput, error) {
+		lmeta := loginMetaFrom(ctx)
 		wmeta := webauthnMetaFrom(ctx, in.RawBody)
 		var extra struct {
 			Token string `json:"token"`
@@ -431,15 +445,36 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		}
 		_ = json.Unmarshal(in.RawBody, &extra)
 
+		var usr store.User
 		var err error
 		if extra.Token != "" {
-			err = deps.Grants.RedeemFinish(ctx, extra.Token, wmeta.challenge, wmeta.req, extra.Name)
+			usr, err = deps.Grants.RedeemFinish(ctx, extra.Token, wmeta.challenge, wmeta.req, extra.Name)
 		} else {
-			_, err = deps.Bootstrap.FinishClaim(ctx, wmeta.challenge, wmeta.req, extra.Name)
+			usr, err = deps.Bootstrap.FinishClaim(ctx, wmeta.challenge, wmeta.req, extra.Name)
 		}
 		if err != nil {
 			return nil, passkeyErr(ctx, deps, "finish registration", err)
 		}
-		return &sessionCookieOutput{SetCookie: passkeyChallengeCookie(deps.Cfg.Session, "", -1, false)}, nil
-	})
+
+		// Sign them in. The ceremony has just cryptographically proven
+		// possession of the credential, so bouncing to /login to prove it
+		// again is friction with no security value — and the browser client
+		// already says "Signing you in..." and navigates to /account, which
+		// without this redirects straight back to /login.
+		sess, err := deps.Sessions.Create(ctx, usr.ID, lmeta.ip, lmeta.ua)
+		if err != nil {
+			// The credential is persisted and the grant spent; only the
+			// session failed. Log it and let them sign in manually rather
+			// than failing a registration that actually succeeded.
+			deps.Log.LogAttrs(ctx, slog.LevelError, "registration succeeded but session creation failed",
+				slog.String("user_id", usr.ID), slog.Any("error", err))
+			return &loginFinishOutput{SetCookie: []http.Cookie{
+				passkeyChallengeCookie(deps.Cfg.Session, "", -1, false),
+			}}, nil
+		}
+		return &loginFinishOutput{SetCookie: []http.Cookie{
+			sessionCookie(deps.Cfg.Session, sess.ID, 0, lmeta.tls),
+			passkeyChallengeCookie(deps.Cfg.Session, "", -1, false),
+		}}, nil
+	}
 }

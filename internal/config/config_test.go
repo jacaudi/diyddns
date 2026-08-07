@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,6 +335,56 @@ func TestAuth_ResolveWebAuthn(t *testing.T) {
 		var a config.Auth
 		if _, _, err := a.ResolveWebAuthn(""); err == nil {
 			t.Fatal("expected error when neither rp fields nor baseURL are set")
+		}
+	})
+
+	// The WebAuthn spec requires the RP ID to be a valid domain string. An IP
+	// address is not one, and every browser rejects it — Firefox reports the
+	// generic "SecurityError: The operation is insecure", which names neither
+	// the RP ID nor the address. Nothing downstream can detect this either:
+	// the server boots, the pages render, register/begin returns 200 with
+	// real-looking options, and the ceremony only dies in the browser. Fail
+	// closed at startup instead.
+	t.Run("rejects an IP-address host", func(t *testing.T) {
+		for _, baseURL := range []string{
+			"http://127.0.0.1:18080",
+			"http://192.168.1.50:8080",
+			"https://[::1]:8443",
+			"https://[2001:db8::1]",
+		} {
+			var a config.Auth
+			_, _, err := a.ResolveWebAuthn(baseURL)
+			if err == nil {
+				t.Errorf("ResolveWebAuthn(%q) = nil error, want a failure: an IP is not a valid RP ID", baseURL)
+				continue
+			}
+			// The message has to name the fix, or the operator is left with
+			// the same unactionable failure the browser already gave them.
+			if !strings.Contains(err.Error(), "localhost") {
+				t.Errorf("ResolveWebAuthn(%q) error = %q, want it to suggest a hostname such as localhost", baseURL, err)
+			}
+		}
+	})
+
+	// An explicit rp_id is no more valid for being explicit.
+	t.Run("rejects an explicitly configured IP rp_id", func(t *testing.T) {
+		a := config.Auth{WebAuthn: config.WebAuthnCfg{RPID: "127.0.0.1", RPOrigin: "http://127.0.0.1:18080"}}
+		if _, _, err := a.ResolveWebAuthn(""); err == nil {
+			t.Error("explicit IP rp_id = nil error, want a failure")
+		}
+	})
+
+	t.Run("localhost is accepted", func(t *testing.T) {
+		var a config.Auth
+		rpID, rpOrigin, err := a.ResolveWebAuthn("http://localhost:18080")
+		if err != nil {
+			t.Fatalf("ResolveWebAuthn(localhost): %v", err)
+		}
+		if rpID != "localhost" {
+			t.Errorf("rpID = %q, want localhost", rpID)
+		}
+		if rpOrigin != "http://localhost:18080" {
+			t.Errorf("rpOrigin = %q, want http://localhost:18080", rpOrigin)
 		}
 	})
 }
