@@ -141,15 +141,19 @@ func baseURL(cfg config.Server, r *http.Request) string {
 }
 
 // initials renders the avatar text in the topbar user chip: the first two
-// characters of the local part, uppercased.
+// characters of the local part, uppercased. Truncation is rune-aware, not
+// byte-aware, so a multi-byte local part (e.g. CJK) yields its first two
+// runes rather than a mid-character byte split that produces invalid UTF-8.
 func initials(email string) string {
 	local, _, _ := strings.Cut(email, "@")
 	if local == "" {
 		return "?"
 	}
-	if len(local) > 2 {
-		local = local[:2]
+	r := []rune(local)
+	if len(r) > 2 {
+		r = r[:2]
 	}
+	local = string(r)
 	return strings.ToUpper(local)
 }
 

@@ -120,6 +120,10 @@ func TestInitials(t *testing.T) {
 		{"j@example.com", "J"},
 		{"", "?"},
 		{"@example.com", "?"},
+		// Multi-byte local part: truncation must be rune-aware, not byte-aware.
+		// The first two runes are 日 and 本; strings.ToUpper is a no-op on
+		// non-cased scripts like Kanji, so the uppercased result is unchanged.
+		{"日本語@example.com", "日本"},
 	}
 
 	for _, tt := range tests {
