@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -236,4 +237,109 @@ func TestRoot_RedirectsInsteadOf404(t *testing.T) {
 			t.Errorf("GET /no-such-page = %d, want 404 (root must not be a catch-all)", rec.Code)
 		}
 	})
+}
+
+// newTestHandler builds the unexported handler directly, so guard behaviour can
+// be tested without routing a request through the mux.
+func newTestHandler(t *testing.T, deps Deps) *handler {
+	t.Helper()
+	return &handler{pages: parsePages(), deps: deps}
+}
+
+// seedUser inserts a user with the given email and role.
+func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
+	t.Helper()
+	u, err := st.Users().Create(t.Context(), store.User{Email: email, Role: role})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	return u
+}
+
+// signIn mints a real session for usr and returns the cookie a browser would
+// send. It goes through the real SessionManager rather than hand-writing a
+// session row, so these tests stay honest about the cookie and CSRF contract.
+func signIn(t *testing.T, deps Deps, usr store.User) *http.Cookie {
+	t.Helper()
+	sess, err := deps.Sessions.Create(t.Context(), usr.ID, "127.0.0.1", "test-agent")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return &http.Cookie{Name: deps.Cfg.Auth.Session.CookieName, Value: sess.ID}
+}
+
+// sessionFor resolves the session behind a cookie, so a test can read the CSRF
+// token it must submit with a form POST.
+func sessionFor(t *testing.T, deps Deps, cookie *http.Cookie) store.Session {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	_, sess, err := deps.Sessions.AuthenticateRequest(req, deps.Cfg.Auth.Session.CookieName)
+	if err != nil {
+		t.Fatalf("resolve session: %v", err)
+	}
+	return sess
+}
+
+// TestRequireAdmin_ForbidsNonAdmin asserts a signed-in non-admin gets 403 rather
+// than a redirect. Redirecting to /login would loop: they are already signed in.
+func TestRequireAdmin_ForbidsNonAdmin(t *testing.T) {
+	deps, st := testDeps(t)
+
+	usr := seedUser(t, st, "user@example.com", "user")
+	cookie := signIn(t, deps, usr)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/probe", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+
+	guarded := newTestHandler(t, deps).requireAdmin(func(http.ResponseWriter, *http.Request, store.User, store.Session) {
+		t.Error("handler ran for a non-admin")
+	})
+	guarded(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+// TestRequirePost_RejectsBadCSRF asserts the wrapped handler never runs without
+// a valid token.
+func TestRequirePost_RejectsBadCSRF(t *testing.T) {
+	deps, st := testDeps(t)
+
+	usr := seedUser(t, st, "user@example.com", "user")
+	cookie := signIn(t, deps, usr)
+
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"absent", ""},
+		{"wrong", "not-the-token"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			form := url.Values{"csrf": {tt.token}}
+			req := httptest.NewRequest(http.MethodPost, "/probe", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+
+			ran := false
+			h := newTestHandler(t, deps).requirePost(func(http.ResponseWriter, *http.Request, store.User, store.Session) {
+				ran = true
+			})
+			h(rec, req)
+
+			if ran {
+				t.Error("handler ran despite an invalid CSRF token")
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+			}
+		})
+	}
 }
