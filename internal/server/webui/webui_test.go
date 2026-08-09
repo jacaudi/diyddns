@@ -49,7 +49,7 @@ func seedSessionCookie(t *testing.T, st *store.Store, sm *auth.SessionManager, e
 
 func TestHandleLogin_RendersPasskeyButton(t *testing.T) {
 	deps, _ := testDeps(t)
-	h := New(deps)
+	h, _ := New(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/login", nil)
 	rec := httptest.NewRecorder()
@@ -68,7 +68,7 @@ func TestHandleLogin_HideLocalLoginUI_OmitsPasskeyButOIDCShown(t *testing.T) {
 	deps, _ := testDeps(t)
 	deps.Cfg.Auth.HideLocalLoginUI = true
 	deps.Cfg.Auth.OIDC.Enabled = true
-	h := New(deps)
+	h, _ := New(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/login", nil)
 	rec := httptest.NewRecorder()
@@ -88,7 +88,7 @@ func TestHandleLogin_HideLocalLoginUI_OmitsPasskeyButOIDCShown(t *testing.T) {
 
 func TestHandleAccount_NoSession_RedirectsToLogin(t *testing.T) {
 	deps, _ := testDeps(t)
-	h := New(deps)
+	h, _ := New(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/account", nil)
 	rec := httptest.NewRecorder()
@@ -105,7 +105,7 @@ func TestHandleAccount_NoSession_RedirectsToLogin(t *testing.T) {
 func TestHandleAccount_ValidSession_Renders200(t *testing.T) {
 	deps, st := testDeps(t)
 	cookie, _ := seedSessionCookie(t, st, deps.Sessions, "user@example.com")
-	h := New(deps)
+	h, _ := New(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/account", nil)
 	req.AddCookie(cookie)
@@ -161,7 +161,7 @@ func TestAuthenticateBrowser_InvalidCookie_ReturnsError(t *testing.T) {
 func TestHandleLogin_RecoveryForm_HasHiddenCSRFField(t *testing.T) {
 	deps, _ := testDeps(t)
 	deps.Cfg.Email.Enabled = true
-	h := New(deps)
+	h, _ := New(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/login", nil)
 	rec := httptest.NewRecorder()
@@ -178,7 +178,7 @@ func TestHandleLogin_RecoveryForm_HasHiddenCSRFField(t *testing.T) {
 
 func TestHandleRegister_Renders200_WithTokenFromQuery(t *testing.T) {
 	deps, _ := testDeps(t)
-	h := New(deps)
+	h, _ := New(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/register?token=abc123", nil)
 	rec := httptest.NewRecorder()
@@ -194,7 +194,7 @@ func TestHandleRegister_Renders200_WithTokenFromQuery(t *testing.T) {
 
 func TestStaticAssets_ServedUnderStaticPrefix(t *testing.T) {
 	deps, _ := testDeps(t)
-	h := New(deps)
+	h, _ := New(deps)
 
 	for _, path := range []string{"/static/app.css", "/static/passkey.js"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -216,7 +216,7 @@ func TestStaticAssets_ServedUnderStaticPrefix(t *testing.T) {
 // turn every genuine 404 into a redirect too.
 func TestRoot_RedirectsInsteadOf404(t *testing.T) {
 	deps, _ := testDeps(t)
-	h := New(deps)
+	h, _ := New(deps)
 
 	t.Run("root redirects", func(t *testing.T) {
 		rec := httptest.NewRecorder()

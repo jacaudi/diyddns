@@ -21,11 +21,6 @@ var templateFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// pageNames lists every page New parses at construction. Adding a fourth
-// page is an additive change — a new templates/<name>.html plus a
-// mux.HandleFunc line in New — the other pages are untouched (no-wall).
-var pageNames = []string{"login", "register", "account"}
-
 // Deps are the dependencies the web UI handler needs.
 type Deps struct {
 	Sessions *auth.SessionManager
@@ -39,50 +34,60 @@ type handler struct {
 	deps  Deps
 }
 
-// New builds the server-rendered web UI: GET /login, /register, /account
-// (session-guarded), and static assets under /static/. Every page template
-// (layout.html + the page's own content block) is parsed once here, not
-// per-request.
-func New(deps Deps) http.Handler {
-	pages := make(map[string]*template.Template, len(pageNames))
-	for _, name := range pageNames {
-		// Each page gets its own parse tree (layout.html + one page file)
-		// rather than one combined tree over templates/*.html: every page
-		// defines a "content" block, and html/template would let the last
-		// parsed file's "content" definition silently win if all files
-		// shared one tree.
-		pages[name] = template.Must(template.ParseFS(templateFS, "templates/layout.html", "templates/"+name+".html"))
+// route pairs a ServeMux pattern with the handler that serves it. The field is
+// http.Handler rather than http.HandlerFunc because /static/ is served by
+// http.FileServerFS.
+type route struct {
+	pattern string
+	handler http.Handler
+}
+
+// New builds the server-rendered web UI and returns it together with every
+// pattern it serves. The caller must forward exactly these patterns.
+//
+// The returned slice and the mux are built from one table, which is what keeps
+// them from disagreeing: a route added here is forwarded automatically. When
+// they were two separate lists, GET / was registered on this mux but missing
+// from the forwarded list, so it 404'd in a browser while the unit tests — which
+// drive this mux directly — stayed green.
+//
+// "GET /{$}" matches ONLY "/". A bare "/" is a prefix match in Go's ServeMux and
+// would swallow every unmatched URL, including /api and /agent.
+func New(deps Deps) (http.Handler, []string) {
+	h := &handler{pages: parsePages(), deps: deps}
+
+	routes := []route{
+		{"GET /{$}", http.HandlerFunc(h.handleRoot)},
+		{"GET /login", http.HandlerFunc(h.handleLogin)},
+		{"GET /register", http.HandlerFunc(h.handleRegister)},
+		{"GET /account", h.requireSession(h.handleAccount)},
+		{"GET /static/", http.FileServerFS(staticFS)},
 	}
-	h := &handler{pages: pages, deps: deps}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(patternRoot, h.handleRoot)
-	mux.HandleFunc(patternLogin, h.handleLogin)
-	mux.HandleFunc(patternRegister, h.handleRegister)
-	mux.HandleFunc(patternAccount, h.requireSession(h.handleAccount))
-	mux.Handle(patternStatic, http.FileServerFS(staticFS))
-	return mux
+	patterns := make([]string, 0, len(routes))
+	for _, r := range routes {
+		mux.Handle(r.pattern, r.handler)
+		patterns = append(patterns, r.pattern)
+	}
+	return mux, patterns
 }
 
-// The ServeMux patterns this package serves. patternRoot uses "{$}" so it
-// matches ONLY "/" — a bare "/" is a prefix match in Go's ServeMux and would
-// swallow every unmatched URL, including /api and /agent.
-const (
-	patternRoot     = "GET /{$}"
-	patternLogin    = "GET /login"
-	patternRegister = "GET /register"
-	patternAccount  = "GET /account"
-	patternStatic   = "GET /static/"
-)
-
-// Patterns returns every pattern New's handler serves, so the server that
-// mounts it can forward exactly these and no more. Without this the two route
-// lists live in separate files and drift: a route added here but not
-// forwarded there is simply unreachable, which is how GET / kept 404ing after
-// it was added.
-func Patterns() []string {
-	return []string{patternRoot, patternLogin, patternRegister, patternAccount, patternStatic}
+// parsePages parses every page template against its shell, once, at
+// construction. Each page gets its own parse tree rather than one combined tree
+// over templates/*.html: every page defines a "content" block, and
+// html/template would let the last-parsed definition silently win.
+func parsePages() map[string]*template.Template {
+	pages := make(map[string]*template.Template, len(authPages))
+	for _, name := range authPages {
+		pages[name] = template.Must(template.ParseFS(templateFS,
+			"templates/layout.html", "templates/"+name+".html"))
+	}
+	return pages
 }
+
+// authPages are the pre-session pages, rendered in the narrow layout.html shell.
+var authPages = []string{"login", "register", "account"}
 
 // handleRoot sends the bare base URL somewhere useful instead of 404ing.
 // There is no dashboard yet, so /account is the closest thing to a home

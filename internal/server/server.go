@@ -40,18 +40,21 @@ type Server struct {
 	oidcMgr    *oidc.Manager
 }
 
-// handler builds the fully-wrapped http.Handler: the mux (health + two huma
-// APIs) inside the RequestID → AccessLog → Recover middleware chain, wired to
-// the real HMAC verifier, session manager, and service layer. It also
-// constructs the OIDC manager and returns it, so New/Run can launch its
-// background RetryLoop.
+// buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
+// health endpoints, and the forwarded web UI patterns — along with the whole
+// service dependency graph they need. handler wraps the result in middleware;
+// tests call this directly to inspect route resolution, which a wrapped
+// http.Handler does not permit.
+//
+// It returns the OIDC manager because only New/Run need it, to launch
+// RetryLoop; nothing in the mux itself does.
 //
 // FAILS CLOSED: cfg.Auth.HMAC.SecretKey must decode to a 32-byte AEAD key or
-// handler returns an error and builds nothing. A server that can enroll
+// buildMux returns an error and builds nothing. A server that can enroll
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("server: %w", err)
@@ -131,20 +134,31 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	// /healthz, /readyz — no collision.
 	// Every pattern the webui mux serves must ALSO be forwarded here, or the
 	// inner route is unreachable — the two lists are the same knowledge in
-	// two files, so webui.Patterns is the single source and this loop copies
-	// it rather than restating it. (A "/" catch-all instead would swallow
-	// unmatched /api and /agent URLs.)
-	webHandler := webui.New(webui.Deps{Sessions: sessions, Cfg: cfg, Log: log})
-	for _, pattern := range webui.Patterns() {
+	// two places, so webui.New's returned pattern slice is the single source
+	// and this loop copies it rather than restating it. (A "/" catch-all
+	// instead would swallow unmatched /api and /agent URLs.)
+	webHandler, webPatterns := webui.New(webui.Deps{Sessions: sessions, Cfg: cfg, Log: log})
+	for _, pattern := range webPatterns {
 		mux.Handle(pattern, webHandler)
 	}
 
-	chain := middleware.Chain(mux,
+	return mux, oidcMgr, nil
+}
+
+// handler builds the fully-wrapped handler: buildMux's ServeMux inside the
+// RequestID → AccessLog → Recover middleware chain. It also returns the OIDC
+// manager buildMux constructs, so New/Run can launch its background
+// RetryLoop.
+func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error) {
+	mux, oidcMgr, err := buildMux(cfg, st, log)
+	if err != nil {
+		return nil, nil, err
+	}
+	return middleware.Chain(mux,
 		middleware.RequestID,
 		middleware.AccessLog(log),
 		middleware.Recover(log),
-	)
-	return chain, oidcMgr, nil
+	), oidcMgr, nil
 }
 
 // Handler builds the fully-wrapped http.Handler (see handler). Exported for
