@@ -300,6 +300,48 @@ func TestAppCSS_BrandRuleIsScopedToTopbar(t *testing.T) {
 	}
 }
 
+// TestAppCSS_BrandMarginIsNotSharedAcrossShells guards against the SAME
+// two-rules-one-class collision as TestAppCSS_BrandRuleIsScopedToTopbar
+// above, leaking in the opposite direction: the shared bare ".brand" rule
+// used to carry "margin-bottom: 24px", needed only by the auth shell (which
+// stacks the brand mark above the card in layout.html). ".topbar .brand"
+// never overrode it, and because a flex row with align-items: center
+// centers the MARGIN box rather than the border box, that inherited margin
+// shifted the app-shell brand 12px above the nav's centre line at desktop
+// width (Task 5 review round 2). This is a text-level proxy for a geometric
+// property — the real assertion is "brand and nav share a centre line",
+// which needs a browser (Task 14 extends the Playwright harness for that).
+// This test only confirms the CSS source no longer has the shape that
+// caused the bug: the shared rule stays margin-free, and the auth shell's
+// spacing lives in its own scoped rule instead.
+func TestAppCSS_BrandMarginIsNotSharedAcrossShells(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	text := string(css)
+
+	bareBrand := regexp.MustCompile(`(?ms)^\.brand\s*\{([^}]*)\}`)
+	m := bareBrand.FindStringSubmatch(text)
+	if m == nil {
+		t.Fatal("app.css has no bare .brand rule")
+	}
+	if strings.Contains(m[1], "margin-bottom") {
+		t.Errorf("the shared bare .brand rule sets margin-bottom (body: %q); this leaks into "+
+			".topbar .brand in the app shell and misaligns the brand with the nav — scope it to "+
+			"the auth shell instead (e.g. \".wrap .brand\")", strings.TrimSpace(m[1]))
+	}
+
+	scopedBrand := regexp.MustCompile(`(?ms)^\.wrap \.brand\s*\{([^}]*)\}`)
+	sm := scopedBrand.FindStringSubmatch(text)
+	if sm == nil {
+		t.Fatal(`app.css is missing a ".wrap .brand { ... }" rule for the auth shell's spacing`)
+	}
+	if !strings.Contains(sm[1], "margin-bottom: 24px") {
+		t.Errorf(".wrap .brand rule = %q, want margin-bottom: 24px", strings.TrimSpace(sm[1]))
+	}
+}
+
 // TestAccount_RendersInAppShell asserts /account carries the app chrome, so the
 // authenticated pages share one navigation rather than the narrow auth shell.
 //

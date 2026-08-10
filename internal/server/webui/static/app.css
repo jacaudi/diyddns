@@ -75,14 +75,26 @@ a:hover { text-decoration: underline; }
   padding: 48px 20px;
 }
 
+/* Shared by both shells' brand marks: shape and typography only. This rule
+   deliberately carries NO spacing/layout — it used to set
+   margin-bottom: 24px here, needed only by the auth shell (this shell stacks
+   the brand mark above the card, see .wrap .brand just below), and because
+   the app shell's .topbar .brand never overrode it, that margin leaked into
+   the topbar and shifted the brand 12px above the nav's centre line at
+   desktop width (Task 5 review round 2 — see .topbar .brand's comment in the
+   app-shell section for the full mechanism). Keep this rule holding only
+   what both shells' brand marks actually have in common; give each shell's
+   own layout its own scoped selector instead of adding it here. */
 .brand {
   display: flex;
   align-items: center;
   gap: 9px;
   font-weight: 700;
   font-size: 15px;
-  margin-bottom: 24px;
 }
+/* Auth-shell-only: the brand mark sits stacked above the card in
+   layout.html, so only here does it need space below it. */
+.wrap .brand { margin-bottom: 24px; }
 .brand .logo {
   width: 26px;
   height: 26px;
@@ -182,8 +194,20 @@ a:hover { text-decoration: underline; }
    (.brand for the app shell, .auth-brand for the auth shell); a bare .brand
    here would silently apply letter-spacing/color drift to the sign-in pages
    via source order, since both rules would otherwise sit at equal
-   specificity. .brand .logo above already covers this element too, since
-   .topbar .brand is still a .brand ancestor for the descendant selector. */
+   specificity (Task 5 review round 1). .brand .logo above already covers
+   this element too, since .topbar .brand is still a .brand ancestor for the
+   descendant selector.
+   The leak also ran the OTHER direction (round 2): the shared bare .brand
+   rule used to carry margin-bottom: 24px, needed only by the auth shell's
+   stacked layout, and this rule never overrode it. In a flex row with
+   align-items: center, the MARGIN box is what gets centered, not the border
+   box — so a 26px-tall brand with an inherited 24px bottom margin has a
+   50px margin box, centered in the topbar's 56px height, which put the
+   brand's centre 12px above the nav's. Fixed at the source instead of with
+   a margin-bottom: 0 override here: the shared .brand rule above no longer
+   sets margin-bottom at all, and the auth shell's 24px now lives in its own
+   .wrap .brand rule. That way the shared rule can only ever hold what both
+   shells' brand marks genuinely have in common. */
 .topbar .brand {
   display: flex; align-items: center; gap: 9px;
   font-weight: 700; font-size: 15px; letter-spacing: .2px;
