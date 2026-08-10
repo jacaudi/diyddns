@@ -15,12 +15,28 @@
 package smoke
 
 import (
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// browserDiscovery opts the browser harness into the check-in step, which makes
+// real outbound IP-discovery calls. Off by default so the harness is useful
+// offline and in CI without network egress — the same reason smoke_test.go has
+// -skip-discovery, with the polarity inverted so the default needs no flag.
+var browserDiscovery = flag.Bool("browser-discovery", false,
+	"run the client check-in step, which performs real outbound IP discovery")
+
+// discoveryArg renders the flag as the argv token smoke.mjs checks for.
+func discoveryArg() string {
+	if *browserDiscovery {
+		return "discover"
+	}
+	return "skip-discovery"
+}
 
 func TestBrowserSmoke(t *testing.T) {
 	if _, err := exec.LookPath("npx"); err != nil {
@@ -32,6 +48,11 @@ func TestBrowserSmoke(t *testing.T) {
 
 	step(t, "build the server")
 	serverBin := build(t, repoRoot, binDir, "diyddns-server")
+
+	step(t, "build the client")
+	clientBin := build(t, repoRoot, binDir, "diyddns-client")
+
+	credsPath := filepath.Join(t.TempDir(), "credentials.json")
 
 	addr := freeAddr(t)
 	baseURL := browserBaseURL(t, addr)
@@ -65,7 +86,7 @@ func TestBrowserSmoke(t *testing.T) {
 	}
 
 	step(t, "drive the real pages through Chromium")
-	out, err := runIn(work, "node", dst, baseURL, token)
+	out, err := runIn(work, "node", dst, baseURL, token, clientBin, credsPath, discoveryArg())
 	t.Logf("%s", out)
 	if err != nil {
 		t.Fatalf("browser smoke failed: %v", err)
