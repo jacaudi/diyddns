@@ -958,3 +958,277 @@ func TestDevices_QueryFilter_MatchesPositively(t *testing.T) {
 		}
 	})
 }
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
+// calls store.Open, and store.Migrate mutates goose's package-level globals
+// with no synchronization, so concurrent store opens race under -race.
+func TestDeviceDetail_ForeignDeviceIs404(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	mine := seedUser(t, st, "mine@example.com", "user")
+	theirs := seedUser(t, st, "theirs@example.com", "user")
+	foreign := seedDevice(t, st, theirs.ID, "not-mine")
+
+	cookie := signIn(t, deps, mine)
+	sess := sessionFor(t, deps, cookie)
+
+	// Every route scoped to {id}, not just the GETs. rotate-secret matters most:
+	// it mints a credential.
+	// /history is NOT listed here: Task 9 registers it, so at this task an
+	// unregistered path answers 404 — the expected status — and the subtest
+	// would pass for the wrong reason, giving no isolation signal. Task 9 Step 6
+	// adds it.
+	for _, p := range []struct{ method, path string }{
+		{http.MethodGet, "/devices/" + foreign.ID},
+		{http.MethodPost, "/devices/" + foreign.ID + "/rename"},
+		{http.MethodPost, "/devices/" + foreign.ID + "/enabled"},
+		{http.MethodPost, "/devices/" + foreign.ID + "/rotate-secret"},
+		{http.MethodPost, "/devices/" + foreign.ID + "/delete"},
+	} {
+		t.Run(p.method+" "+p.path, func(t *testing.T) {
+			form := url.Values{
+				"csrf":          {sess.CSRFToken},
+				"label":         {"renamed-by-attacker"},
+				"disabled":      {"true"},
+				"confirm_label": {"not-mine"}, // the real label, were the check to run
+			}
+			req := httptest.NewRequest(p.method, p.path, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want 404 (not 403 — foreign and missing must be indistinguishable)", rec.Code)
+			}
+		})
+	}
+
+	// And nothing happened to the victim's device.
+	after, err := st.Devices().GetByID(t.Context(), foreign.ID)
+	if err != nil {
+		t.Fatalf("the foreign device was deleted: %v", err)
+	}
+	if after.Label != "not-mine" || after.Disabled {
+		t.Errorf("the foreign device was modified: %+v", after)
+	}
+}
+
+// TestDeviceMutations_RequireCSRF asserts every device mutation is actually
+// wrapped by requirePost. Testing the wrapper in isolation proves the wrapper
+// works; it does not prove each route uses it.
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceMutations_RequireCSRF(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "csrf-routes@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+
+	for _, path := range []string{
+		"/devices/new",
+		"/devices/" + dev.ID + "/rename",
+		"/devices/" + dev.ID + "/enabled",
+		"/devices/" + dev.ID + "/rotate-secret",
+		"/devices/" + dev.ID + "/delete",
+	} {
+		t.Run(path, func(t *testing.T) {
+			form := url.Values{"csrf": {"wrong-token"}, "label": {"x"}, "confirm_label": {"home-router"}}
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 — this route is not CSRF-guarded", rec.Code)
+			}
+		})
+	}
+	if _, err := st.Devices().GetByID(t.Context(), dev.ID); err != nil {
+		t.Fatalf("a CSRF-less request mutated the device: %v", err)
+	}
+}
+
+// TestDeviceRotate_RequiresMatchingLabel is the rotate half of the typed
+// confirmation set. Delete has one; rotate guards the action that silently
+// breaks a running agent, so it needs one too.
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceRotate_RequiresMatchingLabel(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "rot-confirm@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_label": {"wrong-name"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/rotate-secret", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	after, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if after.SecretHash != dev.SecretHash {
+		t.Error("the secret was rotated despite a mismatched confirmation")
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceDelete_RequiresMatchingLabel(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "del@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	t.Run("mismatch changes nothing", func(t *testing.T) {
+		form := url.Values{"csrf": {sess.CSRFToken}, "confirm_label": {"wrong-name"}}
+		req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/delete", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422", rec.Code)
+		}
+		if _, err := st.Devices().GetByID(t.Context(), dev.ID); err != nil {
+			t.Fatalf("device was deleted despite a mismatched confirmation: %v", err)
+		}
+	})
+
+	t.Run("match deletes and redirects", func(t *testing.T) {
+		form := url.Values{"csrf": {sess.CSRFToken}, "confirm_label": {"home-router"}}
+		req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/delete", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303", rec.Code)
+		}
+		if got := rec.Header().Get("Location"); got != "/devices" {
+			t.Errorf("Location = %q, want /devices", got)
+		}
+		if _, err := st.Devices().GetByID(t.Context(), dev.ID); err == nil {
+			t.Error("device still exists after a confirmed delete")
+		}
+	})
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceRotate_RevealsSecretOnce(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "rot@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_label": {"home-router"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/rotate-secret", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the reveal renders in the POST response)", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"credentials.json", "0600", "Reloading this page rotates the secret again"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rotate reveal missing %q", want)
+		}
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store — this is the most secret-bearing response in the UI", got)
+	}
+	// Do NOT assert on `"secret":` — html/template escapes " to &#34; in text
+	// context, so the rendered snippet reads secret&#34;: and any assertion
+	// containing a raw double quote fails against a correct implementation.
+	// Assert on the base64 payload instead: its alphabet (A-Za-z0-9+/=) passes
+	// through escaping untouched.
+	updated, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if updated.SecretHash == dev.SecretHash {
+		t.Fatal("the stored sealed secret did not change — nothing was rotated")
+	}
+	// The plaintext is returned once and never persisted, so the test cannot
+	// recompute it. Assert the reveal carries a plausible base64 secret and the
+	// device's own id, in the snippet rather than anywhere on the page.
+	snippet := revealSnippet(t, body)
+	if !strings.Contains(snippet, dev.ID) {
+		t.Error("the credentials.json snippet does not name this device")
+	}
+	if !base64Pattern.MatchString(snippet) {
+		t.Errorf("the credentials.json snippet carries no base64 secret: %q", snippet)
+	}
+}
+
+// base64Pattern matches a plausible base64-encoded 32-byte secret. Declared at
+// package level so it compiles once.
+//
+// Deviation from the task brief: html/template's text-context escaper also
+// rewrites a literal "+" to "&#43;" (confirmed against the stdlib; only "+"
+// among the base64 alphabet is touched — "/" and "=" pass through
+// unescaped). auth.GenerateSecret's 32 random bytes contain "+" in roughly
+// half of all base64 encodings, so the brief's literal `[A-Za-z0-9+/]`
+// pattern is flaky by construction — reproduced locally as ~50% failures
+// across repeated runs. The alternation below accepts either form so the
+// assertion is deterministic regardless of the random secret's content.
+var base64Pattern = regexp.MustCompile(`(?:[A-Za-z0-9/]|&#43;){40,}={0,2}`)
+
+// revealSnippet extracts the credentials.json block from a rendered rotate
+// reveal, so assertions cannot be satisfied by the metadata card or the app
+// shell. It returns "" when no reveal is present.
+func revealSnippet(t *testing.T, body string) string {
+	t.Helper()
+	_, after, found := strings.Cut(body, "server_url")
+	if !found {
+		return ""
+	}
+	snippet, _, _ := strings.Cut(after, "</code>")
+	return snippet
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceRename_UpdatesAndRedirects(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "ren@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "old-name")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"new-name"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/rename", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	got, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatalf("get device: %v", err)
+	}
+	if got.Label != "new-name" {
+		t.Errorf("label = %q, want %q", got.Label, "new-name")
+	}
+}

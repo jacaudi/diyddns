@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -217,4 +219,201 @@ func relExpiry(expiresAt int64, now time.Time) string {
 		return fmt.Sprintf("%d minutes", int(d.Minutes())+1)
 	}
 	return fmt.Sprintf("%d hours", int(d.Hours())+1)
+}
+
+// deviceDetailData is device-detail.html's template data. Secret is populated
+// only on the rotate reveal.
+type deviceDetailData struct {
+	appData
+	Device      store.Device
+	Status      Status
+	LastSeenRel string
+	LastSeenAbs string
+	CreatedAbs  string
+	Owner       string
+	History     []historyRow
+	Error       string
+
+	Secret         string // base64, rotate reveal only
+	Credentials    string // the credentials.json body to paste
+	BaseURLWarning string // set when server.base_url is unset (see baseURLWarning)
+}
+
+// ownedDevice loads a device for the signed-in user, rendering 404 when it does
+// not exist OR belongs to someone else. DeviceService reports a foreign device
+// as store.ErrNotFound, and that indistinguishability is the authorization
+// boundary — do not render a different message or status for the two cases.
+func (h *handler) ownedDevice(w http.ResponseWriter, r *http.Request, usr store.User) (store.Device, bool) {
+	dev, err := h.deps.Devices.Get(r.Context(), usr.ID, r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.renderError(w, r, usr, http.StatusNotFound, "That device does not exist.")
+			return store.Device{}, false
+		}
+		h.logAndFail(w, r, usr, "get device", err)
+		return store.Device{}, false
+	}
+	return dev, true
+}
+
+// newDetailData assembles the detail view model, including the five most recent
+// history rows the page previews.
+func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Session, dev store.Device) (deviceDetailData, error) {
+	page, err := h.deps.Devices.History(r.Context(), usr.ID, dev.ID, "", 5)
+	if err != nil {
+		return deviceDetailData{}, err
+	}
+	now := time.Now()
+	return deviceDetailData{
+		appData:     h.newAppData(usr, sess, dev.Label, "devices"),
+		Device:      dev,
+		Status:      deviceStatus(dev, now),
+		LastSeenRel: relTime(dev.LastSeenAt, now),
+		LastSeenAbs: absTime(dev.LastSeenAt),
+		CreatedAbs:  absTime(dev.CreatedAt),
+		Owner:       usr.Email,
+		History:     historyRows(page.Rows, now),
+	}, nil
+}
+
+// handleDeviceDetail renders one device.
+func (h *handler) handleDeviceDetail(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	dev, ok := h.ownedDevice(w, r, usr)
+	if !ok {
+		return
+	}
+	data, err := h.newDetailData(r, usr, sess, dev)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load device history", err)
+		return
+	}
+	h.render(w, r, "device-detail", data)
+}
+
+// handleDeviceRename renames a device and redirects back to it.
+func (h *handler) handleDeviceRename(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	dev, ok := h.ownedDevice(w, r, usr)
+	if !ok {
+		return
+	}
+	label := strings.TrimSpace(r.PostFormValue("label"))
+	if label == "" {
+		h.renderDetailError(w, r, usr, sess, dev, "A device needs a label.")
+		return
+	}
+	if _, err := h.deps.Devices.Rename(r.Context(), usr.ID, dev.ID, label); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			h.renderDetailError(w, r, usr, sess, dev, "You already have a device called "+label+".")
+			return
+		}
+		h.logAndFail(w, r, usr, "rename device", err)
+		return
+	}
+	http.Redirect(w, r, "/devices/"+dev.ID, http.StatusSeeOther)
+}
+
+// handleDeviceSetEnabled toggles a device's disabled flag.
+func (h *handler) handleDeviceSetEnabled(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	dev, ok := h.ownedDevice(w, r, usr)
+	if !ok {
+		return
+	}
+	disabled := r.PostFormValue("disabled") == "true"
+	if _, err := h.deps.Devices.SetEnabled(r.Context(), usr.ID, dev.ID, disabled); err != nil {
+		h.logAndFail(w, r, usr, "set device enabled", err)
+		return
+	}
+	http.Redirect(w, r, "/devices/"+dev.ID, http.StatusSeeOther)
+}
+
+// handleDeviceRotate mints a fresh HMAC secret and reveals it in this response.
+//
+// The secret is returned exactly once and never persisted in the clear, so this
+// cannot redirect. It is base64.StdEncoding-encoded to match what the JSON API
+// returns and what client/credentials expects ("base64 exactly as the server
+// delivered it") — that encoding is a contract shared by two call sites, and
+// changing one without the other breaks every agent.
+func (h *handler) handleDeviceRotate(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	dev, ok := h.ownedDevice(w, r, usr)
+	if !ok {
+		return
+	}
+	if r.PostFormValue("confirm_label") != dev.Label {
+		h.renderDetailError(w, r, usr, sess, dev,
+			"Type the device label exactly to confirm rotating its secret.")
+		return
+	}
+	secret, err := h.deps.Devices.RotateSecret(r.Context(), usr.ID, dev.ID)
+	if err != nil {
+		h.logAndFail(w, r, usr, "rotate device secret", err)
+		return
+	}
+	data, err := h.newDetailData(r, usr, sess, dev)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load device history", err)
+		return
+	}
+	base := baseURL(h.deps.Cfg, r)
+	encoded := base64.StdEncoding.EncodeToString(secret)
+	data.Secret = encoded
+	data.Credentials = fmt.Sprintf("{\n  \"server_url\": %q,\n  \"device_id\":  %q,\n  \"secret\":     %q\n}",
+		base, dev.ID, encoded)
+	data.BaseURLWarning = baseURLWarning(h.deps.Cfg, base)
+	h.render(w, r, "device-detail", data)
+}
+
+// handleDeviceDelete deletes a device after a server-verified typed
+// confirmation. The ui.js confirm() dialog is sugar; this check is the gate.
+func (h *handler) handleDeviceDelete(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	dev, ok := h.ownedDevice(w, r, usr)
+	if !ok {
+		return
+	}
+	if r.PostFormValue("confirm_label") != dev.Label {
+		h.renderDetailError(w, r, usr, sess, dev,
+			"Type the device label exactly to confirm deletion. Nothing was deleted.")
+		return
+	}
+	if err := h.deps.Devices.Delete(r.Context(), usr.ID, dev.ID); err != nil {
+		h.logAndFail(w, r, usr, "delete device", err)
+		return
+	}
+	http.Redirect(w, r, "/devices", http.StatusSeeOther)
+}
+
+// renderDetailError re-renders the detail page at 422 with a banner, for a
+// failed validation or confirmation.
+func (h *handler) renderDetailError(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session, dev store.Device, msg string) {
+	data, err := h.newDetailData(r, usr, sess, dev)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load device history", err)
+		return
+	}
+	data.Error = msg
+	h.renderStatus(w, r, http.StatusUnprocessableEntity, "device-detail", data)
+}
+
+// historyRow is one rendered ip_history entry. Shared by the device-detail
+// preview card (five newest) and the full history screen.
+type historyRow struct {
+	ObservedRel   string
+	ObservedAbs   string
+	IPv4          string
+	IPv6          string
+	ClientVersion string
+}
+
+// historyRows converts store rows into rendered ones.
+func historyRows(rows []store.IPHistory, now time.Time) []historyRow {
+	out := make([]historyRow, 0, len(rows))
+	for _, hr := range rows {
+		out = append(out, historyRow{
+			ObservedRel:   relTime(hr.ObservedAt, now),
+			ObservedAbs:   absTime(hr.ObservedAt),
+			IPv4:          hr.IPv4,
+			IPv6:          hr.IPv6,
+			ClientVersion: hr.ClientVersion,
+		})
+	}
+	return out
 }
