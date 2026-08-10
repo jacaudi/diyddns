@@ -1495,6 +1495,8 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 		{http.MethodPost, "/admin/users/" + victim.ID + "/recovery"},
 		// Task 12 registers exactly this one.
 		{http.MethodGet, "/admin/audit"},
+		// Task 13 registers exactly this one — the last of the ten.
+		{http.MethodGet, "/admin/server"},
 	} {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			form := url.Values{
@@ -2149,5 +2151,39 @@ func TestAdminAudit_BadCursorIs400(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminServer_ShowsInfoAndNoSecrets(t *testing.T) {
+	deps, st := testDeps(t)
+	deps.Cfg.Auth.OIDC.ClientSecret = "super-secret-value"
+	deps.Cfg.Email.Password = "smtp-secret-value"
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	req := httptest.NewRequest(http.MethodGet, "/admin/server", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	for _, secret := range []string{"super-secret-value", "smtp-secret-value"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("a secret leaked onto /admin/server: %q", secret)
+		}
+	}
+	for _, want := range []string{"Uptime", "Go runtime", "15m0s"} { // 15m0s = staleAfter
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	// The settings form is deliberately absent.
+	if strings.Contains(body, "Save settings") {
+		t.Error("a settings form rendered; this page is read-only")
 	}
 }

@@ -2,13 +2,17 @@ package webui
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -580,4 +584,122 @@ func parseDayEnd(v string) (int64, bool) {
 		return 0, false
 	}
 	return t.UTC().Add(24*time.Hour - time.Second).Unix(), true
+}
+
+// infoRow is one line of the server info list.
+type infoRow struct {
+	Label string
+	Value string
+	Note  string // shown muted after the value, for caveats like an unhonored key
+}
+
+// adminServerData is admin-server.html's template data.
+type adminServerData struct {
+	appData
+	Version string
+	Uptime  string
+	DBSize  string
+	Devices int
+	Rows    []infoRow
+}
+
+// handleAdminServer renders read-only runtime information.
+//
+// The page shows EFFECTIVE values, not raw config keys: its purpose is telling
+// an operator what the server is actually doing, so a key the server ignores
+// must not read as though it were in force.
+//
+// No secret is ever read into this view model — omission at the source rather
+// than a redaction step someone can forget.
+func (h *handler) handleAdminServer(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	cfg := h.deps.Cfg
+
+	devices, err := h.deps.Admin.ListAllDevices(r.Context())
+	if err != nil {
+		h.logAndFail(w, r, usr, "list all devices", err)
+		return
+	}
+
+	rows := []infoRow{
+		{Label: "Build", Value: fmt.Sprintf("%s (%s, %s)", h.deps.Info.Version, h.deps.Info.Commit, h.deps.Info.Date)},
+		{Label: "Go runtime", Value: fmt.Sprintf("%s · %s/%s", runtime.Version(), runtime.GOOS, runtime.GOARCH)},
+		{Label: "Database", Value: cfg.Database.Path},
+		{Label: "Listen", Value: cfg.Server.Listen},
+		{Label: "Base URL", Value: orNotSet(cfg.Server.BaseURL),
+			Note: baseURLNote(cfg.Server.BaseURL)},
+		{Label: "Session cookie", Value: cfg.Auth.Session.CookieName},
+		{Label: "Cookie Secure", Value: enabledLabel(r.TLS != nil || cfg.Auth.Session.CookieSecure),
+			Note: "effective value: set whenever the request arrived over TLS, regardless of the config key"},
+		{Label: "Cookie SameSite", Value: "Lax",
+			Note: "the cookie_samesite config key is not currently honored — every cookie is set Lax"},
+		{Label: "HMAC skew window", Value: cfg.Auth.HMAC.SkewWindow.String()},
+		{Label: "Device staleness threshold", Value: staleAfter.String(),
+			Note: "a device that has not checked in within this window shows as Stale"},
+		{Label: "Local login UI", Value: enabledLabel(!cfg.Auth.HideLocalLoginUI)},
+		{Label: "Email", Value: enabledLabel(cfg.Email.Enabled)},
+		{Label: "OIDC", Value: enabledLabel(cfg.Auth.OIDC.Enabled), Note: oidcNote(cfg)},
+	}
+
+	rpID, rpOrigin, rpErr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL)
+	if rpErr != nil {
+		rows = append(rows, infoRow{Label: "WebAuthn", Value: "not configured",
+			Note: "passkey login is unavailable until a resolvable RP ID is configured"})
+	} else {
+		rows = append(rows, infoRow{Label: "WebAuthn", Value: rpID, Note: "origin " + rpOrigin})
+	}
+
+	h.render(w, r, "admin-server", adminServerData{
+		appData: h.newAppData(usr, sess, "Server", "admin-server"),
+		Version: h.deps.Info.Version,
+		Uptime:  time.Since(h.deps.StartedAt).Truncate(time.Minute).String(),
+		DBSize:  dbSize(cfg.Database.Path),
+		Devices: len(devices),
+		Rows:    rows,
+	})
+}
+
+// dbSize reports the SQLite file size, or "—" when it cannot be read (an
+// in-memory database, or a path this process cannot stat).
+func dbSize(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.1f MB", float64(info.Size())/(1024*1024))
+}
+
+// enabledLabel renders a boolean as operator-facing text.
+func enabledLabel(on bool) string {
+	if on {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+// orNotSet renders an empty config value as an explicit "not set".
+func orNotSet(v string) string {
+	if v == "" {
+		return "not set"
+	}
+	return v
+}
+
+// baseURLNote warns when server.base_url is unset, which makes invite and
+// recovery links incomplete and enrollment commands guess their scheme.
+func baseURLNote(v string) string {
+	if v != "" {
+		return ""
+	}
+	return "set this — registration links and enrollment commands are derived from the request without it"
+}
+
+// oidcNote summarises the non-secret OIDC configuration. The client secret is
+// never read here.
+func oidcNote(cfg config.Server) string {
+	o := cfg.Auth.OIDC
+	if !o.Enabled {
+		return ""
+	}
+	return fmt.Sprintf("issuer %s · client %s · scopes %s · required %t · auto-link %t · signup %t",
+		o.Issuer, o.ClientID, strings.Join(o.Scopes, " "), o.Required, o.AutoLinkByEmail, o.AllowOIDCSignup)
 }

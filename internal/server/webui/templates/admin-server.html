@@ -1,0 +1,26 @@
+{{define "content"}}
+<div class="page-head"><div>
+  <h1>Server</h1>
+  <p class="sub">Runtime information. Settings are read from the config file and environment —
+    change them there and restart.</p>
+</div></div>
+
+<div class="grid cols-4" style="margin-bottom:var(--space-5)">
+  <div class="card stat"><div class="label">Version</div><div class="value small">{{.Version}}</div></div>
+  <div class="card stat"><div class="label">Uptime</div><div class="value small">{{.Uptime}}</div></div>
+  <div class="card stat"><div class="label">DB size</div><div class="value small">{{.DBSize}}</div></div>
+  <div class="card stat"><div class="label">Devices</div><div class="value small">{{.Devices}}</div></div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Server info</h2></div>
+  <div class="card-body">
+    <dl class="kv">
+      {{range .Rows}}
+      <dt>{{.Label}}</dt>
+      <dd>{{.Value}}{{if .Note}} <span class="muted">— {{.Note}}</span>{{end}}</dd>
+      {{end}}
+    </dl>
+  </div>
+</div>
+{{end}}
