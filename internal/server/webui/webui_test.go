@@ -2040,14 +2040,28 @@ func seedAudit(t *testing.T, st *store.Store, actorID, eventType, targetType, ta
 	}
 }
 
-// tableBody extracts the rendered <tbody> so assertions cannot be satisfied by
-// the filter form's datalist, the echoed filter values, or the app shell.
+// tableBody extracts the rendered <tbody>...</tbody> so assertions cannot be
+// satisfied by the filter form's datalist, the echoed filter values, or the
+// app shell.
+//
+// Matches the opening tag by prefix ("<tbody"), not the literal "<tbody>",
+// because the htmx seam id lives on the tbody itself (<tbody id="audit-rows">,
+// design §6.9: swapping the tbody keeps the thead's column headers across a
+// filter request). A literal "<tbody>" match silently returns "" the moment
+// the element carries an attribute, and every filter assertion downstream
+// would then be asserting against an empty string — passing an absence check
+// for the wrong reason.
 func tableBody(t *testing.T, body string) string {
 	t.Helper()
-	_, after, found := strings.Cut(body, "<tbody>")
-	if !found {
+	start := strings.Index(body, "<tbody")
+	if start == -1 {
 		return "" // no table rendered: an empty-state page
 	}
+	openTagEnd := strings.IndexByte(body[start:], '>')
+	if openTagEnd == -1 {
+		return ""
+	}
+	after := body[start+openTagEnd+1:]
 	rows, _, _ := strings.Cut(after, "</tbody>")
 	return rows
 }

@@ -33,9 +33,9 @@
 
   {{if .Rows}}
   <div class="table-wrap">
-    <table class="grid-table responsive" id="audit-rows">
+    <table class="grid-table responsive">
       <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Source IP</th></tr></thead>
-      <tbody>
+      <tbody id="audit-rows">
         {{range .Rows}}
         <tr>
           <td data-label="Time" class="muted nowrap" title="{{.TimeAbs}}">{{.TimeRel}}</td>
