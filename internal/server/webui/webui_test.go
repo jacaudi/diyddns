@@ -337,8 +337,13 @@ func TestAppCSS_BrandMarginIsNotSharedAcrossShells(t *testing.T) {
 	if sm == nil {
 		t.Fatal(`app.css is missing a ".wrap .brand { ... }" rule for the auth shell's spacing`)
 	}
-	if !strings.Contains(sm[1], "margin-bottom: 24px") {
-		t.Errorf(".wrap .brand rule = %q, want margin-bottom: 24px", strings.TrimSpace(sm[1]))
+	// Task 5 review round 3 replaced every hard-coded spacing value in
+	// app.css, including this one, with a token from the spacing scale;
+	// var(--space-5) resolves to the same 24px this test originally asserted
+	// literally (see TestAppCSS_SpacingScaleTokensExist for the scale
+	// itself).
+	if !strings.Contains(sm[1], "margin-bottom: var(--space-5)") {
+		t.Errorf(".wrap .brand rule = %q, want margin-bottom: var(--space-5)", strings.TrimSpace(sm[1]))
 	}
 }
 
@@ -535,6 +540,73 @@ func TestRequirePost_RejectsBadCSRF(t *testing.T) {
 			}
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+			}
+		})
+	}
+}
+
+// TestAppCSS_SpacingScaleTokensExist guards the Task 5 review round 3 spacing
+// scale: seven numeric custom properties in :root, the only source for
+// margin/padding/gap values in app.css. Numeric tokens only — no semantic
+// alias layer (e.g. --stack-action) was approved.
+func TestAppCSS_SpacingScaleTokensExist(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	text := string(css)
+
+	want := map[string]string{
+		"--space-1": "4px",
+		"--space-2": "8px",
+		"--space-3": "12px",
+		"--space-4": "16px",
+		"--space-5": "24px",
+		"--space-6": "32px",
+		"--space-7": "48px",
+	}
+	for name, value := range want {
+		token := regexp.MustCompile(regexp.QuoteMeta(name) + `:\s*` + regexp.QuoteMeta(value) + `;`)
+		if !token.MatchString(text) {
+			t.Errorf("app.css :root is missing %q: %q", name, value)
+		}
+	}
+}
+
+// TestAppCSS_CrampedFormSpacingIsCorrected guards the three Part 2 fixes from
+// Task 5 review round 3: the maintainer measured label->input at 5px and
+// input->primary-button at 14px on the real rendered page and asked for a
+// deliberate step UP (not the nearest-scale-step down to 4px, which would
+// have made the label complaint worse). This is a text-level proxy for a
+// geometric property — the real assertion is the rendered gap in a browser,
+// which the maintainer measures directly with Playwright; this test only
+// confirms the CSS source carries the agreed values:
+//
+//	label -> input     var(--space-2)  (8px)
+//	field -> field      var(--space-4) (16px, .field's own margin-bottom)
+//	input -> button     var(--space-5) (24px, via .field + .btn)
+//	field .hint          var(--space-2) (8px, same reasoning as the label)
+func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	text := string(css)
+
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{"label -> input (.field label margin-bottom)", `\.field label\s*\{[^}]*margin-bottom:\s*var\(--space-2\)`},
+		{"field -> field (.field margin-bottom)", `^\.field\s*\{\s*margin-bottom:\s*var\(--space-4\)`},
+		{"input -> button (.field + .btn margin-top)", `\.field \+ \.btn\s*\{\s*margin-top:\s*var\(--space-5\)`},
+		{"field hint (.field .hint margin-top)", `\.field \.hint\s*\{[^}]*margin-top:\s*var\(--space-2\)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			re := regexp.MustCompile(`(?m)` + tt.pattern)
+			if !re.MatchString(text) {
+				t.Errorf("app.css does not match %s", tt.name)
 			}
 		})
 	}
