@@ -784,6 +784,128 @@ func TestDevices_RequiresSession(t *testing.T) {
 	}
 }
 
+// TestDeviceNew_RevealsCodeAndCommand asserts the reveal step renders in the
+// POST response itself: the code, the ready-to-paste client command, the
+// shown-once warning, and no-store caching, without ever claiming a device
+// was created (CreateCode mints a code; the device row appears only when a
+// client redeems it).
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
+// calls store.Open, and store.Migrate mutates goose's package-level globals
+// with no synchronization, so concurrent store opens race under -race.
+func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "new@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"garage-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the reveal renders in the POST response)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "diyddns-client enroll") {
+		t.Error("the ready-to-paste command is missing")
+	}
+	if !strings.Contains(body, "Shown once") {
+		t.Error("the shown-once warning is missing")
+	}
+	if !strings.Contains(body, "single use") {
+		t.Error("the single-use note is missing")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	// The reveal must not claim a device exists: CreateCode mints a code, and
+	// the device row appears only when a client redeems it.
+	if strings.Contains(body, "Device created") {
+		t.Error("the reveal claims a device was created")
+	}
+}
+
+// TestDeviceNew_RejectsEmptyLabel asserts the handler owns the non-empty-label
+// check CreateCode itself never performs.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_RejectsEmptyLabel(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "empty-label@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"   "}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "Shown once") {
+		t.Error("a code was revealed for an empty label")
+	}
+}
+
+// TestDeviceNew_RejectsDuplicateLabel asserts the handler's advisory
+// duplicate-label pre-check against Devices.List: EnrollmentService.CreateCode
+// cannot detect this itself, since UNIQUE (user_id, label) lives on the
+// devices table, not enrollment_codes.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_RejectsDuplicateLabel(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "dupe@example.com", "user")
+	seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"home-router"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 — a duplicate label would fail at redeem time", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "already have a device") {
+		t.Error("the duplicate-label error does not name the collision")
+	}
+}
+
+// TestDeviceNew_RequiresCSRF asserts the mint-a-code POST is guarded by
+// requirePost like every other mutation.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_RequiresCSRF(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "csrf@example.com", "user")
+
+	form := url.Values{"csrf": {"wrong"}, "label": {"garage-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
 // TestDevices_QueryFilter_MatchesPositively proves matchesQuery's matching
 // branch, not just its no-match branch: TestDevices_EmptyStates only ever
 // exercises ?q= against a single device that fails to match. Each subtest

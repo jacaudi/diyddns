@@ -1,0 +1,59 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/devices">Devices</a> / New device</div>
+
+{{if .Code}}
+<div class="card" style="max-width:640px">
+  <div class="card-head"><h2>Enrollment code created</h2></div>
+  <div class="card-body">
+    <div class="callout warn">
+      <strong>⚠ Shown once</strong>
+      This code is displayed a single time and is not recoverable. Copy it now.
+      Reloading this page mints another code.
+    </div>
+
+    <div class="field">
+      <label>Enrollment code</label>
+      {{template "copyValue" .Code}}
+      <div class="hint">Expires in {{.ExpiresIn}} ({{.ExpiresAt}}) · single use.</div>
+    </div>
+
+    <div class="field">
+      <label>Or paste this ready-to-run command on the device</label>
+      {{template "copyValue" .Command}}
+      <div class="hint">The code appears in your shell history when you run this.</div>
+    </div>
+
+    {{template "errorBanner" .BaseURLWarning}}
+
+    <div class="callout info">
+      <strong>Next step</strong>
+      Run the command on the device. It exchanges the code for a permanent secret,
+      then begins reporting its IP. The device appears in your list within a minute —
+      until its first check-in it shows as <em>Never seen</em>.
+    </div>
+
+    <div class="btn-row"><a class="btn primary" href="/devices">Back to devices</a></div>
+  </div>
+</div>
+{{else}}
+<div class="card" style="max-width:560px">
+  <div class="card-head"><h2>Create a device</h2></div>
+  <div class="card-body">
+    {{template "errorBanner" .FieldErr}}
+    <form method="post" action="/devices/new">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="label">Device label</label>
+        <input class="input" id="label" name="label" value="{{.Label}}" placeholder="e.g. home-router"
+               autocomplete="off" required>
+        <div class="hint">A friendly name so you can recognise it in the list.</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Create &amp; generate code</button>
+        <a class="btn ghost" href="/devices">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+{{end}}

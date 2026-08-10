@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -114,4 +115,106 @@ func deviceSummary(total int, counts map[Status]int) string {
 func (h *handler) logAndFail(w http.ResponseWriter, r *http.Request, usr store.User, action string, err error) {
 	h.deps.Log.LogAttrs(r.Context(), slog.LevelError, "webui: "+action+" failed", slog.Any("error", err))
 	h.renderError(w, r, usr, http.StatusInternalServerError, "Something went wrong. Please try again.")
+}
+
+// deviceNewData is device-new.html's template data. Code is empty on the form
+// step and populated on the reveal step; the template branches on it.
+type deviceNewData struct {
+	appData
+	Label          string
+	FieldErr       string
+	Code           string
+	Command        string
+	ExpiresIn      string
+	ExpiresAt      string
+	BaseURLWarning string
+}
+
+// handleDeviceNewForm renders step 1: name the device.
+func (h *handler) handleDeviceNewForm(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	h.render(w, r, "device-new", deviceNewData{
+		appData: h.newAppData(usr, sess, "New device", "devices"),
+	})
+}
+
+// handleDeviceNewCreate mints an enrollment code and renders the reveal in this
+// response rather than redirecting: the code is shown exactly once, and a
+// redirect would either carry it in a URL (browser history, Referer, proxy logs)
+// or require stashing it server-side.
+//
+// Both validations below belong here because EnrollmentService.CreateCode
+// performs neither: it does not reject an empty label, and it cannot report a
+// duplicate one — UNIQUE (user_id, label) is on the devices table, so a
+// collision only surfaces when a client redeems the code, as an opaque
+// client-side failure minutes later. The duplicate pre-check is advisory only:
+// two codes for the same unused label can both be minted, and whichever
+// redeems second still fails.
+func (h *handler) handleDeviceNewCreate(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	label := strings.TrimSpace(r.PostFormValue("label"))
+	data := deviceNewData{
+		appData: h.newAppData(usr, sess, "New device", "devices"),
+		Label:   label,
+	}
+
+	if label == "" {
+		data.FieldErr = "Give the device a label so you can recognise it in the list."
+		h.renderStatus(w, r, http.StatusUnprocessableEntity, "device-new", data)
+		return
+	}
+
+	existing, err := h.deps.Devices.List(r.Context(), usr.ID)
+	if err != nil {
+		h.logAndFail(w, r, usr, "list devices", err)
+		return
+	}
+	for _, d := range existing {
+		if strings.EqualFold(d.Label, label) {
+			data.FieldErr = "You already have a device called " + label +
+				". Labels must be unique, and a code for a duplicate label would fail when the client redeems it."
+			h.renderStatus(w, r, http.StatusUnprocessableEntity, "device-new", data)
+			return
+		}
+	}
+
+	code, expiresAt, err := h.deps.Enroll.CreateCode(r.Context(), usr.ID, label)
+	if err != nil {
+		h.logAndFail(w, r, usr, "create enrollment code", err)
+		return
+	}
+
+	base := baseURL(h.deps.Cfg, r)
+	data.Code = code
+	data.Command = fmt.Sprintf("diyddns-client enroll --server %s --code %s", base, code)
+	data.ExpiresAt = absTime(expiresAt)
+	data.ExpiresIn = relExpiry(expiresAt, time.Now())
+	data.BaseURLWarning = baseURLWarning(h.deps.Cfg, base)
+	h.render(w, r, "device-new", data)
+}
+
+// baseURLWarning returns copy for the case every page using the base-URL
+// derivation must surface: server.base_url is unset, so the value was guessed
+// from this request. It matters most here — the operator is about to paste a
+// command carrying a one-time credential, and a guessed http:// scheme behind
+// a TLS-terminating proxy would send it in cleartext.
+func baseURLWarning(cfg config.Server, derived string) string {
+	if cfg.Server.BaseURL != "" {
+		return ""
+	}
+	return "server.base_url is not configured, so " + derived +
+		" was derived from the address you are browsing. Check the scheme before running this — " +
+		"if the server sits behind a TLS-terminating proxy this may say http:// when it should say https://."
+}
+
+// relExpiry renders how long a code has left, e.g. "15 minutes", relative to
+// now. It reads the service's returned expiry rather than restating the TTL
+// constant, so the page cannot drift from what was actually minted.
+func relExpiry(expiresAt int64, now time.Time) string {
+	d := time.Unix(expiresAt, 0).Sub(now)
+	if d <= 0 {
+		return "already expired"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d minutes", int(d.Minutes())+1)
+	}
+	return fmt.Sprintf("%d hours", int(d.Hours())+1)
 }
