@@ -49,15 +49,21 @@ type Server struct {
 // It returns the OIDC manager because only New/Run need it, to launch
 // RetryLoop; nothing in the mux itself does.
 //
+// It also returns the api.ServerDeps and webui.Deps it built, so tests can
+// prove the two adapters share one instance per service rather than each
+// building its own (see webui.Deps's doc comment and the "One construction
+// site per service" comment below) — production callers (handler) discard
+// them.
+//
 // FAILS CLOSED: cfg.Auth.HMAC.SecretKey must decode to a 32-byte AEAD key or
 // buildMux returns an error and builds nothing. A server that can enroll
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("server: %w", err)
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", err)
 	}
 
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
@@ -73,7 +79,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		dctx, cancel := context.WithTimeout(context.Background(), oidcDiscoverTimeout)
 		defer cancel()
 		if err := oidcMgr.Discover(dctx); err != nil {
-			return nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: oidc required but discovery failed: %w", err)
 		}
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
@@ -94,31 +100,39 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	rpID, rpOrigin, rpErr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL)
 	if rpErr != nil {
 		if !cfg.Auth.HideLocalLoginUI {
-			return nil, nil, fmt.Errorf("server: %w", rpErr)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", rpErr)
 		}
 	} else {
 		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit)
 		if err != nil {
-			return nil, nil, fmt.Errorf("server: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", err)
 		}
 	}
 
 	mailer := email.New(cfg.Email, log)
 	grantSvc := service.NewGrantService(st, passkeySvc, mailer, cfg.Server.BaseURL, audit, log)
 
+	// One construction site per service. api.Build and webui.New receive the
+	// same instances: they are two thin presentation layers over one service
+	// layer, and a dependency added to a service later must not silently exist
+	// twice.
+	devicesSvc := service.NewDeviceService(st, key, verifier, audit)
+	enrollSvc := service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit)
+	adminSvc := service.NewAdminService(st, audit, grantSvc)
+
 	mux := http.NewServeMux()
-	api.Build(mux, api.ServerDeps{
+	apiDeps := api.ServerDeps{
 		Log:       log,
 		Store:     st,
 		Verifier:  verifier,
 		Sessions:  sessions,
-		Enroll:    service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit),
-		Devices:   service.NewDeviceService(st, key, verifier, audit),
+		Enroll:    enrollSvc,
+		Devices:   devicesSvc,
 		Checkin:   service.NewCheckinService(st, audit),
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, log, audit, nil, passkeySvc, key),
 		OIDC:      oidcSvc,
-		Admin:     service.NewAdminService(st, audit, grantSvc),
+		Admin:     adminSvc,
 		Passkey:   passkeySvc,
 		Grants:    grantSvc,
 		Mailer:    mailer,
@@ -126,7 +140,8 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		HMACKey:   key,
 		Cfg:       cfg.Auth,
 		Info:      version.Current(),
-	})
+	}
+	api.Build(mux, apiDeps)
 
 	// The web UI's own mux already declares "GET /login" etc. as its route
 	// patterns; mounting the same patterns on the outer mux forwards matching
@@ -137,12 +152,23 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// two places, so webui.New's returned pattern slice is the single source
 	// and this loop copies it rather than restating it. (A "/" catch-all
 	// instead would swallow unmatched /api and /agent URLs.)
-	webHandler, webPatterns := webui.New(webui.Deps{Sessions: sessions, Cfg: cfg, Log: log})
+	webDeps := webui.Deps{
+		Sessions:  sessions,
+		Cfg:       cfg,
+		Log:       log,
+		Devices:   devicesSvc,
+		Enroll:    enrollSvc,
+		Admin:     adminSvc,
+		Grants:    grantSvc,
+		Info:      version.Current(),
+		StartedAt: time.Now(),
+	}
+	webHandler, webPatterns := webui.New(webDeps)
 	for _, pattern := range webPatterns {
 		mux.Handle(pattern, webHandler)
 	}
 
-	return mux, oidcMgr, nil
+	return mux, oidcMgr, apiDeps, webDeps, nil
 }
 
 // handler builds the fully-wrapped handler: buildMux's ServeMux inside the
@@ -150,7 +176,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 // manager buildMux constructs, so New/Run can launch its background
 // RetryLoop.
 func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error) {
-	mux, oidcMgr, err := buildMux(cfg, st, log)
+	mux, oidcMgr, _, _, err := buildMux(cfg, st, log)
 	if err != nil {
 		return nil, nil, err
 	}

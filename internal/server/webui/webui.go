@@ -10,9 +10,12 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/version"
 )
 
 //go:embed templates/*.html
@@ -21,11 +24,22 @@ var templateFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// Deps are the dependencies the web UI handler needs.
+// Deps are the dependencies the web UI handler needs. The service values are the
+// SAME instances the JSON API is built with (see internal/server/server.go): the
+// two adapters share one service layer, which is the whole point of rendering
+// HTML here rather than calling the JSON API over loopback.
 type Deps struct {
 	Sessions *auth.SessionManager
 	Cfg      config.Server
 	Log      *slog.Logger
+
+	Devices *service.DeviceService
+	Enroll  *service.EnrollmentService
+	Admin   *service.AdminService
+	Grants  *service.GrantService
+
+	Info      version.Info
+	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
 }
 
 // handler holds the parsed page templates and deps used to render them.

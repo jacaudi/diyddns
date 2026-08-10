@@ -51,7 +51,7 @@ func TestWebUIPatternsAreReachable(t *testing.T) {
 		t.Fatal("webui.New returned no patterns")
 	}
 
-	mux, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog())
+	mux, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -90,7 +90,7 @@ func concretePath(p string) string {
 // A reachability test that cannot detect an unforwarded route is decoration.
 func TestReachabilityDetectsAnUnforwardedRoute(t *testing.T) {
 	// Deliberately not t.Parallel() — see TestWebUIPatternsAreReachable.
-	mux, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog())
+	mux, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}

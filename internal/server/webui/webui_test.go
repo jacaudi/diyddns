@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -13,12 +14,28 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
+	"github.com/jacaudi/diyddns/internal/version"
 )
 
-// testDeps builds a webui.Deps backed by an in-memory store's SessionManager,
-// mirroring internal/server/api's own white-box test harness pattern
-// (openTestStore in that package's authmw_test.go).
+// fakeInvalidator satisfies service.SecretCacheInvalidator. The real
+// implementation is *auth.Verifier, whose cache these tests never exercise.
+type fakeInvalidator struct{ invalidated []string }
+
+func (f *fakeInvalidator) Invalidate(deviceID string) {
+	f.invalidated = append(f.invalidated, deviceID)
+}
+
+// testDeps builds a fully-wired Deps over an in-memory store, and returns the
+// store so tests can seed users and devices directly.
+//
+// PasskeyService is REAL, not nil. That matters: AdminService.CreateUserInvite
+// and GrantService.IssueRecovery both return ErrWebAuthnUnavailable when it is
+// nil (service/admin.go:96, service/grants.go:122), so a nil fixture would make
+// the invite reveal, the recovery reveal, and grantLink's base-URL handling
+// permanently untestable — including the revoke-then-mint path the typed
+// confirmation exists to protect.
 func testDeps(t *testing.T) (Deps, *store.Store) {
 	t.Helper()
 	st, err := store.Open(context.Background(), ":memory:")
@@ -27,10 +44,61 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Hour)
+	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Hour)
+	log := slog.New(slog.DiscardHandler)
+
 	cfg := config.Server{}
 	cfg.Auth.Session.CookieName = "diyddns_session"
-	return Deps{Sessions: sm, Cfg: cfg, Log: slog.New(slog.DiscardHandler)}, st
+	cfg.Server.BaseURL = "https://ddns.test"
+
+	// A 32-byte AEAD key. auth.SealSecret requires exactly 32 bytes; the value
+	// is arbitrary and is not a secret.
+	key := bytes.Repeat([]byte{0x24}, 32)
+
+	audit := service.NewAuditWriter(st)
+	passkeys, err := service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, "localhost", "http://localhost", audit)
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log)
+
+	return Deps{
+		Sessions:  sessions,
+		Cfg:       cfg,
+		Log:       log,
+		Devices:   service.NewDeviceService(st, key, &fakeInvalidator{}, audit),
+		Enroll:    service.NewEnrollmentService(st, key, 15*time.Minute, audit),
+		Admin:     service.NewAdminService(st, audit, grants),
+		Grants:    grants,
+		Info:      version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
+		StartedAt: time.Now().Add(-2 * time.Hour),
+	}, st
+}
+
+// TestTestDeps_GrantsAndAdminAreFunctional proves testDeps wires a REAL
+// PasskeyService into Grants and Admin, not a nil one. CreateUserInvite and
+// IssueRecovery both return ErrWebAuthnUnavailable when PasskeyService is
+// nil (service/admin.go:96-97, service/grants.go:122-123) — a nil fixture
+// would make the invite and recovery flows, the two most destructive paths
+// in the product, permanently untestable while every other test stayed
+// green. This is a behavioral test, not a compile check: it fails today
+// because testDeps has no Admin/Grants fields at all.
+func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
+	deps, _ := testDeps(t)
+
+	usr, link, err := deps.Admin.CreateUserInvite(context.Background(), "actor-id", "invitee@example.com", "user")
+	if err != nil {
+		t.Fatalf("CreateUserInvite: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
+	}
+	if link == "" {
+		t.Error("CreateUserInvite: empty invite link")
+	}
+
+	if link, err := deps.Grants.IssueRecovery(context.Background(), "actor-id", usr.ID); err != nil {
+		t.Fatalf("IssueRecovery: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
+	} else if link == "" {
+		t.Error("IssueRecovery: empty recovery link")
+	}
 }
 
 // seedSessionCookie creates a user and a session for it, returning an
