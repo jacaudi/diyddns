@@ -1464,3 +1464,141 @@ func TestDeviceSetEnabled_TogglesStoredState(t *testing.T) {
 		}
 	})
 }
+
+// TestAdminRoutes_RequireAdmin covers the admin routes that exist AS OF THIS
+// TASK. A role gate tested only on GETs would let a mutating route ship
+// unguarded — the one that actually matters.
+//
+// Tasks 11, 12, and 13 each EXTEND this table as they register routes. The list
+// must never name a route that is not yet registered: an unregistered path
+// answers 404, not 403, so the test would fail with no correct way to make it
+// pass. Task 13 Step 6 asserts the final table covers all ten.
+func TestAdminRoutes_RequireAdmin(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	victim := seedUser(t, st, "victim@example.com", "user")
+	usr := seedUser(t, st, "plain@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	for _, rt := range []struct{ method, path string }{
+		// Task 10 registers exactly these two.
+		{http.MethodGet, "/admin/users"},
+		{http.MethodPost, "/admin/users/" + victim.ID + "/enabled"},
+	} {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			form := url.Values{
+				"csrf":          {sess.CSRFToken}, // a VALID token: the role gate is what must reject
+				"email":         {"someone@example.com"},
+				"role":          {"admin"},
+				"disabled":      {"true"},
+				"confirm_email": {"victim@example.com"},
+			}
+			req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 for a non-admin", rec.Code)
+			}
+		})
+	}
+
+	// The victim survived every attempt: still present, still a plain enabled
+	// user, still holding whatever credentials they had.
+	after, err := st.Users().GetByID(t.Context(), victim.ID)
+	if err != nil {
+		t.Fatalf("a non-admin deleted a user: %v", err)
+	}
+	if after.Role != "user" || after.Disabled {
+		t.Errorf("a non-admin modified a user: %+v", after)
+	}
+}
+
+func TestAdminUsers_ListsUsersAndCounts(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	other := seedUser(t, st, "mark@example.com", "user")
+	seedDevice(t, st, other.ID, "marks-pi")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"admin@example.com", "mark@example.com", "(you)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	// The mock's Last login column is deliberately dropped.
+	if strings.Contains(body, "Last login") {
+		t.Error("Last login column rendered — no field or query backs it")
+	}
+}
+
+func TestAdminUsers_ToggleDisabled(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "target@example.com", "user")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "disabled": {"true"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/enabled", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	got, err := st.Users().GetByID(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if !got.Disabled {
+		t.Error("user was not disabled")
+	}
+}
+
+func TestAdminUsers_LastAdminGuardRendersBanner(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "only-admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	// Disabling yourself is ErrSelfLockout; the service owns the guard and the
+	// UI renders it rather than re-implementing it.
+	form := url.Values{"csrf": {sess.CSRFToken}, "disabled": {"true"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+admin.ID+"/enabled", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	got, err := st.Users().GetByID(t.Context(), admin.ID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if got.Disabled {
+		t.Fatal("the last admin disabled themselves")
+	}
+}

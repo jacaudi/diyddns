@@ -84,6 +84,8 @@ func New(deps Deps) (http.Handler, []string) {
 		{"POST /devices/{id}/enabled", h.requirePost(h.handleDeviceSetEnabled)},
 		{"POST /devices/{id}/rotate-secret", h.requirePost(h.handleDeviceRotate)},
 		{"POST /devices/{id}/delete", h.requirePost(h.handleDeviceDelete)},
+		{"GET /admin/users", h.requireAdmin(h.handleAdminUsers)},
+		{"POST /admin/users/{id}/enabled", h.requirePostAdmin(h.handleAdminUserSetEnabled)},
 		{"GET /static/", http.FileServerFS(staticFS)},
 	}
 
@@ -119,4 +121,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "error"}
+var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "error"}
