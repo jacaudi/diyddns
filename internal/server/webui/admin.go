@@ -2,8 +2,12 @@ package webui
 
 import (
 	"errors"
+	"log/slog"
+	"maps"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -366,4 +370,214 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 	}
 	data.Link, data.LinkWarning = h.grantLink(r, link)
 	h.render(w, r, "admin-user", data)
+}
+
+// auditPageSize is how many audit rows one page shows. This matches
+// AuditLogRepo.ListPaginated's own default; it is stated explicitly so the page
+// size is a decision rather than an accident.
+const auditPageSize = 100
+
+// knownEventTypes populates the filter's datalist. It is a SUGGESTION list, not
+// a constraint: the input accepts any value, so an event type added by a future
+// service is filterable immediately and a stale entry here degrades to a missing
+// suggestion rather than a blocked query.
+//
+// Never add a wildcard entry. AuditFilter.EventType is an exact match
+// (event_type = ?), so "passkey.*" would return zero rows and read as "none of
+// those happened".
+//
+// Four of these are assigned to a variable before use in the services
+// (event := "device.enabled", event := "user.enabled"), so grepping for
+// `EventType: "` alone does not find them.
+var knownEventTypes = []string{
+	"bootstrap.consumed",
+	"device.deleted", "device.disabled", "device.enabled",
+	"device.enroll.code", "device.enroll.oidc", "device.renamed", "device.secret.rotated",
+	"email.send_failed",
+	"passkey.invite_issued", "passkey.recovery_issued", "passkey.recovery_redeemed",
+	"passkey.registered", "passkey.removed", "passkey.renamed", "passkey.signcount_anomaly",
+	"session.revoked",
+	"user.created", "user.deleted", "user.disabled", "user.enabled",
+	"user.login.oidc", "user.login.passkey", "user.logout",
+	"user.oidc.linked", "user.role_change",
+}
+
+// auditRow is one rendered audit entry.
+type auditRow struct {
+	TimeRel   string
+	TimeAbs   string
+	Actor     string // resolved email, or "system"
+	EventType string
+	Target    string
+	IP        string
+}
+
+// adminAuditData is admin-audit.html's template data.
+type adminAuditData struct {
+	appData
+	Rows       []auditRow
+	Pager      pager
+	EventTypes []string
+	EventType  string
+	Actor      string
+	From       string
+	To         string
+	ActorNote  string
+	HasCursor  bool
+}
+
+// handleAdminAudit renders the filtered, paginated audit log. Filters submit as
+// a plain GET form so the resulting URL is shareable and bookmarkable.
+func (h *handler) handleAdminAudit(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	q := r.URL.Query()
+	users, err := h.deps.Admin.ListUsers(r.Context())
+	if err != nil {
+		h.logAndFail(w, r, usr, "list users", err)
+		return
+	}
+
+	data := adminAuditData{
+		appData:    h.newAppData(usr, sess, "Audit log", "admin-audit"),
+		EventTypes: knownEventTypes,
+		EventType:  q.Get("event_type"),
+		Actor:      strings.TrimSpace(q.Get("actor")),
+		From:       q.Get("from"),
+		To:         q.Get("to"),
+		HasCursor:  q.Get("cursor") != "",
+	}
+
+	filter, note := auditFilterFrom(q, users)
+	if note != "" {
+		data.ActorNote = note
+		h.render(w, r, "admin-audit", data)
+		return
+	}
+
+	page, err := h.deps.Admin.ListAudit(r.Context(), filter, q.Get("cursor"), auditPageSize)
+	if err != nil {
+		// Log unconditionally, for the reason given in handleDeviceHistory: the
+		// store has no cursor-decode sentinel, so the 400 branch cannot prove
+		// the cause and must not swallow a real database failure.
+		h.deps.Log.LogAttrs(r.Context(), slog.LevelError, "webui: list audit failed",
+			slog.Bool("had_cursor", data.HasCursor), slog.Any("error", err))
+		if data.HasCursor {
+			h.renderError(w, r, usr, http.StatusBadRequest,
+				"That page link is no longer valid. Start from the first page.")
+			return
+		}
+		h.renderError(w, r, usr, http.StatusInternalServerError, "Something went wrong. Please try again.")
+		return
+	}
+
+	now := time.Now()
+	for _, e := range page.Rows {
+		data.Rows = append(data.Rows, auditRow{
+			TimeRel:   relTime(e.CreatedAt, now),
+			TimeAbs:   absTime(e.CreatedAt),
+			Actor:     actorLabel(users, e.ActorUserID),
+			EventType: e.EventType,
+			Target:    strings.TrimSpace(e.TargetType + " " + e.TargetID),
+			IP:        e.IP,
+		})
+	}
+
+	data.Pager = pager{RowCount: len(page.Rows)}
+	filters := url.Values{}
+	for _, k := range []string{"event_type", "actor", "from", "to"} {
+		if v := q.Get(k); v != "" {
+			filters.Set(k, v)
+		}
+	}
+	if page.NextCursor != "" {
+		next := url.Values{}
+		maps.Copy(next, filters)
+		next.Set("cursor", page.NextCursor)
+		data.Pager.NextURL = "/admin/audit?" + next.Encode()
+	}
+	if data.HasCursor {
+		data.Pager.FirstURL = "/admin/audit"
+		if encoded := filters.Encode(); encoded != "" {
+			data.Pager.FirstURL += "?" + encoded
+		}
+	}
+
+	h.render(w, r, "admin-audit", data)
+}
+
+// auditFilterFrom builds the store filter from the query string. It returns a
+// note instead of a filter when an input cannot be resolved — an unmatched actor
+// email or an unparseable date — so the page can say so rather than silently
+// showing everything.
+func auditFilterFrom(q url.Values, users []store.User) (store.AuditFilter, string) {
+	filter := store.AuditFilter{EventType: q.Get("event_type")}
+
+	if actor := strings.TrimSpace(q.Get("actor")); actor != "" {
+		if strings.Contains(actor, "@") {
+			id, ok := userIDByEmail(users, actor)
+			if !ok {
+				return store.AuditFilter{}, "No user matches " + actor + "."
+			}
+			filter.ActorUserID = id
+		} else {
+			filter.ActorUserID = actor
+		}
+	}
+
+	if from := q.Get("from"); from != "" {
+		since, ok := parseDayStart(from)
+		if !ok {
+			return store.AuditFilter{}, "From is not a valid date (expected YYYY-MM-DD)."
+		}
+		filter.Since = since
+	}
+	if to := q.Get("to"); to != "" {
+		until, ok := parseDayEnd(to)
+		if !ok {
+			return store.AuditFilter{}, "To is not a valid date (expected YYYY-MM-DD)."
+		}
+		filter.Until = until
+	}
+	return filter, ""
+}
+
+// actorLabel resolves an audit entry's actor to an email. An empty actor is a
+// system event (for example a background job), not a missing one.
+func actorLabel(users []store.User, actorID string) string {
+	if actorID == "" {
+		return "system"
+	}
+	if u, ok := findUser(users, actorID); ok {
+		return u.Email
+	}
+	return actorID // a deleted user still has entries; show the raw id rather than nothing
+}
+
+// userIDByEmail finds a user id by email address.
+func userIDByEmail(users []store.User, email string) (string, bool) {
+	for _, u := range users {
+		if strings.EqualFold(u.Email, email) {
+			return u.ID, true
+		}
+	}
+	return "", false
+}
+
+// parseDayStart parses a <input type=date> value as UTC midnight.
+func parseDayStart(v string) (int64, bool) {
+	t, err := time.Parse("2006-01-02", v)
+	if err != nil {
+		return 0, false
+	}
+	return t.UTC().Unix(), true
+}
+
+// parseDayEnd parses a <input type=date> value as the last second of that UTC
+// day, so a "to" filter includes the day the user named rather than stopping at
+// its midnight.
+func parseDayEnd(v string) (int64, bool) {
+	t, err := time.Parse("2006-01-02", v)
+	if err != nil {
+		return 0, false
+	}
+	return t.UTC().Add(24*time.Hour - time.Second).Unix(), true
 }

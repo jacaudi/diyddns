@@ -1493,6 +1493,8 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 		{http.MethodPost, "/admin/users/" + victim.ID + "/update"},
 		{http.MethodPost, "/admin/users/" + victim.ID + "/delete"},
 		{http.MethodPost, "/admin/users/" + victim.ID + "/recovery"},
+		// Task 12 registers exactly this one.
+		{http.MethodGet, "/admin/audit"},
 	} {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			form := url.Values{
@@ -2024,5 +2026,114 @@ func TestAdminUserRecovery_RevokesPasskeysAndRevealsLink(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("credential count = %d, want 0 — IssueRecovery must revoke every passkey", n)
+	}
+}
+
+// seedAudit appends an audit entry.
+func seedAudit(t *testing.T, st *store.Store, actorID, eventType, targetType, targetID string) {
+	t.Helper()
+	if _, err := st.AuditLog().Append(t.Context(), store.AuditEntry{
+		ActorUserID: actorID, EventType: eventType,
+		TargetType: targetType, TargetID: targetID,
+	}); err != nil {
+		t.Fatalf("seed audit: %v", err)
+	}
+}
+
+// tableBody extracts the rendered <tbody> so assertions cannot be satisfied by
+// the filter form's datalist, the echoed filter values, or the app shell.
+func tableBody(t *testing.T, body string) string {
+	t.Helper()
+	_, after, found := strings.Cut(body, "<tbody>")
+	if !found {
+		return "" // no table rendered: an empty-state page
+	}
+	rows, _, _ := strings.Cut(after, "</tbody>")
+	return rows
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
+// calls store.Open, and store.Migrate races on goose's package-global state
+// when two stores open concurrently.
+func TestAdminAudit_FiltersByEventType(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+
+	seedAudit(t, st, admin.ID, "user.login.passkey", "user", admin.ID)
+	seedAudit(t, st, admin.ID, "device.deleted", "device", "dev-1")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit?event_type=device.deleted", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Assert against the TABLE BODY, not the whole page. Every event type also
+	// appears in the filter's <datalist> of suggestions, so a whole-body
+	// Contains check for "user.login.passkey" always matches and a whole-body
+	// check for "device.deleted" passes even when filtering is broken.
+	rows := tableBody(t, rec.Body.String())
+	if !strings.Contains(rows, "device.deleted") {
+		t.Error("filtered event missing from the table body")
+	}
+	if strings.Contains(rows, "user.login.passkey") {
+		t.Error("an event outside the filter leaked into the table body")
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminAudit_ResolvesActorEmail(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	seedAudit(t, st, admin.ID, "user.created", "user", "someone")
+	seedAudit(t, st, "", "retention.prune", "", "") // system event: empty actor
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Assert against the table body: the signed-in admin's own address appears in
+	// the app shell's user chip, so a whole-page check for "admin@example.com"
+	// passes even when actorLabel returns "".
+	rows := tableBody(t, rec.Body.String())
+	if !strings.Contains(rows, "admin@example.com") {
+		t.Error("actor id was not resolved to an email in the table body")
+	}
+	if !strings.Contains(rows, "system") {
+		t.Error("an empty actor did not render as system")
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminAudit_UnknownActorEmailSaysSo(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit?actor=nobody@example.com", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "No user matches") {
+		t.Error("an unmatched actor email must say so rather than silently showing everything")
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminAudit_BadCursorIs400(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit?cursor=garbage", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }

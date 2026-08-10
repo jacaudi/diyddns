@@ -92,6 +92,7 @@ func New(deps Deps) (http.Handler, []string) {
 		{"POST /admin/users/{id}/update", h.requirePostAdmin(h.handleAdminUserUpdate)},
 		{"POST /admin/users/{id}/delete", h.requirePostAdmin(h.handleAdminUserDelete)},
 		{"POST /admin/users/{id}/recovery", h.requirePostAdmin(h.handleAdminUserRecovery)},
+		{"GET /admin/audit", h.requireAdmin(h.handleAdminAudit)},
 		{"GET /static/", http.FileServerFS(staticFS)},
 	}
 
@@ -127,4 +128,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "error"}
+var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-audit", "error"}
