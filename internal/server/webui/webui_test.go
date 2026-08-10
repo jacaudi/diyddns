@@ -783,3 +783,56 @@ func TestDevices_RequiresSession(t *testing.T) {
 		t.Errorf("Location = %q, want /login", got)
 	}
 }
+
+// TestDevices_QueryFilter_MatchesPositively proves matchesQuery's matching
+// branch, not just its no-match branch: TestDevices_EmptyStates only ever
+// exercises ?q= against a single device that fails to match. Each subtest
+// seeds two devices and asserts BOTH halves — the matching device present AND
+// the non-matching device absent — because presence alone would also pass
+// against a filter that does nothing.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDevices_QueryFilter_MatchesPositively(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "queryfilter@example.com", "user")
+
+	t.Run("matches the label case-insensitively", func(t *testing.T) {
+		seedDevice(t, st, usr.ID, "garage-node")
+		seedDevice(t, st, usr.ID, "porch-light")
+
+		req := httptest.NewRequest(http.MethodGet, "/devices?q=GARAGE", nil)
+		req.AddCookie(signIn(t, deps, usr))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		body := rec.Body.String()
+		if !strings.Contains(body, "garage-node") {
+			t.Error("device matching a differently-cased query missing from the filtered list")
+		}
+		if strings.Contains(body, "porch-light") {
+			t.Error("non-matching device leaked through the query filter")
+		}
+	})
+
+	t.Run("matches current IPv4, a non-label field", func(t *testing.T) {
+		matching := seedDevice(t, st, usr.ID, "cellar-box")
+		seedDevice(t, st, usr.ID, "attic-box")
+		if err := st.Devices().UpdateIP(t.Context(), matching.ID, "10.20.30.40", "", "", "", "", 0); err != nil {
+			t.Fatalf("set current IPv4: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/devices?q=10.20.30.40", nil)
+		req.AddCookie(signIn(t, deps, usr))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		body := rec.Body.String()
+		if !strings.Contains(body, "cellar-box") {
+			t.Error("device matching by current IPv4 missing from the filtered list")
+		}
+		if strings.Contains(body, "attic-box") {
+			t.Error("non-matching device leaked through the IPv4 filter")
+		}
+	})
+}
