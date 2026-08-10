@@ -611,3 +611,43 @@ func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
 		})
 	}
 }
+
+// TestAppCSS_ActionGapDoesNotRelyOnMarginCollapsing guards the OTHER half of
+// the input->button gap, which the assertion above cannot see. Round 3 set
+// ".field + .btn { margin-top: var(--space-5) }" and reasoned that the
+// field's own var(--space-4) bottom margin would collapse away against it,
+// leaving 24px. It does not always: margins collapse only between
+// block-level boxes in normal block flow, and the base .btn is display:
+// inline-block, which does not participate. The maintainer measured
+// 16 + 24 = 40px on the real /account page at 1280px.
+//
+// Whether a call site collapsed turned out to depend on its button
+// modifier — .btn block is display: block, so /login and /register were
+// already at 24px, while /account's .btn primary summed to 40px. The fix
+// is to stop depending on collapsing at all: zero the bottom margin of a
+// field that is immediately followed by a button, so the button's
+// margin-top owns the entire gap. max(0, 24) and 0 + 24 are both 24, so
+// every site lands on 24px however its button is displayed.
+//
+// The companion half — that .field + .btn carries the WHOLE var(--space-5),
+// rather than a subtracted value that only reaches 24px while .field's
+// margin-bottom happens to be 16px — is already asserted by the test above
+// and is deliberately not repeated here.
+//
+// Like that test, this one is a text-level proxy: it can only prove the
+// stylesheet carries the collapse-independent mechanism, never that a
+// browser lays it out at 24px. The rendered geometry stays the maintainer's
+// measurement to make.
+func TestAppCSS_ActionGapDoesNotRelyOnMarginCollapsing(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	neutralized := regexp.MustCompile(`(?m)^\.field:has\(\s*\+\s*\.btn\s*\)\s*\{[^}]*margin-bottom:\s*0\s*[;}]`)
+	if !neutralized.Match(css) {
+		t.Error(`app.css is missing ".field:has(+ .btn) { margin-bottom: 0; }"; without it the ` +
+			`field's own var(--space-4) bottom margin adds to the button's margin-top instead of ` +
+			`collapsing with it, and the rendered input->button gap is 40px rather than 24px`)
+	}
+}

@@ -143,18 +143,34 @@ a:hover { text-decoration: underline; }
    gap) is the wrong gap above a submit button — it makes a primary action
    read as just another field (Task 5 review round 3; the maintainer
    measured this at 14px before the scale, now --space-4/16px between
-   fields). This overrides it for the one relationship that needs a bigger
+   fields). The pair of rules below gives that one relationship a bigger
    step: a .field immediately followed by a .btn (register.html's "Create
    passkey", account.html's "Add a passkey", login.html's "Send recovery
    link" — all three are a lone or final .field with a .btn as its very next
-   sibling; no template edit needed). Block-level siblings in normal flow
-   collapse adjacent margins to their MAX, not their sum, so this
-   var(--space-5) top margin on the button, meeting the field's own
-   var(--space-4) bottom margin, produces exactly --space-5 (24px) between
-   them. Caveat: that collapsing only happens in normal block flow — a
-   field/button pair inside a flex container (e.g. a future .filterbar
-   submit button) would need its own rule, since flex items never collapse
-   margins. */
+   sibling; no template edit needed).
+
+   The button owns the WHOLE gap, and the field ahead of it contributes
+   nothing. Round 3 instead left the field's --space-4 in place and expected
+   the two margins to collapse to their max. That happens only between
+   block-level boxes in normal block flow, and the base .btn is display:
+   inline-block, which does not participate — so on /account the two margins
+   SUM, and the maintainer measured 16 + 24 = 40px on the rendered page.
+   Whether a given call site collapses turns out to depend on which button
+   modifier it uses: .btn block is display: block, so /login and /register
+   did collapse and were already at 24px, while /account's .btn primary was
+   not. Zeroing the field's side removes that dependency entirely — max(0,
+   24) and 0 + 24 are the same number, so every site lands on 24px however
+   its button is displayed. It also means a field/button pair inside a flex
+   container (e.g. a future .filterbar submit button) needs no special case:
+   flex items never collapse margins, and this no longer asks them to.
+
+   :has() is deliberate: it targets the field by what FOLLOWS it, so nothing
+   else about .field changes and no template needs a modifier class.
+   register.html's first two fields are followed by another .field, not a
+   .btn, so they keep their --space-4 and the field-to-field gap stays 16px.
+   Baseline-available in every current engine, and this app already requires
+   a WebAuthn-capable browser. */
+.field:has(+ .btn) { margin-bottom: 0; }
 .field + .btn { margin-top: var(--space-5); }
 
 .input {
