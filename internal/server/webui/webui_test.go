@@ -1486,6 +1486,13 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 		// Task 10 registers exactly these two.
 		{http.MethodGet, "/admin/users"},
 		{http.MethodPost, "/admin/users/" + victim.ID + "/enabled"},
+		// Task 11 registers exactly these six.
+		{http.MethodGet, "/admin/users/new"},
+		{http.MethodPost, "/admin/users/new"},
+		{http.MethodGet, "/admin/users/" + victim.ID},
+		{http.MethodPost, "/admin/users/" + victim.ID + "/update"},
+		{http.MethodPost, "/admin/users/" + victim.ID + "/delete"},
+		{http.MethodPost, "/admin/users/" + victim.ID + "/recovery"},
 	} {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			form := url.Values{
@@ -1600,5 +1607,291 @@ func TestAdminUsers_LastAdminGuardRendersBanner(t *testing.T) {
 	}
 	if got.Disabled {
 		t.Fatal("the last admin disabled themselves")
+	}
+}
+
+// seedPasskey inserts a WebAuthn credential for a user, so tests can assert
+// whether a recovery revoked it.
+func seedPasskey(t *testing.T, st *store.Store, userID, name string) {
+	t.Helper()
+	if _, err := st.WebAuthnCredentials().Create(t.Context(), store.WebAuthnCredential{
+		CredentialID:   []byte("test-credential-" + userID),
+		UserID:         userID,
+		CredentialJSON: []byte("{}"),
+		Name:           name,
+		CreatedAt:      store.NowUnix(),
+	}); err != nil {
+		t.Fatalf("seed passkey: %v", err)
+	}
+}
+
+// TestAdminUserRecovery_RequiresTypedConfirmation is deliberately not
+// t.Parallel() — see TestAccount_RendersInAppShell: testDeps opens a store
+// via goose, whose package-global state races under t.Parallel().
+func TestAdminUserRecovery_RequiresTypedConfirmation(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "target@example.com", "user")
+	seedPasskey(t, st, target.ID, "existing key")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_email": {"wrong@example.com"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/recovery", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	// The critical assertion: a mismatched confirmation must not have revoked
+	// the target's credentials. IssueRecovery deletes them BEFORE minting.
+	n, err := st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("passkeys were revoked despite a mismatched confirmation")
+	}
+}
+
+// TestAdminUserInvite_RevealsLinkOnce is deliberately not t.Parallel() — see
+// TestAdminUserRecovery_RequiresTypedConfirmation.
+func TestAdminUserInvite_RevealsLinkOnce(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "email": {"newbie@example.com"}, "role": {"user"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// testDeps wires a REAL PasskeyService, so this must succeed. Accepting
+	// "200 or 422" here would make the test vacuous and would leave the invite
+	// reveal and grantLink with no coverage at all.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the reveal renders in the POST response); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"/register?token=", "Shown once", "one hour"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("invite reveal missing %q", want)
+		}
+	}
+	// The link must be absolute: GrantService builds it from cfg.Server.BaseURL,
+	// which testDeps sets to https://ddns.test.
+	if !strings.Contains(body, "https://ddns.test/register?token=") {
+		t.Error("the invite link is not an absolute URL")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if _, err := st.Users().GetByEmail(t.Context(), "newbie@example.com"); err != nil {
+		t.Errorf("the invited user was not created: %v", err)
+	}
+}
+
+// TestAdminUserInvite_RelativeLinkGetsPrefixed covers grantLink's fallback: with
+// server.base_url unset, GrantService returns a bare "/register?token=…", which
+// is not a URL an admin can send anyone.
+//
+// Deliberately not t.Parallel() — see TestAdminUserRecovery_RequiresTypedConfirmation.
+func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
+	deps, st := testDeps(t)
+	deps.Cfg.Server.BaseURL = ""
+	// GrantService captured the base URL at construction, so rebuild the two
+	// services that depend on it with an empty base.
+	audit := service.NewAuditWriter(st)
+	passkeys, err := service.NewPasskeyService(st, deps.Sessions, bytes.Repeat([]byte{0x24}, 32),
+		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit)
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "email": {"newbie@example.com"}, "role": {"user"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = "ddns.example.com"
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "http://ddns.example.com/register?token=") {
+		t.Error("a relative grant link was not prefixed with the derived base URL")
+	}
+	if !strings.Contains(body, "server.base_url") {
+		t.Error("the operator was not warned that server.base_url is unset")
+	}
+}
+
+// TestAdminMutations_RequireCSRF is the admin counterpart to Task 8's device
+// version, and it closes a gap the role-gate test cannot.
+//
+// TestAdminRoutes_RequireAdmin deliberately submits a VALID CSRF token so the
+// role gate is what rejects. That means a route wired h.requireAdmin(...) where
+// it should be h.requirePostAdmin(...) still answers 403 to a non-admin and
+// passes every other test in this plan — while accepting a cross-site POST from
+// a logged-in admin. This test is what catches that.
+//
+// Deliberately not t.Parallel() — see TestAdminUserRecovery_RequiresTypedConfirmation.
+// Its own subtests stay non-parallel too, since they assert on shared user state
+// after the loop completes.
+func TestAdminMutations_RequireCSRF(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "target@example.com", "user")
+	// Seed a passkey so the recovery route's assertion is meaningful: without
+	// one, "credentials still exist" is trivially true and proves nothing.
+	seedPasskey(t, st, target.ID, "existing key")
+	cookie := signIn(t, deps, admin)
+
+	for _, path := range []string{
+		"/admin/users/new",
+		"/admin/users/" + target.ID + "/enabled",
+		"/admin/users/" + target.ID + "/update",
+		"/admin/users/" + target.ID + "/delete",
+		"/admin/users/" + target.ID + "/recovery",
+	} {
+		t.Run(path, func(t *testing.T) {
+			form := url.Values{
+				"csrf":          {"wrong-token"},
+				"email":         {"someone@example.com"},
+				"role":          {"admin"},
+				"disabled":      {"true"},
+				"confirm_email": {"target@example.com"}, // the REAL address, so only CSRF can reject
+			}
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 — this route is not CSRF-guarded", rec.Code)
+			}
+		})
+	}
+
+	after, err := st.Users().GetByID(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("a CSRF-less request deleted the user: %v", err)
+	}
+	if after.Role != "user" || after.Disabled {
+		t.Errorf("a CSRF-less request modified the user: %+v", after)
+	}
+	n, err := st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if n == 0 {
+		t.Error("a CSRF-less POST to /recovery revoked the target's passkeys")
+	}
+}
+
+// TestAdminUserEdit_UnknownIDIs404 is deliberately not t.Parallel() — see
+// TestAdminUserRecovery_RequiresTypedConfirmation.
+func TestAdminUserEdit_UnknownIDIs404(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/users/01920000-0000-7000-8000-000000000000", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestAdminUserDelete_RequiresMatchingEmail is deliberately not t.Parallel()
+// — see TestAdminUserRecovery_RequiresTypedConfirmation.
+func TestAdminUserDelete_RequiresMatchingEmail(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "doomed@example.com", "user")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_email": {"typo@example.com"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	if _, err := st.Users().GetByID(t.Context(), target.ID); err != nil {
+		t.Fatal("user was deleted despite a mismatched confirmation")
+	}
+}
+
+// TestAdminUserRecovery_RevokesPasskeysAndRevealsLink covers the successful
+// recovery path — the revoke-then-mint the confirmation gate exists to
+// protect, which no other test covers.
+//
+// Deliberately not t.Parallel() — see TestAdminUserRecovery_RequiresTypedConfirmation.
+func TestAdminUserRecovery_RevokesPasskeysAndRevealsLink(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "target@example.com", "user")
+	seedPasskey(t, st, target.ID, "existing key")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_email": {"target@example.com"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/recovery", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"https://ddns.test/register?token=", "revoked", "one hour"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery reveal missing %q", want)
+		}
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	n, err := st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("credential count = %d, want 0 — IssueRecovery must revoke every passkey", n)
 	}
 }

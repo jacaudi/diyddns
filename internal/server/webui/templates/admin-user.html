@@ -1,0 +1,92 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/admin/users">Users</a> / {{.Target.Email}}</div>
+
+{{if .Link}}
+<div class="card" style="max-width:680px">
+  <div class="card-head"><h2>Recovery link — shown once</h2></div>
+  <div class="card-body">
+    <div class="callout warn">
+      <strong>⚠ Every passkey on this account has been revoked</strong>
+      This link is the only way back in. It is displayed a single time and expires in one hour.
+      Send it to the user out of band now.
+    </div>
+    {{template "errorBanner" .LinkWarning}}
+    <div class="field"><label>Registration link</label>{{template "copyValue" .Link}}</div>
+  </div>
+</div>
+{{end}}
+
+<div class="page-head"><div>
+  <h1>{{.Target.Email}}</h1>
+  <p class="sub">{{.Target.Role}} · {{if .Target.Disabled}}disabled{{else}}active{{end}}</p>
+</div></div>
+
+{{template "errorBanner" .Error}}
+
+<div class="card">
+  <div class="card-head"><h2>Role and access</h2></div>
+  <div class="card-body">
+    <form method="post" action="/admin/users/{{.Target.ID}}/update">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="role">Role</label>
+        <select class="input" id="role" name="role">
+          <option value="user" {{if eq .Target.Role "user"}}selected{{end}}>user</option>
+          <option value="admin" {{if eq .Target.Role "admin"}}selected{{end}}>admin</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="disabled">State</label>
+        <select class="input" id="disabled" name="disabled">
+          <option value="false" {{if not .Target.Disabled}}selected{{end}}>Active</option>
+          <option value="true" {{if .Target.Disabled}}selected{{end}}>Disabled</option>
+        </select>
+      </div>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card danger-zone">
+  <div class="card-head"><h2>Danger zone</h2></div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Issue a passkey recovery link</strong>
+      <span><strong>This revokes every passkey on the account immediately</strong>, then issues a
+        one-time registration link that expires in one hour. The user cannot sign in until they
+        redeem it.</span>
+    </div>
+    <form method="post" action="/admin/users/{{.Target.ID}}/recovery"
+          data-confirm="Revoke every passkey on {{.Target.Email}} and issue a recovery link? They cannot sign in until they redeem it.">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="recovery-confirm">Type <code>{{.Target.Email}}</code> to confirm</label>
+        <input class="input" id="recovery-confirm" name="confirm_email" autocomplete="off" required>
+      </div>
+      <button class="btn danger" type="submit">Revoke passkeys &amp; issue link</button>
+    </form>
+  </div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Delete account</strong>
+      <span>Permanently removes the user, their sessions, devices, and enrollment codes.
+        Cannot be undone.</span>
+    </div>
+    {{if .IsSelf}}
+    <p class="muted">You cannot delete your own account.</p>
+    {{else}}
+    <form method="post" action="/admin/users/{{.Target.ID}}/delete"
+          data-confirm="Delete {{.Target.Email}} and everything they own? This cannot be undone.">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="delete-confirm">Type <code>{{.Target.Email}}</code> to confirm</label>
+        <input class="input" id="delete-confirm" name="confirm_email" autocomplete="off" required>
+      </div>
+      <button class="btn solid-danger" type="submit">Delete account</button>
+    </form>
+    {{end}}
+  </div>
+</div>
+{{end}}

@@ -1,0 +1,53 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/admin/users">Users</a> / Invite</div>
+
+{{if .Link}}
+<div class="card" style="max-width:680px">
+  <div class="card-head"><h2>Invite created for {{.InvitedUser}}</h2></div>
+  <div class="card-body">
+    <div class="callout warn">
+      <strong>⚠ Shown once</strong>
+      This registration link is displayed a single time. Send it to the user out of band.
+      It expires in one hour and can be redeemed once.
+    </div>
+    {{template "errorBanner" .LinkWarning}}
+    <div class="field">
+      <label>Registration link</label>
+      {{template "copyValue" .Link}}
+    </div>
+    <div class="callout info">
+      <strong>Next step</strong>
+      The user opens the link and registers their first passkey. Until they do, the
+      account exists but has no credential.
+    </div>
+    <div class="btn-row"><a class="btn primary" href="/admin/users">Back to users</a></div>
+  </div>
+</div>
+{{else}}
+<div class="card" style="max-width:560px">
+  <div class="card-head"><h2>Invite a user</h2></div>
+  <div class="card-body">
+    {{template "errorBanner" .Error}}
+    <form method="post" action="/admin/users/new">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="email">Email address</label>
+        <input class="input" id="email" name="email" type="email" value="{{.Email}}"
+               autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="role">Role</label>
+        <select class="input" id="role" name="role">
+          <option value="user" {{if eq .Role "user"}}selected{{end}}>user</option>
+          <option value="admin" {{if eq .Role "admin"}}selected{{end}}>admin</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Create invite</button>
+        <a class="btn ghost" href="/admin/users">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+{{end}}
