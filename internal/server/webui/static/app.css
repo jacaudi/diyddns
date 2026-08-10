@@ -1,6 +1,6 @@
 /* DIYDDNS minimal web UI — hand-written, no framework, no build step.
-   Structure/palette adapted from docs/designs/webui-review/mocks/mock.css
-   (approved concept mocks, not tracked in git). The auth-shell rules
+   Structure/palette adapted from approved concept mocks that are not part
+   of this repository. The auth-shell rules
    (.wrap/.card/.field/.input/.btn/.status/.passkey-list/.small) serve
    /login and /register; the app-shell component set below that serves
    every screen behind a session (topbar, tables, tags, admin chrome). */

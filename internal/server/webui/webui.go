@@ -1,8 +1,9 @@
 // Package webui serves the server-rendered passkey login/register pages and
-// the app shell every session-guarded screen renders inside, embedded via
-// go:embed and parsed once in New. The auth-shell pages (login, register) use
-// the narrow layout.html shell; every screen behind a session uses app.html's
-// topbar-and-nav shell plus the shared partials in partials.html.
+// the app shell every session-guarded screen renders inside. Templates and
+// static assets are embedded with go:embed and parsed once in New. The
+// auth-shell pages (login, register) use the narrow layout.html shell; every
+// screen behind a session uses app.html's topbar-and-nav shell plus the
+// shared partials in partials.html.
 package webui
 
 import (
