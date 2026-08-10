@@ -457,6 +457,29 @@ func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 	return u
 }
 
+// seedDevice inserts a device owned by userID with a sealed dummy secret. It
+// goes through the store rather than EnrollmentService because these tests care
+// about rendering, not about the enrollment ceremony.
+func seedDevice(t *testing.T, st *store.Store, userID, label string) store.Device {
+	t.Helper()
+	d, err := st.Devices().Create(t.Context(), store.Device{
+		UserID: userID, Label: label, SecretHash: "sealed-test-secret",
+	})
+	if err != nil {
+		t.Fatalf("seed device %q: %v", label, err)
+	}
+	return d
+}
+
+// touchDevice advances a device's last_seen_at, so status derivation can be
+// exercised without a real check-in.
+func touchDevice(t *testing.T, st *store.Store, id string, at int64) {
+	t.Helper()
+	if err := st.Devices().Touch(t.Context(), id, at); err != nil {
+		t.Fatalf("touch device: %v", err)
+	}
+}
+
 // signIn mints a real session for usr and returns the cookie a browser would
 // send. It goes through the real SessionManager rather than hand-writing a
 // session row, so these tests stay honest about the cookie and CSRF contract.
@@ -657,5 +680,106 @@ func TestAppCSS_ActionGapDoesNotRelyOnMarginCollapsing(t *testing.T) {
 			`field's own var(--space-4) bottom margin adds to the button's margin-top instead of ` +
 			`collapsing with it, and the rendered input->button gap on /account is the sum of the ` +
 			`two rather than the button's margin-top alone`)
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
+// calls store.Open, and store.Migrate mutates goose's package-level globals
+// with no synchronization, so concurrent store opens race under -race.
+func TestDevices_ListsOwnDevicesOnly(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	mine := seedUser(t, st, "mine@example.com", "user")
+	theirs := seedUser(t, st, "theirs@example.com", "user")
+	seedDevice(t, st, mine.ID, "home-router")
+	seedDevice(t, st, theirs.ID, "someone-elses-nuc")
+
+	req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+	req.AddCookie(signIn(t, deps, mine))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "home-router") {
+		t.Error("own device missing from the list")
+	}
+	if strings.Contains(body, "someone-elses-nuc") {
+		t.Error("another user's device leaked into the list")
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDevices_EmptyStates(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "empty@example.com", "user")
+
+	t.Run("no devices at all teaches the next step", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+		req.AddCookie(signIn(t, deps, usr))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), "No devices yet") {
+			t.Error("missing the teaching empty state")
+		}
+	})
+
+	t.Run("no matches is a different message", func(t *testing.T) {
+		seedDevice(t, st, usr.ID, "home-router")
+		req := httptest.NewRequest(http.MethodGet, "/devices?q=nothing-matches-this", nil)
+		req.AddCookie(signIn(t, deps, usr))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "No devices match") {
+			t.Error("missing the filtered empty state")
+		}
+		if strings.Contains(body, "No devices yet") {
+			t.Error("showed the zero-devices state when the user has devices")
+		}
+	})
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDevices_StatusFilter(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "filter@example.com", "user")
+
+	online := seedDevice(t, st, usr.ID, "online-box")
+	touchDevice(t, st, online.ID, time.Now().Unix())
+	seedDevice(t, st, usr.ID, "never-seen-box") // LastSeenAt stays 0
+
+	req := httptest.NewRequest(http.MethodGet, "/devices?status=never", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "never-seen-box") {
+		t.Error("never-seen device missing under ?status=never")
+	}
+	if strings.Contains(body, "online-box") {
+		t.Error("online device leaked through ?status=never")
+	}
+}
+
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDevices_RequiresSession(t *testing.T) {
+	deps, _ := testDeps(t)
+	h, _ := New(deps)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/devices", nil))
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	if got := rec.Header().Get("Location"); got != "/login" {
+		t.Errorf("Location = %q, want /login", got)
 	}
 }

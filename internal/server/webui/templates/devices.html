@@ -1,0 +1,62 @@
+{{define "content"}}
+<div class="page-head">
+  <div><h1>My devices</h1><p class="sub">{{.Summary}}</p></div>
+  <a class="btn primary" href="/devices/new">+ New device</a>
+</div>
+
+{{if eq .Total 0}}
+<div class="card"><div class="empty">
+  <div class="icon">📡</div>
+  <h3>No devices yet</h3>
+  <p>Create a device to get an enrollment code, then run the client with it.</p>
+  <a class="btn primary" href="/devices/new">+ New device</a>
+</div></div>
+{{else}}
+<div class="card">
+  <form class="filterbar" method="get" action="/devices">
+    <div class="field grow">
+      <label for="q">Search</label>
+      <input class="input" id="q" name="q" value="{{.Q}}" placeholder="Filter by label or IP…">
+    </div>
+    <div class="field">
+      <label for="status">Status</label>
+      <select class="input" id="status" name="status">
+        <option value="" {{if eq .Status ""}}selected{{end}}>All</option>
+        <option value="online" {{if eq .Status "online"}}selected{{end}}>Online</option>
+        <option value="stale" {{if eq .Status "stale"}}selected{{end}}>Stale</option>
+        <option value="never" {{if eq .Status "never"}}selected{{end}}>Never seen</option>
+        <option value="disabled" {{if eq .Status "disabled"}}selected{{end}}>Disabled</option>
+      </select>
+    </div>
+    <div class="field"><label>&nbsp;</label><button class="btn primary" type="submit">Apply</button></div>
+  </form>
+
+  {{if .Devices}}
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr>
+        <th>Device</th><th>Status</th><th>Current IPv4</th><th>Current IPv6</th><th>Last seen</th><th></th>
+      </tr></thead>
+      <tbody>
+        {{range .Devices}}
+        <tr>
+          <td data-label="Device"><a class="primary-cell" href="/devices/{{.ID}}">{{.Label}}</a></td>
+          <td data-label="Status">{{template "statusTag" .Status}}</td>
+          <td data-label="IPv4">{{if .IPv4}}<code>{{.IPv4}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="IPv6">{{if .IPv6}}<code class="muted">{{.IPv6}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="Last seen" class="muted nowrap" title="{{.LastSeenAbs}}">{{.LastSeenAt}}</td>
+          <td class="actions"><a class="btn sm" href="/devices/{{.ID}}">Open</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h3>No devices match that filter</h3>
+    <p><a href="/devices">Clear the filter</a> to see all {{.Total}} of your devices.</p>
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}

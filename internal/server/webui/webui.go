@@ -75,6 +75,7 @@ func New(deps Deps) (http.Handler, []string) {
 		{"GET /login", http.HandlerFunc(h.handleLogin)},
 		{"GET /register", http.HandlerFunc(h.handleRegister)},
 		{"GET /account", h.requireSession(h.handleAccount)},
+		{"GET /devices", h.requireSession(h.handleDevices)},
 		{"GET /static/", http.FileServerFS(staticFS)},
 	}
 
@@ -110,4 +111,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "error"}
+var appPages = []string{"account", "devices", "error"}
