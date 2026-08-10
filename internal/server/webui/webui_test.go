@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,27 @@ func TestStaticAssets_ServedUnderStaticPrefix(t *testing.T) {
 		if b, _ := io.ReadAll(rec.Body); len(b) == 0 {
 			t.Errorf("GET %s: empty body", path)
 		}
+	}
+}
+
+// TestAppCSS_BrandRuleIsScopedToTopbar guards against the app-shell .brand
+// rule leaking into the auth shell. Both layout.html (login/register) and
+// app.html render an element with class="brand"; mock.css deliberately keeps
+// these namespaces separate — .brand for the app shell, .auth-brand for the
+// auth shell — so a second bare ".brand { ... }" rule in app.css would sit at
+// equal specificity with the auth shell's and win any shared property by
+// source order, silently drifting /login and /register's styling. The
+// app-shell rule must read ".topbar .brand" instead.
+func TestAppCSS_BrandRuleIsScopedToTopbar(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	bareBrand := regexp.MustCompile(`(?m)^\.brand\s*\{`)
+	if matches := bareBrand.FindAll(css, -1); len(matches) != 1 {
+		t.Errorf("app.css has %d unscoped \".brand {\" rules, want 1 (the auth shell's only); "+
+			"the app-shell rule must be scoped as \".topbar .brand\" so it cannot leak into /login and /register",
+			len(matches))
 	}
 }
 
