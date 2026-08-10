@@ -26,8 +26,15 @@ server:
   # TLS at a reverse proxy in front of it.
   listen: "127.0.0.1:8080"
 
-  # Public base URL of this server. Default "" (unset). Only REQUIRED when
+  # Public base URL of this server. Default "" (unset). REQUIRED when
   # auth.oidc.enabled is true, where it forms the OIDC redirect_uri.
+  #
+  # Also embedded in every copy-paste artifact the web UI renders: admin
+  # invite links, passkey-recovery links, and the `diyddns-client enroll
+  # --code` command shown after minting an enrollment code. Leave it unset
+  # and the web UI derives a best-effort value from the incoming request
+  # instead, which can be wrong behind a reverse proxy — set it explicitly
+  # in that case.
   base_url: "http://localhost:8080"
 
 database:
