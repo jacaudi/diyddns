@@ -1809,6 +1809,12 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 	if n == 0 {
 		t.Error("a CSRF-less POST to /recovery revoked the target's passkeys")
 	}
+	// /admin/users/new is the one route in the loop above with no
+	// side-effect-absence check of its own: the form posts email=someone@example.com,
+	// so a CSRF-guard bug on that route specifically would silently create the user.
+	if _, err := st.Users().GetByEmail(t.Context(), "someone@example.com"); err == nil {
+		t.Error("a CSRF-less POST to /admin/users/new created the invited user")
+	}
 }
 
 // TestAdminUserEdit_UnknownIDIs404 is deliberately not t.Parallel() — see
@@ -1826,6 +1832,103 @@ func TestAdminUserEdit_UnknownIDIs404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
+}
+
+// TestAdminUserUpdate_NoOpSaveDoesNotAuditRoleChange is deliberately not
+// t.Parallel() — see TestAdminUserRecovery_RequiresTypedConfirmation.
+//
+// AdminService.applyRole (internal/server/service/admin.go:172-182) audits
+// user.role_change UNCONDITIONALLY whenever UpdateUserParams.Role is non-nil.
+// handleAdminUserUpdate's changed-fields-only diff is the only thing standing
+// between a routine "Save" click that touched nothing and a spurious audit
+// entry on every single save — the exact regression an earlier revision of
+// this plan shipped. This posts the target's CURRENT role/disabled values
+// back unchanged and asserts no user.role_change entry was written, checking
+// the event type specifically (not a total count) so an unrelated audit
+// event can never mask a regression here.
+func TestAdminUserUpdate_NoOpSaveDoesNotAuditRoleChange(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "target@example.com", "user")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "role": {"user"}, "disabled": {"false"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/update", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "user.role_change"}, "", 10)
+	if err != nil {
+		t.Fatalf("list audit log: %v", err)
+	}
+	if len(page.Rows) != 0 {
+		t.Errorf("user.role_change audit entries = %d, want 0 — a no-op save must not audit a role change", len(page.Rows))
+	}
+}
+
+// TestAdminUserUpdate_PersistsChanges is deliberately not t.Parallel() — see
+// TestAdminUserRecovery_RequiresTypedConfirmation. Its subtests share the one
+// store and admin session opened above, each against its own freshly-seeded
+// target, so they stay non-parallel to avoid interleaving posts against a
+// shared session's CSRF token.
+func TestAdminUserUpdate_PersistsChanges(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	t.Run("role change persists", func(t *testing.T) {
+		target := seedUser(t, st, "role-target@example.com", "user")
+		form := url.Values{"csrf": {sess.CSRFToken}, "role": {"admin"}, "disabled": {"false"}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/update", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Location"); got != "/admin/users/"+target.ID {
+			t.Errorf("Location = %q, want %q", got, "/admin/users/"+target.ID)
+		}
+		got, err := st.Users().GetByID(t.Context(), target.ID)
+		if err != nil {
+			t.Fatalf("get user: %v", err)
+		}
+		if got.Role != "admin" {
+			t.Errorf("role = %q, want %q — the change did not persist", got.Role, "admin")
+		}
+	})
+
+	t.Run("disabled change persists", func(t *testing.T) {
+		target := seedUser(t, st, "disable-target@example.com", "user")
+		form := url.Values{"csrf": {sess.CSRFToken}, "role": {"user"}, "disabled": {"true"}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/update", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303; body=%s", rec.Code, rec.Body.String())
+		}
+		got, err := st.Users().GetByID(t.Context(), target.ID)
+		if err != nil {
+			t.Fatalf("get user: %v", err)
+		}
+		if !got.Disabled {
+			t.Error("disabled = false, want true — the change did not persist")
+		}
+	})
 }
 
 // TestAdminUserDelete_RequiresMatchingEmail is deliberately not t.Parallel()
@@ -1850,6 +1953,34 @@ func TestAdminUserDelete_RequiresMatchingEmail(t *testing.T) {
 	}
 	if _, err := st.Users().GetByID(t.Context(), target.ID); err != nil {
 		t.Fatal("user was deleted despite a mismatched confirmation")
+	}
+}
+
+// TestAdminUserDelete_Succeeds is deliberately not t.Parallel() — see
+// TestAdminUserRecovery_RequiresTypedConfirmation.
+func TestAdminUserDelete_Succeeds(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "doomed@example.com", "user")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_email": {"doomed@example.com"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/admin/users" {
+		t.Errorf("Location = %q, want %q", got, "/admin/users")
+	}
+	if _, err := st.Users().GetByID(t.Context(), target.ID); err == nil {
+		t.Error("user still exists after a confirmed delete")
 	}
 }
 
