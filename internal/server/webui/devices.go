@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -416,4 +417,72 @@ func historyRows(rows []store.IPHistory, now time.Time) []historyRow {
 		})
 	}
 	return out
+}
+
+// historyPageSize is how many ip_history rows one page shows. Narrower rows
+// than the audit log, so a larger page reads fine.
+const historyPageSize = 50
+
+// pager is the forward-only pagination view model. Cursors are opaque and
+// forward-only and no repo counts rows, so there is no Prev and no total:
+// Next advances, First restarts, and the browser's Back button walks
+// backwards.
+type pager struct {
+	NextURL  string
+	FirstURL string
+	RowCount int
+}
+
+// deviceHistoryData is device-history.html's template data.
+type deviceHistoryData struct {
+	appData
+	Device    store.Device
+	Rows      []historyRow
+	Pager     pager
+	HasCursor bool
+}
+
+// handleDeviceHistory renders one device's paginated IP history.
+func (h *handler) handleDeviceHistory(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	dev, ok := h.ownedDevice(w, r, usr)
+	if !ok {
+		return
+	}
+	cursor := r.URL.Query().Get("cursor")
+	page, err := h.deps.Devices.History(r.Context(), usr.ID, dev.ID, cursor, historyPageSize)
+	if err != nil {
+		// Always log first. A bad cursor is user input from a pasted or
+		// truncated URL, not a server fault, and this screen promises shareable
+		// links — so it answers 400 rather than 500. But the store returns plain
+		// fmt.Errorf values for cursor decode failures (no sentinel to match on,
+		// verified in internal/store/ip_history.go), so this cannot distinguish
+		// a bad cursor from a genuine database failure. Logging unconditionally
+		// means the 400 path never silently swallows a real fault.
+		h.deps.Log.LogAttrs(r.Context(), slog.LevelError, "webui: list device history failed",
+			slog.String("device_id", dev.ID), slog.Bool("had_cursor", cursor != ""), slog.Any("error", err))
+		if cursor != "" {
+			h.renderError(w, r, usr, http.StatusBadRequest,
+				"That page link is no longer valid. Start from the first page.")
+			return
+		}
+		h.renderError(w, r, usr, http.StatusInternalServerError, "Something went wrong. Please try again.")
+		return
+	}
+
+	base := "/devices/" + dev.ID + "/history"
+	p := pager{RowCount: len(page.Rows)}
+	if page.NextCursor != "" {
+		p.NextURL = base + "?cursor=" + url.QueryEscape(page.NextCursor)
+	}
+	if cursor != "" {
+		p.FirstURL = base
+	}
+
+	h.render(w, r, "device-history", deviceHistoryData{
+		appData:   h.newAppData(usr, sess, dev.Label+" history", "devices"),
+		Device:    dev,
+		Rows:      historyRows(page.Rows, time.Now()),
+		Pager:     p,
+		HasCursor: cursor != "",
+	})
 }

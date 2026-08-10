@@ -471,6 +471,32 @@ func seedDevice(t *testing.T, st *store.Store, userID, label string) store.Devic
 	return d
 }
 
+// seedHistory appends an ip_history row for a device.
+func seedHistory(t *testing.T, st *store.Store, deviceID, v4, v6, clientVersion string) {
+	t.Helper()
+	if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{
+		DeviceID: deviceID, IPv4: v4, IPv6: v6,
+		ObservedAt: store.NowUnix(), ClientVersion: clientVersion,
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+}
+
+// lastHistoryCursor returns a syntactically valid cursor positioned past every
+// existing row, so a request with it comes back empty.
+func lastHistoryCursor(t *testing.T, st *store.Store, deviceID string) string {
+	t.Helper()
+	seedHistory(t, st, deviceID, "203.0.113.1", "", "seed")
+	page, err := st.IPHistory().Page(t.Context(), deviceID, "", 1)
+	if err != nil {
+		t.Fatalf("page history: %v", err)
+	}
+	if page.NextCursor == "" {
+		t.Fatal("expected a next cursor from a full page of 1")
+	}
+	return page.NextCursor
+}
+
 // touchDevice advances a device's last_seen_at, so status derivation can be
 // exercised without a real check-in.
 func touchDevice(t *testing.T, st *store.Store, id string, at int64) {
@@ -975,16 +1001,13 @@ func TestDeviceDetail_ForeignDeviceIs404(t *testing.T) {
 
 	// Every route scoped to {id}, not just the GETs. rotate-secret matters most:
 	// it mints a credential.
-	// /history is NOT listed here: Task 9 registers it, so at this task an
-	// unregistered path answers 404 — the expected status — and the subtest
-	// would pass for the wrong reason, giving no isolation signal. Task 9 Step 6
-	// adds it.
 	for _, p := range []struct{ method, path string }{
 		{http.MethodGet, "/devices/" + foreign.ID},
 		{http.MethodPost, "/devices/" + foreign.ID + "/rename"},
 		{http.MethodPost, "/devices/" + foreign.ID + "/enabled"},
 		{http.MethodPost, "/devices/" + foreign.ID + "/rotate-secret"},
 		{http.MethodPost, "/devices/" + foreign.ID + "/delete"},
+		{http.MethodGet, "/devices/" + foreign.ID + "/history"},
 	} {
 		t.Run(p.method+" "+p.path, func(t *testing.T) {
 			form := url.Values{
@@ -1012,6 +1035,92 @@ func TestDeviceDetail_ForeignDeviceIs404(t *testing.T) {
 	}
 	if after.Label != "not-mine" || after.Disabled {
 		t.Errorf("the foreign device was modified: %+v", after)
+	}
+}
+
+// TestDeviceHistory_EmptyStatesDifferByCursor asserts the two reachable empty
+// states render different copy: a device that has never checked in is not the
+// same situation as paging past the last row of one that has.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
+// calls store.Open, and store.Migrate mutates goose's package-level globals
+// unsynchronized. Its own subtests stay t.Parallel()-free too since they
+// share this one store sequentially rather than opening their own.
+func TestDeviceHistory_EmptyStatesDifferByCursor(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "hist@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+
+	t.Run("no rows and no cursor means never reported", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID+"/history", nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), "No check-ins recorded yet") {
+			t.Error("missing the never-reported empty state")
+		}
+	})
+
+	t.Run("no rows with a cursor means end of the stream", func(t *testing.T) {
+		cursor := lastHistoryCursor(t, st, dev.ID)
+		req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID+"/history?cursor="+cursor, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "No more history") {
+			t.Error("missing the end-of-stream empty state")
+		}
+		if strings.Contains(body, "No check-ins recorded yet") {
+			t.Error("claimed the device never reported while paging past the end")
+		}
+	})
+}
+
+// TestDeviceHistory_BadCursorIs400 asserts a malformed cursor — a pasted or
+// truncated URL — answers 400, not 500, since decodeCursor has no sentinel
+// error to distinguish user input from a genuine store failure.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceHistory_BadCursorIs400(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "cursor@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID+"/history?cursor=not-a-cursor", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — a pasted or truncated URL must not 500", rec.Code)
+	}
+}
+
+// TestDeviceHistory_RendersRows asserts a device with history renders its
+// rows on the full history screen.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceHistory_RendersRows(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "rows@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	seedHistory(t, st, dev.ID, "203.0.113.42", "", "diyddns-client/1.4.0")
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID+"/history", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{"203.0.113.42", "diyddns-client/1.4.0"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("history row missing %q", want)
+		}
 	}
 }
 
