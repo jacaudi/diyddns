@@ -1,0 +1,16 @@
+{{define "statusTag"}}<span class="tag {{.CSSClass}}"><span class="dot"></span>{{.Label}}</span>{{end}}
+
+{{define "copyValue"}}<span class="copy"><code>{{.}}</code>
+  <button class="btn sm" type="button" data-copy="{{.}}">Copy</button></span>{{end}}
+
+{{define "errorBanner"}}{{if .}}<div class="callout warn" role="alert">{{.}}</div>{{end}}{{end}}
+
+{{define "pager"}}
+<div class="pager">
+  <span class="muted">Showing {{.RowCount}} row{{if ne .RowCount 1}}s{{end}}</span>
+  <div class="pages">
+    {{if .FirstURL}}<a class="btn sm" href="{{.FirstURL}}">‹ First</a>{{end}}
+    {{if .NextURL}}<a class="btn sm" href="{{.NextURL}}">Next ›</a>{{end}}
+  </div>
+</div>
+{{end}}

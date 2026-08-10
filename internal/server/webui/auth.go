@@ -45,8 +45,7 @@ func (h *handler) requireSession(next sessionHandler) http.HandlerFunc {
 func (h *handler) adminOnly(next sessionHandler) sessionHandler {
 	return func(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 		if usr.Role != "admin" {
-			// TODO(task-5): render the error page instead of plain text.
-			http.Error(w, "admin access required", http.StatusForbidden)
+			h.renderError(w, r, usr, http.StatusForbidden, "Admin access is required for that page.")
 			return
 		}
 		next(w, r, usr, sess)
@@ -66,13 +65,11 @@ func (h *handler) requireAdmin(next sessionHandler) http.HandlerFunc {
 func (h *handler) requirePost(next sessionHandler) http.HandlerFunc {
 	return h.requireSession(func(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 		if err := r.ParseForm(); err != nil {
-			// TODO(task-5): render the error page instead of plain text.
-			http.Error(w, "malformed form submission", http.StatusBadRequest)
+			h.renderError(w, r, usr, http.StatusBadRequest, "That form submission was malformed. Reload the page and try again.")
 			return
 		}
 		if !auth.ValidCSRF(sess, r.PostFormValue("csrf")) {
-			// TODO(task-5): render the error page instead of plain text.
-			http.Error(w, "invalid csrf token", http.StatusForbidden)
+			h.renderError(w, r, usr, http.StatusForbidden, "Your session expired or the form was stale. Reload the page and try again.")
 			return
 		}
 		next(w, r, usr, sess)

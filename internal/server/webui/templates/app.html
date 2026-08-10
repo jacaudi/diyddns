@@ -1,0 +1,36 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · DIYDDNS</title>
+<link rel="stylesheet" href="/static/app.css">
+{{if .CSRFToken}}<meta name="csrf" content="{{.CSRFToken}}">{{end}}
+<script src="/static/ui.js" defer></script>
+{{block "scripts" .}}{{end}}
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/devices"><span class="logo">D</span> DIYDDNS</a>
+    <nav class="nav" id="nav">
+      <a class="{{if eq .Nav "devices"}}active{{end}}" href="/devices">Devices</a>
+      <a class="{{if eq .Nav "account"}}active{{end}}" href="/account">Account</a>
+      {{if .IsAdmin}}
+      <a class="admin {{if eq .Nav "admin-users"}}active{{end}}" href="/admin/users">Users</a>
+      <a class="admin {{if eq .Nav "admin-audit"}}active{{end}}" href="/admin/audit">Audit</a>
+      <a class="admin {{if eq .Nav "admin-server"}}active{{end}}" href="/admin/server">Server</a>
+      {{end}}
+    </nav>
+    <div class="userchip">
+      <span class="avatar">{{.Initials}}</span>
+      <span class="email">{{.Email}}</span>
+      {{if .IsAdmin}}<span class="tag accent role-badge">admin</span>{{end}}
+    </div>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="nav"
+            data-toggle-nav>☰</button>
+  </header>
+  <main class="main">{{template "content" .}}</main>
+</div>
+</body>
+</html>{{end}}

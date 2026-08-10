@@ -1,20 +1,33 @@
 /* DIYDDNS minimal web UI — hand-written, no framework, no build step.
    Structure/palette adapted from docs/designs/webui-review/mocks/mock.css
-   (approved concept mocks) for the login/register/account pages only; the
-   full app shell (topbar, device tables, admin nav) is a later plan. */
+   (approved concept mocks, not tracked in git). The auth-shell rules
+   (.wrap/.card/.field/.input/.btn/.status/.passkey-list/.small) serve
+   /login and /register; the app-shell component set below that serves
+   every screen behind a session (topbar, tables, tags, admin chrome). */
 
 :root {
   --bg: #f6f7f9;
   --surface: #ffffff;
+  --surface-2: #fafbfc;
   --border: #e3e6ea;
+  --border-strong: #d0d5db;
   --text: #1c2430;
   --text-muted: #5b6674;
+  --text-faint: #8a93a0;
   --accent: #2f6feb;
   --accent-hover: #1f5fdb;
+  --accent-soft: #e8f0fe;
   --danger: #d13438;
+  --danger-soft: #fde8e8;
+  --ok: #1f9d55;
+  --ok-soft: #e4f6ec;
+  --warn: #b7791f;
+  --warn-soft: #fbf1dc;
+  --neutral-soft: #eceef1;
   --radius: 10px;
   --radius-sm: 7px;
   --shadow: 0 1px 2px rgba(20, 30, 50, .06), 0 4px 16px rgba(20, 30, 50, .06);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -22,12 +35,22 @@
   :root {
     --bg: #0e1116;
     --surface: #161b22;
+    --surface-2: #1b212a;
     --border: #262c36;
+    --border-strong: #333b47;
     --text: #e6edf3;
     --text-muted: #9aa5b1;
+    --text-faint: #6e7781;
     --accent: #4d84ff;
     --accent-hover: #6a99ff;
+    --accent-soft: #182338;
     --danger: #f0595d;
+    --danger-soft: #2c1618;
+    --ok: #3fb950;
+    --ok-soft: #122019;
+    --warn: #d8a24a;
+    --warn-soft: #241d10;
+    --neutral-soft: #21262d;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 20px rgba(0, 0, 0, .35);
   }
 }
@@ -138,4 +161,233 @@ a:hover { text-decoration: underline; }
 .small {
   font-size: 0.85rem;
   margin-top: 0.35rem;
+}
+
+/* ---------- App shell ----------
+   Ported from mock.css. Every screen behind a session renders inside this
+   shell (templates/app.html); .wrap/.card above stay for /login and
+   /register, which render inside the narrower layout.html shell instead. */
+
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 20px; height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 20;
+}
+.brand {
+  display: flex; align-items: center; gap: 9px;
+  font-weight: 700; font-size: 15px; letter-spacing: .2px;
+  color: var(--text);
+}
+.brand .logo {
+  width: 26px; height: 26px; border-radius: 7px;
+  background: linear-gradient(135deg, var(--accent), #6a4dff);
+  display: grid; place-items: center; color: #fff; font-size: 14px; font-weight: 800;
+}
+.nav { display: flex; gap: 4px; margin-left: 8px; flex: 1; }
+.nav a {
+  padding: 7px 12px; border-radius: var(--radius-sm);
+  color: var(--text-muted); font-weight: 500;
+}
+.nav a:hover { background: var(--neutral-soft); text-decoration: none; color: var(--text); }
+.nav a.active { background: var(--accent-soft); color: var(--accent); }
+.nav a.admin::before { content: "⚙ "; opacity: .7; }
+
+.userchip {
+  display: flex; align-items: center; gap: 9px;
+  padding: 5px 6px 5px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.userchip .avatar {
+  width: 26px; height: 26px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  display: grid; place-items: center; font-weight: 700; font-size: 12px;
+}
+.userchip .email { color: var(--text-muted); font-size: 13px; }
+
+.menu-toggle {
+  display: none; margin-left: auto;
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 6px 10px; font-size: 16px; cursor: pointer;
+}
+
+.main { flex: 1; width: 100%; max-width: 1080px; margin: 0 auto; padding: 26px 20px 60px; }
+
+/* ---------- Page header ---------- */
+
+.page-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+}
+.page-head h1 { margin: 0 0 3px; font-size: 22px; letter-spacing: -.2px; }
+.page-head .sub { color: var(--text-muted); margin: 0; font-size: 13.5px; }
+.breadcrumb { color: var(--text-faint); font-size: 12.5px; margin-bottom: 10px; }
+.breadcrumb a { color: var(--text-muted); }
+
+/* ---------- Cards: grid / stat tiles ----------
+   The base .card/.card-head/.card-body rules stay as they are above; this
+   only adds what the app shell's grids of cards need. */
+
+.card + .card { margin-top: 18px; }
+.grid > .card + .card { margin-top: 0; }
+
+.grid { display: grid; gap: 18px; }
+.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+.stat { padding: 16px 18px; }
+.stat .label { color: var(--text-muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .4px; }
+.stat .value { font-size: 26px; font-weight: 700; margin-top: 4px; letter-spacing: -.5px; }
+.stat .value.small { font-size: 18px; }
+
+/* ---------- Tables ---------- */
+
+.table-wrap { overflow-x: auto; }
+table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.grid-table th {
+  text-align: left; font-weight: 600; color: var(--text-muted);
+  padding: 11px 16px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2); white-space: nowrap; font-size: 12.5px;
+  text-transform: uppercase; letter-spacing: .3px;
+}
+.grid-table td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.grid-table tr:last-child td { border-bottom: none; }
+.grid-table tbody tr:hover { background: var(--surface-2); }
+.grid-table .primary-cell { font-weight: 600; color: var(--text); }
+.grid-table .muted { color: var(--text-muted); }
+.grid-table td.actions { text-align: right; white-space: nowrap; }
+
+/* ---------- Tags / badges ---------- */
+
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  line-height: 1.7; border: 1px solid transparent;
+}
+.tag .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+.tag.ok { background: var(--ok-soft); color: var(--ok); }
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+.tag.danger { background: var(--danger-soft); color: var(--danger); }
+.tag.neutral { background: var(--neutral-soft); color: var(--text-muted); }
+.tag.accent { background: var(--accent-soft); color: var(--accent); }
+.role-badge { text-transform: capitalize; }
+
+/* ---------- Button modifiers ----------
+   The base .btn/.btn.primary/.btn.block rules stay as they are above. */
+
+.btn.danger { background: var(--surface); border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: var(--danger-soft); }
+.btn.solid-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
+.btn.ghost:hover { background: var(--neutral-soft); }
+.btn.sm { padding: 5px 11px; font-size: 12.5px; }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ---------- Forms: filter bar, field hint ----------
+   The base .field/.input rules stay as they are above. */
+
+.field .hint { color: var(--text-muted); font-size: 12.5px; margin-top: 5px; }
+
+.filterbar {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--surface-2);
+}
+.filterbar .field { margin: 0; min-width: 150px; }
+.filterbar .field label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
+.filterbar .grow { flex: 1; }
+
+/* ---------- Descriptions (key/value) ---------- */
+
+.kv { display: grid; grid-template-columns: 160px 1fr; }
+.kv > dt { color: var(--text-muted); padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.kv > dd { margin: 0; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.kv > dt:last-of-type, .kv > dd:last-of-type { border-bottom: none; }
+
+/* ---------- Copy field ---------- */
+
+.copy {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 5px 6px 5px 11px; max-width: 100%;
+}
+.copy code { color: var(--text); overflow: auto; white-space: nowrap; }
+.copy button {
+  border: 1px solid var(--border-strong); background: var(--surface);
+  border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; color: var(--text-muted);
+  flex-shrink: 0;
+}
+.copy button:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- Callouts / banners ---------- */
+
+.callout {
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: var(--radius-sm); padding: 12px 15px; font-size: 13px;
+  background: var(--surface-2);
+}
+.callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
+.callout strong { display: block; margin-bottom: 3px; }
+
+/* ---------- Danger zone ---------- */
+
+.danger-zone { border-color: var(--danger); }
+.danger-zone .card-head { border-bottom-color: var(--danger-soft); }
+.danger-zone .card-head h2 { color: var(--danger); }
+.danger-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.danger-item:last-child { border-bottom: none; }
+.danger-item .meta strong { display: block; }
+.danger-item .meta span { color: var(--text-muted); font-size: 12.5px; }
+
+/* ---------- Empty state ---------- */
+
+.empty { text-align: center; padding: 54px 24px; }
+.empty .icon { font-size: 40px; opacity: .5; }
+.empty h3 { margin: 12px 0 4px; }
+.empty p { color: var(--text-muted); margin: 0 0 18px; }
+
+/* ---------- Pagination ---------- */
+
+.pager {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 18px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px;
+}
+.pager .pages { display: flex; gap: 6px; }
+
+/* ---------- Utilities ---------- */
+
+.stack-sm > * + * { margin-top: 10px; }
+.nowrap { white-space: nowrap; }
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 780px) {
+  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; }
+  .kv > dt { padding-bottom: 0; border-bottom: none; }
+  .kv > dd { padding-top: 2px; }
+  .nav { display: none; position: absolute; top: 56px; left: 0; right: 0;
+         flex-direction: column; background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px; }
+  .nav.open { display: flex; }
+  .menu-toggle { display: inline-block; }
+  .userchip .email { display: none; }
+  .page-head { flex-direction: column; }
+  /* Collapse wide tables into stacked cards */
+  .grid-table.responsive thead { display: none; }
+  .grid-table.responsive, .grid-table.responsive tbody,
+  .grid-table.responsive tr, .grid-table.responsive td { display: block; width: 100%; }
+  .grid-table.responsive tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 10px; }
+  .grid-table.responsive td { border: none; padding: 7px 14px; }
+  .grid-table.responsive td::before {
+    content: attr(data-label); display: block; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .3px; color: var(--text-muted); margin-bottom: 2px;
+  }
+  .grid-table.responsive td.actions { text-align: left; }
 }

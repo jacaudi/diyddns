@@ -1,8 +1,8 @@
-// Package webui serves the minimal server-rendered passkey login, register,
-// and account pages: three html/template pages plus one vendored JS ceremony
-// helper (static/passkey.js), embedded via go:embed and parsed once in New.
-// It is a self-contained, additive package — a later task mounts New's
-// handler onto the server's mux; this package does not touch server.go.
+// Package webui serves the server-rendered passkey login/register pages and
+// the app shell every session-guarded screen renders inside, embedded via
+// go:embed and parsed once in New. The auth-shell pages (login, register) use
+// the narrow layout.html shell; every screen behind a session uses app.html's
+// topbar-and-nav shell plus the shared partials in partials.html.
 package webui
 
 import (
@@ -92,25 +92,22 @@ func New(deps Deps) (http.Handler, []string) {
 // over templates/*.html: every page defines a "content" block, and
 // html/template would let the last-parsed definition silently win.
 func parsePages() map[string]*template.Template {
-	pages := make(map[string]*template.Template, len(authPages))
+	pages := make(map[string]*template.Template, len(authPages)+len(appPages))
 	for _, name := range authPages {
 		pages[name] = template.Must(template.ParseFS(templateFS,
 			"templates/layout.html", "templates/"+name+".html"))
 	}
+	for _, name := range appPages {
+		pages[name] = template.Must(template.ParseFS(templateFS,
+			"templates/app.html", "templates/partials.html", "templates/"+name+".html"))
+	}
 	return pages
 }
 
-// authPages are the pre-session pages, rendered in the narrow layout.html shell.
-var authPages = []string{"login", "register", "account"}
+// authPages render in the narrow layout.html shell: no navigation, because
+// there is no session yet.
+var authPages = []string{"login", "register"}
 
-// handleRoot sends the bare base URL somewhere useful instead of 404ing.
-// There is no dashboard yet, so /account is the closest thing to a home
-// page; requireSession redirects on to /login when there is no session, so
-// this needs no session check of its own.
-//
-// The "/{$}" pattern matches ONLY the root path — a bare "/" in Go's
-// ServeMux is a catch-all prefix and would swallow every unmatched URL,
-// turning genuine 404s into redirects.
-func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
-}
+// appPages render in the app.html shell with the topbar and navigation. Adding
+// a screen is one entry here plus one templates/<name>.html file.
+var appPages = []string{"account", "error"}

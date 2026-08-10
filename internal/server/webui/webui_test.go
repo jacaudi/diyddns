@@ -278,23 +278,87 @@ func TestStaticAssets_ServedUnderStaticPrefix(t *testing.T) {
 	}
 }
 
-// TestRoot_RedirectsInsteadOf404 covers the bare base URL. There is no
-// dashboard yet, so / used to 404 — a first-run operator visiting the address
-// they were given dead-ended. It must redirect, and it must NOT become a
-// catch-all: Go's ServeMux treats a bare "/" as a prefix match, which would
-// turn every genuine 404 into a redirect too.
-func TestRoot_RedirectsInsteadOf404(t *testing.T) {
-	deps, _ := testDeps(t)
+// TestAccount_RendersInAppShell asserts /account carries the app chrome, so the
+// authenticated pages share one navigation rather than the narrow auth shell.
+//
+// Deliberately not t.Parallel(): testDeps calls store.Open, and store.Migrate
+// (internal/store/migrate.go) mutates goose's package-level globals with no
+// synchronization, so concurrent store opens race under -race.
+func TestAccount_RendersInAppShell(t *testing.T) {
+	deps, st := testDeps(t)
 	h, _ := New(deps)
 
-	t.Run("root redirects", func(t *testing.T) {
+	usr := seedUser(t, st, "jane@example.com", "user")
+	req := httptest.NewRequest(http.MethodGet, "/account", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{`class="topbar"`, `href="/devices"`, "jane@example.com", "JA"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	if strings.Contains(body, `href="/admin/users"`) {
+		t.Error("a non-admin was shown the admin nav")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", got, "no-store")
+	}
+}
+
+// TestAppShell_ShowsAdminNavToAdmins is the positive half of the check above.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAppShell_ShowsAdminNavToAdmins(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	usr := seedUser(t, st, "admin@example.com", "admin")
+	req := httptest.NewRequest(http.MethodGet, "/account", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	for _, want := range []string{`href="/admin/users"`, `href="/admin/audit"`, `href="/admin/server"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("admin nav missing %q", want)
+		}
+	}
+}
+
+// TestRoot_RedirectsBySession replaces TestRoot_RedirectsInsteadOf404: the root
+// now branches on whether a session is present.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell. Its own
+// subtests stay t.Parallel(): they share the one store opened above rather
+// than calling testDeps themselves, so they don't race on goose's globals.
+func TestRoot_RedirectsBySession(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	t.Run("anonymous goes to login", func(t *testing.T) {
+		t.Parallel()
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		if rec.Code != http.StatusSeeOther {
-			t.Fatalf("GET / = %d, want %d", rec.Code, http.StatusSeeOther)
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
 		}
-		if loc := rec.Header().Get("Location"); loc != "/account" {
-			t.Errorf("Location = %q, want /account", loc)
+		if got := rec.Header().Get("Location"); got != "/login" {
+			t.Errorf("Location = %q, want %q", got, "/login")
+		}
+	})
+
+	t.Run("signed in goes to devices", func(t *testing.T) {
+		t.Parallel()
+		usr := seedUser(t, st, "root@example.com", "user")
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(signIn(t, deps, usr))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Location"); got != "/devices" {
+			t.Errorf("Location = %q, want %q", got, "/devices")
 		}
 	})
 
