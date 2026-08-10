@@ -1232,3 +1232,126 @@ func TestDeviceRename_UpdatesAndRedirects(t *testing.T) {
 		t.Errorf("label = %q, want %q", got.Label, "new-name")
 	}
 }
+
+// TestDeviceRename_RejectPathsLeaveLabelUnchanged closes a gap left by
+// TestDeviceRename_UpdatesAndRedirects, which only proves the happy path. A
+// handler that returned 422 and renamed anyway would have passed before this
+// test existed: both reject branches — empty label and a label collision —
+// must leave the STORED label untouched, not merely answer 422.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceRename_RejectPathsLeaveLabelUnchanged(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "ren-reject@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	t.Run("empty label", func(t *testing.T) {
+		dev := seedDevice(t, st, usr.ID, "old-name")
+
+		form := url.Values{"csrf": {sess.CSRFToken}, "label": {"   "}}
+		req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/rename", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422", rec.Code)
+		}
+		got, err := st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("get device: %v", err)
+		}
+		if got.Label != "old-name" {
+			t.Errorf("label = %q, want unchanged %q (an empty label must not be stored)", got.Label, "old-name")
+		}
+	})
+
+	t.Run("conflicting label", func(t *testing.T) {
+		taken := seedDevice(t, st, usr.ID, "existing-name")
+		dev := seedDevice(t, st, usr.ID, "old-name-2")
+
+		form := url.Values{"csrf": {sess.CSRFToken}, "label": {taken.Label}}
+		req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/rename", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422", rec.Code)
+		}
+		got, err := st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("get device: %v", err)
+		}
+		if got.Label != "old-name-2" {
+			t.Errorf("label = %q, want unchanged %q (a colliding rename must not be stored)", got.Label, "old-name-2")
+		}
+	})
+}
+
+// TestDeviceSetEnabled_TogglesStoredState closes a gap where the only
+// coverage of POST /devices/{id}/enabled proved the CSRF and ownership
+// guards, never the handler itself. Both directions are asserted — an
+// inverted boolean would pass a test that only checked one — and the
+// redirect is asserted too, since a broken redirect is one of the failure
+// modes this gap hides. The stored Disabled flag is re-read from the store
+// rather than trusted from the response.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceSetEnabled_TogglesStoredState(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "toggle@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "toggle-box")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	postEnabled := func(t *testing.T, disabled string) *httptest.ResponseRecorder {
+		t.Helper()
+		form := url.Values{"csrf": {sess.CSRFToken}, "disabled": {disabled}}
+		req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/enabled", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("disable", func(t *testing.T) {
+		rec := postEnabled(t, "true")
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303", rec.Code)
+		}
+		if got := rec.Header().Get("Location"); got != "/devices/"+dev.ID {
+			t.Errorf("Location = %q, want %q", got, "/devices/"+dev.ID)
+		}
+		got, err := st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("get device: %v", err)
+		}
+		if !got.Disabled {
+			t.Error("Disabled = false, want true after posting disabled=true")
+		}
+	})
+
+	t.Run("re-enable", func(t *testing.T) {
+		rec := postEnabled(t, "false")
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303", rec.Code)
+		}
+		if got := rec.Header().Get("Location"); got != "/devices/"+dev.ID {
+			t.Errorf("Location = %q, want %q", got, "/devices/"+dev.ID)
+		}
+		got, err := st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("get device: %v", err)
+		}
+		if got.Disabled {
+			t.Error("Disabled = true, want false after posting disabled=false")
+		}
+	})
+}
