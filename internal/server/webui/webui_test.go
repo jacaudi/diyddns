@@ -580,11 +580,15 @@ func TestAppCSS_SpacingScaleTokensExist(t *testing.T) {
 // have made the label complaint worse). This is a text-level proxy for a
 // geometric property — the real assertion is the rendered gap in a browser,
 // which the maintainer measures directly with Playwright; this test only
-// confirms the CSS source carries the agreed values:
+// confirms the CSS source carries the agreed values. Round 5 revisited two
+// of them after seeing the corrected gaps rendered — the action gap came
+// back down a step, and the status line moved a step away from the button
+// ("the error is too close to the button"):
 //
 //	label -> input     var(--space-2)  (8px)
 //	field -> field      var(--space-4) (16px, .field's own margin-bottom)
-//	input -> button     var(--space-5) (24px, via .field + .btn)
+//	input -> button     var(--space-4) (16px, via .field + .btn; was --space-5)
+//	button -> status    var(--space-4) (16px, .status's top margin; was --space-2)
 //	field .hint          var(--space-2) (8px, same reasoning as the label)
 func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
 	css, err := staticFS.ReadFile("static/app.css")
@@ -599,7 +603,8 @@ func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
 	}{
 		{"label -> input (.field label margin-bottom)", `\.field label\s*\{[^}]*margin-bottom:\s*var\(--space-2\)`},
 		{"field -> field (.field margin-bottom)", `^\.field\s*\{\s*margin-bottom:\s*var\(--space-4\)`},
-		{"input -> button (.field + .btn margin-top)", `\.field \+ \.btn\s*\{\s*margin-top:\s*var\(--space-5\)`},
+		{"input -> button (.field + .btn margin-top)", `\.field \+ \.btn\s*\{\s*margin-top:\s*var\(--space-4\)`},
+		{"button -> status (.status margin-top)", `^\.status\s*\{[^}]*margin:\s*var\(--space-4\)\s+0\s+0`},
 		{"field hint (.field .hint margin-top)", `\.field \.hint\s*\{[^}]*margin-top:\s*var\(--space-2\)`},
 	}
 	for _, tt := range tests {
@@ -623,14 +628,16 @@ func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
 //
 // Whether a call site collapsed turned out to depend on its button
 // modifier — .btn block is display: block, so /login and /register were
-// already at 24px, while /account's .btn primary summed to 40px. The fix
-// is to stop depending on collapsing at all: zero the bottom margin of a
-// field that is immediately followed by a button, so the button's
-// margin-top owns the entire gap. max(0, 24) and 0 + 24 are both 24, so
-// every site lands on 24px however its button is displayed.
+// already right, while /account's .btn primary summed. The fix is to stop
+// depending on collapsing at all: zero the bottom margin of a field that is
+// immediately followed by a button, so the button's margin-top owns the
+// entire gap. max(0, n) and 0 + n are the same number, so every site lands
+// on exactly that margin-top however its button is displayed. Round 5 then
+// retuned the gap from --space-5 to --space-4 by editing one token, with no
+// per-page arithmetic, which is the property this test exists to keep.
 //
-// The companion half — that .field + .btn carries the WHOLE var(--space-5),
-// rather than a subtracted value that only reaches 24px while .field's
+// The value itself — that .field + .btn carries the WHOLE token, rather
+// than a subtracted one that only reaches the target while .field's
 // margin-bottom happens to be 16px — is already asserted by the test above
 // and is deliberately not repeated here.
 //
@@ -648,6 +655,7 @@ func TestAppCSS_ActionGapDoesNotRelyOnMarginCollapsing(t *testing.T) {
 	if !neutralized.Match(css) {
 		t.Error(`app.css is missing ".field:has(+ .btn) { margin-bottom: 0; }"; without it the ` +
 			`field's own var(--space-4) bottom margin adds to the button's margin-top instead of ` +
-			`collapsing with it, and the rendered input->button gap is 40px rather than 24px`)
+			`collapsing with it, and the rendered input->button gap on /account is the sum of the ` +
+			`two rather than the button's margin-top alone`)
 	}
 }

@@ -143,11 +143,15 @@ a:hover { text-decoration: underline; }
    gap) is the wrong gap above a submit button — it makes a primary action
    read as just another field (Task 5 review round 3; the maintainer
    measured this at 14px before the scale, now --space-4/16px between
-   fields). The pair of rules below gives that one relationship a bigger
-   step: a .field immediately followed by a .btn (register.html's "Create
+   fields). The pair of rules below owns that one relationship on its own:
+   a .field immediately followed by a .btn (register.html's "Create
    passkey", account.html's "Add a passkey", login.html's "Send recovery
    link" — all three are a lone or final .field with a .btn as its very next
-   sibling; no template edit needed).
+   sibling; no template edit needed). The gap it sets happens to be --space-4
+   too after round 5 pulled it back a step from --space-5 ("close the gap a
+   little more between the button and text box", measured on the rendered
+   page); that coincidence is not something to lean on — the two are separate
+   decisions and only one of them is about field-to-field rhythm.
 
    The button owns the WHOLE gap, and the field ahead of it contributes
    nothing. Round 3 instead left the field's --space-4 in place and expected
@@ -157,10 +161,11 @@ a:hover { text-decoration: underline; }
    SUM, and the maintainer measured 16 + 24 = 40px on the rendered page.
    Whether a given call site collapses turns out to depend on which button
    modifier it uses: .btn block is display: block, so /login and /register
-   did collapse and were already at 24px, while /account's .btn primary was
-   not. Zeroing the field's side removes that dependency entirely — max(0,
-   24) and 0 + 24 are the same number, so every site lands on 24px however
-   its button is displayed. It also means a field/button pair inside a flex
+   did collapse, while /account's .btn primary did not. Zeroing the field's
+   side removes that dependency entirely — max(0, n) and 0 + n are the same
+   number, so every site lands on exactly the button's margin-top however
+   that button is displayed, and re-tuning the gap is a one-token edit with
+   no per-page arithmetic. It also means a field/button pair inside a flex
    container (e.g. a future .filterbar submit button) needs no special case:
    flex items never collapse margins, and this no longer asks them to.
 
@@ -171,7 +176,7 @@ a:hover { text-decoration: underline; }
    Baseline-available in every current engine, and this app already requires
    a WebAuthn-capable browser. */
 .field:has(+ .btn) { margin-bottom: 0; }
-.field + .btn { margin-top: var(--space-5); }
+.field + .btn { margin-top: var(--space-4); }
 
 .input {
   width: 100%;
@@ -201,7 +206,20 @@ a:hover { text-decoration: underline; }
 .btn.primary:hover { background: var(--accent-hover); }
 .btn.block { display: block; width: 100%; margin-bottom: var(--space-3); }
 
-.status { font-size: 13px; min-height: 1.2em; margin: var(--space-2) 0 0; }
+/* The live-region line under a form's submit button, on all four of its
+   consumers: register.html's #register-status, login.html's
+   #passkey-login-status and #recover-status, and account.html's
+   #passkey-status. Round 5 took its top margin from --space-2 to --space-4
+   ("the error is too close to the button"). One token covers every site
+   even though they do not start from the same place: on /account the button
+   is an inline-block .btn primary contributing no bottom margin, so the
+   status's own top margin is the entire gap (8px before, 16px now), while
+   the other three follow a .btn block whose var(--space-3) bottom margin
+   collapses with it and used to WIN, holding them at 12px. --space-4 is
+   larger than that 12px, so it now decides all four and they render an
+   identical 16px. Keep it at or above .btn.block's bottom margin or the
+   sites will silently diverge again. */
+.status { font-size: 13px; min-height: 1.2em; margin: var(--space-4) 0 0; }
 .status-error { color: var(--danger); }
 
 .passkey-list { list-style: none; margin: 0 0 var(--space-4); padding: 0; }
