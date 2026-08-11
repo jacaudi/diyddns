@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1111,12 +1112,11 @@ func TestDeviceHistory_BadCursorIs400(t *testing.T) {
 // & and + inside an attribute (see nextPagerURL).
 func assertErrorPageLinksTo(t *testing.T, body, want string) {
 	t.Helper()
-	for _, href := range hrefs(body) {
-		if href == want {
-			return
-		}
+	found := hrefs(body)
+	if slices.Contains(found, want) {
+		return
 	}
-	t.Errorf("error page offers no link to %q; hrefs = %v", want, hrefs(body))
+	t.Errorf("error page offers no link to %q; hrefs = %v", want, found)
 }
 
 // hrefs returns every anchor target on a rendered page, un-escaped.
