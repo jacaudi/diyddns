@@ -1,33 +1,71 @@
 /* DIYDDNS minimal web UI — hand-written, no framework, no build step.
-   Structure/palette adapted from docs/designs/webui-review/mocks/mock.css
-   (approved concept mocks) for the login/register/account pages only; the
-   full app shell (topbar, device tables, admin nav) is a later plan. */
+   Structure/palette adapted from approved concept mocks that are not part
+   of this repository. The auth-shell rules
+   (.wrap/.card/.field/.input/.btn/.status/.passkey-list/.small) serve
+   /login and /register; the app-shell component set below that serves
+   every screen behind a session (topbar, tables, tags, admin chrome). */
 
 :root {
   --bg: #f6f7f9;
   --surface: #ffffff;
+  --surface-2: #fafbfc;
   --border: #e3e6ea;
+  --border-strong: #d0d5db;
   --text: #1c2430;
   --text-muted: #5b6674;
+  --text-faint: #8a93a0;
   --accent: #2f6feb;
   --accent-hover: #1f5fdb;
+  --accent-soft: #e8f0fe;
   --danger: #d13438;
+  --danger-soft: #fde8e8;
+  --ok: #1f9d55;
+  --ok-soft: #e4f6ec;
+  --warn: #b7791f;
+  --warn-soft: #fbf1dc;
+  --neutral-soft: #eceef1;
   --radius: 10px;
   --radius-sm: 7px;
   --shadow: 0 1px 2px rgba(20, 30, 50, .06), 0 4px 16px rgba(20, 30, 50, .06);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Spacing scale (Task 5 review round 3): the only source for margin,
+     padding, and gap values in this file — numeric steps, no semantic alias
+     layer. Scheme-invariant like --mono, so it lives in :root only, not the
+     dark-mode block below. Every value not on this scale that appears
+     hard-coded past this point is either 0 (no token needed) or the 26px
+     logo/avatar box, a border-width, a font-size, or a line-height — none of
+     which are spacing and are deliberately out of scope for this scale. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0e1116;
     --surface: #161b22;
+    --surface-2: #1b212a;
     --border: #262c36;
+    --border-strong: #333b47;
     --text: #e6edf3;
     --text-muted: #9aa5b1;
+    --text-faint: #6e7781;
     --accent: #4d84ff;
     --accent-hover: #6a99ff;
+    --accent-soft: #182338;
     --danger: #f0595d;
+    --danger-soft: #2c1618;
+    --ok: #3fb950;
+    --ok-soft: #122019;
+    --warn: #d8a24a;
+    --warn-soft: #241d10;
+    --neutral-soft: #21262d;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 20px rgba(0, 0, 0, .35);
   }
 }
@@ -49,17 +87,29 @@ a:hover { text-decoration: underline; }
 .wrap {
   max-width: 420px;
   margin: 0 auto;
-  padding: 48px 20px;
+  padding: var(--space-7) var(--space-5);
 }
 
+/* Shared by both shells' brand marks: shape and typography only. This rule
+   deliberately carries NO spacing/layout — it used to set
+   margin-bottom: 24px here, needed only by the auth shell (this shell stacks
+   the brand mark above the card, see .wrap .brand just below), and because
+   the app shell's .topbar .brand never overrode it, that margin leaked into
+   the topbar and shifted the brand 12px above the nav's centre line at
+   desktop width (Task 5 review round 2 — see .topbar .brand's comment in the
+   app-shell section for the full mechanism). Keep this rule holding only
+   what both shells' brand marks actually have in common; give each shell's
+   own layout its own scoped selector instead of adding it here. */
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--space-2);
   font-weight: 700;
   font-size: 15px;
-  margin-bottom: 24px;
 }
+/* Auth-shell-only: the brand mark sits stacked above the card in
+   layout.html, so only here does it need space below it. */
+.wrap .brand { margin-bottom: var(--space-5); }
 .brand .logo {
   width: 26px;
   height: 26px;
@@ -77,22 +127,60 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 24px;
-  margin-bottom: 16px;
+  padding: var(--space-5);
+  margin-bottom: var(--space-4);
 }
-.card-head { margin-bottom: 12px; }
-.card h1 { font-size: 19px; margin: 0 0 6px; }
-.card h2 { font-size: 15px; margin: 0 0 10px; }
+.card-head { margin-bottom: var(--space-3); }
+.card h1 { font-size: 19px; margin: 0 0 var(--space-2); }
+.card h2 { font-size: 15px; margin: 0 0 var(--space-3); }
 
 .muted { color: var(--text-muted); font-size: 13px; }
 .center { text-align: center; }
 
-.field { margin-bottom: 14px; }
-.field label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 5px; }
+.field { margin-bottom: var(--space-4); }
+.field label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: var(--space-2); }
+/* A field's own margin-bottom above (--space-4, the normal field-to-field
+   gap) is the wrong gap above a submit button — it makes a primary action
+   read as just another field (Task 5 review round 3; the maintainer
+   measured this at 14px before the scale, now --space-4/16px between
+   fields). The pair of rules below owns that one relationship on its own:
+   a .field immediately followed by a .btn (register.html's "Create
+   passkey", account.html's "Add a passkey", login.html's "Send recovery
+   link" — all three are a lone or final .field with a .btn as its very next
+   sibling; no template edit needed). The gap it sets happens to be --space-4
+   too after round 5 pulled it back a step from --space-5 ("close the gap a
+   little more between the button and text box", measured on the rendered
+   page); that coincidence is not something to lean on — the two are separate
+   decisions and only one of them is about field-to-field rhythm.
+
+   The button owns the WHOLE gap, and the field ahead of it contributes
+   nothing. Round 3 instead left the field's --space-4 in place and expected
+   the two margins to collapse to their max. That happens only between
+   block-level boxes in normal block flow, and the base .btn is display:
+   inline-block, which does not participate — so on /account the two margins
+   SUM, and the maintainer measured 16 + 24 = 40px on the rendered page.
+   Whether a given call site collapses turns out to depend on which button
+   modifier it uses: .btn block is display: block, so /login and /register
+   did collapse, while /account's .btn primary did not. Zeroing the field's
+   side removes that dependency entirely — max(0, n) and 0 + n are the same
+   number, so every site lands on exactly the button's margin-top however
+   that button is displayed, and re-tuning the gap is a one-token edit with
+   no per-page arithmetic. It also means a field/button pair inside a flex
+   container (e.g. a future .filterbar submit button) needs no special case:
+   flex items never collapse margins, and this no longer asks them to.
+
+   :has() is deliberate: it targets the field by what FOLLOWS it, so nothing
+   else about .field changes and no template needs a modifier class.
+   register.html's first two fields are followed by another .field, not a
+   .btn, so they keep their --space-4 and the field-to-field gap stays 16px.
+   Baseline-available in every current engine, and this app already requires
+   a WebAuthn-capable browser. */
+.field:has(+ .btn) { margin-bottom: 0; }
+.field + .btn { margin-top: var(--space-4); }
 
 .input {
   width: 100%;
-  padding: 9px 11px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
@@ -103,7 +191,7 @@ a:hover { text-decoration: underline; }
 
 .btn {
   display: inline-block;
-  padding: 9px 14px;
+  padding: var(--space-2) var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
@@ -116,26 +204,282 @@ a:hover { text-decoration: underline; }
 .btn:hover { background: var(--bg); text-decoration: none; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { background: var(--accent-hover); }
-.btn.block { display: block; width: 100%; margin-bottom: 10px; }
+.btn.block { display: block; width: 100%; margin-bottom: var(--space-3); }
 
-.status { font-size: 13px; min-height: 1.2em; margin: 8px 0 0; }
+/* The live-region line under a form's submit button, on all four of its
+   consumers: register.html's #register-status, login.html's
+   #passkey-login-status and #recover-status, and account.html's
+   #passkey-status. Round 5 took its top margin from --space-2 to --space-4
+   ("the error is too close to the button"). One token covers every site
+   even though they do not start from the same place: on /account the button
+   is an inline-block .btn primary contributing no bottom margin, so the
+   status's own top margin is the entire gap (8px before, 16px now), while
+   the other three follow a .btn block whose var(--space-3) bottom margin
+   collapses with it and used to WIN, holding them at 12px. --space-4 is
+   larger than that 12px, so it now decides all four and they render an
+   identical 16px. Keep it at or above .btn.block's bottom margin or the
+   sites will silently diverge again. */
+.status { font-size: 13px; min-height: 1.2em; margin: var(--space-4) 0 0; }
 .status-error { color: var(--danger); }
 
-.passkey-list { list-style: none; margin: 0 0 16px; padding: 0; }
+.passkey-list { list-style: none; margin: 0 0 var(--space-4); padding: 0; }
 .passkey-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 10px 0;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--border);
 }
 .passkey-list li:last-child { border-bottom: none; }
-.passkey-list .actions { display: flex; gap: 6px; }
-.passkey-list button { font-size: 12.5px; padding: 5px 9px; }
+.passkey-list .actions { display: flex; gap: var(--space-2); }
+.passkey-list button { font-size: 12.5px; padding: var(--space-1) var(--space-2); }
 
 /* Inline help under a form field. */
 .small {
   font-size: 0.85rem;
   margin-top: 0.35rem;
+}
+
+/* ---------- App shell ----------
+   Ported from mock.css. Every screen behind a session renders inside this
+   shell (templates/app.html); .wrap/.card above stay for /login and
+   /register, which render inside the narrower layout.html shell instead. */
+
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: 0 var(--space-5); height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 20;
+}
+/* Scoped to .topbar so this rule cannot reach the auth-shell .brand in
+   layout.html (login/register) — mock.css keeps these namespaces separate
+   (.brand for the app shell, .auth-brand for the auth shell); a bare .brand
+   here would silently apply letter-spacing/color drift to the sign-in pages
+   via source order, since both rules would otherwise sit at equal
+   specificity (Task 5 review round 1). .brand .logo above already covers
+   this element too, since .topbar .brand is still a .brand ancestor for the
+   descendant selector.
+   The leak also ran the OTHER direction (round 2): the shared bare .brand
+   rule used to carry margin-bottom: 24px, needed only by the auth shell's
+   stacked layout, and this rule never overrode it. In a flex row with
+   align-items: center, the MARGIN box is what gets centered, not the border
+   box — so a 26px-tall brand with an inherited 24px bottom margin has a
+   50px margin box, centered in the topbar's 56px height, which put the
+   brand's centre 12px above the nav's. Fixed at the source instead of with
+   a margin-bottom: 0 override here: the shared .brand rule above no longer
+   sets margin-bottom at all, and the auth shell's 24px now lives in its own
+   .wrap .brand rule. That way the shared rule can only ever hold what both
+   shells' brand marks genuinely have in common. */
+.topbar .brand {
+  display: flex; align-items: center; gap: var(--space-2);
+  font-weight: 700; font-size: 15px; letter-spacing: .2px;
+  color: var(--text);
+}
+.nav { display: flex; gap: var(--space-1); margin-left: var(--space-2); flex: 1; }
+.nav a {
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+  color: var(--text-muted); font-weight: 500;
+}
+.nav a:hover { background: var(--neutral-soft); text-decoration: none; color: var(--text); }
+.nav a.active { background: var(--accent-soft); color: var(--accent); }
+.nav a.admin::before { content: "⚙ "; opacity: .7; }
+
+.userchip {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.userchip .avatar {
+  width: 26px; height: 26px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  display: grid; place-items: center; font-weight: 700; font-size: 12px;
+}
+.userchip .email { color: var(--text-muted); font-size: 13px; }
+
+.menu-toggle {
+  display: none; margin-left: auto;
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: var(--space-2) var(--space-3); font-size: 16px; cursor: pointer;
+}
+
+.main { flex: 1; width: 100%; max-width: 1080px; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-7); }
+
+/* ---------- Page header ---------- */
+
+.page-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--space-4); margin-bottom: var(--space-5); flex-wrap: wrap;
+}
+.page-head h1 { margin: 0 0 var(--space-1); font-size: 22px; letter-spacing: -.2px; }
+.page-head .sub { color: var(--text-muted); margin: 0; font-size: 13.5px; }
+.breadcrumb { color: var(--text-faint); font-size: 12.5px; margin-bottom: var(--space-3); }
+.breadcrumb a { color: var(--text-muted); }
+
+/* ---------- Cards: grid / stat tiles ----------
+   The base .card/.card-head/.card-body rules stay as they are above; this
+   only adds what the app shell's grids of cards need. */
+
+.card + .card { margin-top: var(--space-4); }
+.grid > .card + .card { margin-top: 0; }
+
+.grid { display: grid; gap: var(--space-4); }
+.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+.stat { padding: var(--space-4); }
+.stat .label { color: var(--text-muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .4px; }
+.stat .value { font-size: 26px; font-weight: 700; margin-top: var(--space-1); letter-spacing: -.5px; }
+.stat .value.small { font-size: 18px; }
+
+/* ---------- Tables ---------- */
+
+.table-wrap { overflow-x: auto; }
+table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.grid-table th {
+  text-align: left; font-weight: 600; color: var(--text-muted);
+  padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border);
+  background: var(--surface-2); white-space: nowrap; font-size: 12.5px;
+  text-transform: uppercase; letter-spacing: .3px;
+}
+.grid-table td { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); vertical-align: middle; }
+.grid-table tr:last-child td { border-bottom: none; }
+.grid-table tbody tr:hover { background: var(--surface-2); }
+.grid-table .primary-cell { font-weight: 600; color: var(--text); }
+.grid-table .muted { color: var(--text-muted); }
+.grid-table td.actions { text-align: right; white-space: nowrap; }
+
+/* ---------- Tags / badges ---------- */
+
+.tag {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: var(--space-1) var(--space-2); border-radius: 999px; font-size: 12px; font-weight: 600;
+  line-height: 1.7; border: 1px solid transparent;
+}
+.tag .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+.tag.ok { background: var(--ok-soft); color: var(--ok); }
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+.tag.danger { background: var(--danger-soft); color: var(--danger); }
+.tag.neutral { background: var(--neutral-soft); color: var(--text-muted); }
+.tag.accent { background: var(--accent-soft); color: var(--accent); }
+.role-badge { text-transform: capitalize; }
+
+/* ---------- Button modifiers ----------
+   The base .btn/.btn.primary/.btn.block rules stay as they are above. */
+
+.btn.danger { background: var(--surface); border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: var(--danger-soft); }
+.btn.solid-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
+.btn.ghost:hover { background: var(--neutral-soft); }
+.btn.sm { padding: var(--space-1) var(--space-3); font-size: 12.5px; }
+.btn-row { display: flex; gap: var(--space-3); flex-wrap: wrap; }
+
+/* ---------- Forms: filter bar, field hint ----------
+   The base .field/.input rules stay as they are above. */
+
+.field .hint { color: var(--text-muted); font-size: 12.5px; margin-top: var(--space-2); }
+
+.filterbar {
+  display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end;
+  padding: var(--space-4); border-bottom: 1px solid var(--border); background: var(--surface-2);
+}
+.filterbar .field { margin: 0; min-width: 150px; }
+.filterbar .field label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
+.filterbar .grow { flex: 1; }
+
+/* ---------- Descriptions (key/value) ---------- */
+
+.kv { display: grid; grid-template-columns: 160px 1fr; }
+.kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.kv > dd { margin: 0; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.kv > dt:last-of-type, .kv > dd:last-of-type { border-bottom: none; }
+
+/* ---------- Copy field ---------- */
+
+.copy {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); max-width: 100%;
+}
+.copy code { color: var(--text); overflow: auto; white-space: nowrap; }
+.copy button {
+  border: 1px solid var(--border-strong); background: var(--surface);
+  border-radius: 6px; padding: var(--space-1) var(--space-2); font-size: 12px; cursor: pointer; color: var(--text-muted);
+  flex-shrink: 0;
+}
+.copy button:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- Callouts / banners ---------- */
+
+.callout {
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); font-size: 13px;
+  background: var(--surface-2);
+}
+.callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
+.callout strong { display: block; margin-bottom: var(--space-1); }
+
+/* ---------- Danger zone ---------- */
+
+.danger-zone { border-color: var(--danger); }
+.danger-zone .card-head { border-bottom-color: var(--danger-soft); }
+.danger-zone .card-head h2 { color: var(--danger); }
+.danger-item {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
+  padding: var(--space-4); border-bottom: 1px solid var(--border);
+}
+.danger-item:last-child { border-bottom: none; }
+.danger-item .meta strong { display: block; }
+.danger-item .meta span { color: var(--text-muted); font-size: 12.5px; }
+
+/* ---------- Empty state ---------- */
+
+.empty { text-align: center; padding: var(--space-7) var(--space-5); }
+.empty .icon { font-size: 40px; opacity: .5; }
+.empty h3 { margin: var(--space-3) 0 var(--space-1); }
+.empty p { color: var(--text-muted); margin: 0 0 var(--space-4); }
+
+/* ---------- Pagination ---------- */
+
+.pager {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px;
+}
+.pager .pages { display: flex; gap: var(--space-2); }
+
+/* ---------- Utilities ---------- */
+
+.stack-sm > * + * { margin-top: var(--space-3); }
+.nowrap { white-space: nowrap; }
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 780px) {
+  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; }
+  .kv > dt { padding-bottom: 0; border-bottom: none; }
+  .kv > dd { padding-top: var(--space-1); }
+  .nav { display: none; position: absolute; top: 56px; left: 0; right: 0;
+         flex-direction: column; background: var(--surface); border-bottom: 1px solid var(--border); padding: var(--space-2); }
+  .nav.open { display: flex; }
+  .menu-toggle { display: inline-block; }
+  .userchip .email { display: none; }
+  .page-head { flex-direction: column; }
+  /* Collapse wide tables into stacked cards */
+  .grid-table.responsive thead { display: none; }
+  .grid-table.responsive, .grid-table.responsive tbody,
+  .grid-table.responsive tr, .grid-table.responsive td { display: block; width: 100%; }
+  .grid-table.responsive tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: var(--space-3); }
+  .grid-table.responsive td { border: none; padding: var(--space-2) var(--space-4); }
+  .grid-table.responsive td::before {
+    content: attr(data-label); display: block; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .3px; color: var(--text-muted); margin-bottom: var(--space-1);
+  }
+  .grid-table.responsive td.actions { text-align: left; }
 }

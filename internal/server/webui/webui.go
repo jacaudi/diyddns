@@ -1,8 +1,9 @@
-// Package webui serves the minimal server-rendered passkey login, register,
-// and account pages: three html/template pages plus one vendored JS ceremony
-// helper (static/passkey.js), embedded via go:embed and parsed once in New.
-// It is a self-contained, additive package — a later task mounts New's
-// handler onto the server's mux; this package does not touch server.go.
+// Package webui serves the server-rendered passkey login/register pages and
+// the app shell every session-guarded screen renders inside. Templates and
+// static assets are embedded with go:embed and parsed once in New. The
+// auth-shell pages (login, register) use the narrow layout.html shell; every
+// screen behind a session uses app.html's topbar-and-nav shell plus the
+// shared partials in partials.html.
 package webui
 
 import (
@@ -10,9 +11,12 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/version"
 )
 
 //go:embed templates/*.html
@@ -21,16 +25,22 @@ var templateFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// pageNames lists every page New parses at construction. Adding a fourth
-// page is an additive change — a new templates/<name>.html plus a
-// mux.HandleFunc line in New — the other pages are untouched (no-wall).
-var pageNames = []string{"login", "register", "account"}
-
-// Deps are the dependencies the web UI handler needs.
+// Deps are the dependencies the web UI handler needs. The service values are the
+// SAME instances the JSON API is built with (see internal/server/server.go): the
+// two adapters share one service layer, which is the whole point of rendering
+// HTML here rather than calling the JSON API over loopback.
 type Deps struct {
 	Sessions *auth.SessionManager
 	Cfg      config.Server
 	Log      *slog.Logger
+
+	Devices *service.DeviceService
+	Enroll  *service.EnrollmentService
+	Admin   *service.AdminService
+	Grants  *service.GrantService
+
+	Info      version.Info
+	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
 }
 
 // handler holds the parsed page templates and deps used to render them.
@@ -39,59 +49,85 @@ type handler struct {
 	deps  Deps
 }
 
-// New builds the server-rendered web UI: GET /login, /register, /account
-// (session-guarded), and static assets under /static/. Every page template
-// (layout.html + the page's own content block) is parsed once here, not
-// per-request.
-func New(deps Deps) http.Handler {
-	pages := make(map[string]*template.Template, len(pageNames))
-	for _, name := range pageNames {
-		// Each page gets its own parse tree (layout.html + one page file)
-		// rather than one combined tree over templates/*.html: every page
-		// defines a "content" block, and html/template would let the last
-		// parsed file's "content" definition silently win if all files
-		// shared one tree.
-		pages[name] = template.Must(template.ParseFS(templateFS, "templates/layout.html", "templates/"+name+".html"))
+// route pairs a ServeMux pattern with the handler that serves it. The field is
+// http.Handler rather than http.HandlerFunc because /static/ is served by
+// http.FileServerFS.
+type route struct {
+	pattern string
+	handler http.Handler
+}
+
+// New builds the server-rendered web UI and returns it together with every
+// pattern it serves. The caller must forward exactly these patterns.
+//
+// The returned slice and the mux are built from one table, which is what keeps
+// them from disagreeing: a route added here is forwarded automatically. When
+// they were two separate lists, GET / was registered on this mux but missing
+// from the forwarded list, so it 404'd in a browser while the unit tests — which
+// drive this mux directly — stayed green.
+//
+// "GET /{$}" matches ONLY "/". A bare "/" is a prefix match in Go's ServeMux and
+// would swallow every unmatched URL, including /api and /agent.
+func New(deps Deps) (http.Handler, []string) {
+	h := &handler{pages: parsePages(), deps: deps}
+
+	routes := []route{
+		{"GET /{$}", http.HandlerFunc(h.handleRoot)},
+		{"GET /login", http.HandlerFunc(h.handleLogin)},
+		{"GET /register", http.HandlerFunc(h.handleRegister)},
+		{"GET /account", h.requireSession(h.handleAccount)},
+		{"GET /devices", h.requireSession(h.handleDevices)},
+		{"GET /devices/new", h.requireSession(h.handleDeviceNewForm)},
+		{"POST /devices/new", h.requirePost(h.handleDeviceNewCreate)},
+		{"GET /devices/{id}", h.requireSession(h.handleDeviceDetail)},
+		{"GET /devices/{id}/history", h.requireSession(h.handleDeviceHistory)},
+		{"POST /devices/{id}/rename", h.requirePost(h.handleDeviceRename)},
+		{"POST /devices/{id}/enabled", h.requirePost(h.handleDeviceSetEnabled)},
+		{"POST /devices/{id}/rotate-secret", h.requirePost(h.handleDeviceRotate)},
+		{"POST /devices/{id}/delete", h.requirePost(h.handleDeviceDelete)},
+		{"GET /admin/users", h.requireAdmin(h.handleAdminUsers)},
+		{"POST /admin/users/{id}/enabled", h.requirePostAdmin(h.handleAdminUserSetEnabled)},
+		{"GET /admin/users/new", h.requireAdmin(h.handleAdminUserNewForm)},
+		{"POST /admin/users/new", h.requirePostAdmin(h.handleAdminUserInvite)},
+		{"GET /admin/users/{id}", h.requireAdmin(h.handleAdminUserEdit)},
+		{"POST /admin/users/{id}/update", h.requirePostAdmin(h.handleAdminUserUpdate)},
+		{"POST /admin/users/{id}/delete", h.requirePostAdmin(h.handleAdminUserDelete)},
+		{"POST /admin/users/{id}/recovery", h.requirePostAdmin(h.handleAdminUserRecovery)},
+		{"GET /admin/audit", h.requireAdmin(h.handleAdminAudit)},
+		{"GET /admin/server", h.requireAdmin(h.handleAdminServer)},
+		{"GET /static/", http.FileServerFS(staticFS)},
 	}
-	h := &handler{pages: pages, deps: deps}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(patternRoot, h.handleRoot)
-	mux.HandleFunc(patternLogin, h.handleLogin)
-	mux.HandleFunc(patternRegister, h.handleRegister)
-	mux.HandleFunc(patternAccount, h.requireSession(h.handleAccount))
-	mux.Handle(patternStatic, http.FileServerFS(staticFS))
-	return mux
+	patterns := make([]string, 0, len(routes))
+	for _, r := range routes {
+		mux.Handle(r.pattern, r.handler)
+		patterns = append(patterns, r.pattern)
+	}
+	return mux, patterns
 }
 
-// The ServeMux patterns this package serves. patternRoot uses "{$}" so it
-// matches ONLY "/" — a bare "/" is a prefix match in Go's ServeMux and would
-// swallow every unmatched URL, including /api and /agent.
-const (
-	patternRoot     = "GET /{$}"
-	patternLogin    = "GET /login"
-	patternRegister = "GET /register"
-	patternAccount  = "GET /account"
-	patternStatic   = "GET /static/"
-)
-
-// Patterns returns every pattern New's handler serves, so the server that
-// mounts it can forward exactly these and no more. Without this the two route
-// lists live in separate files and drift: a route added here but not
-// forwarded there is simply unreachable, which is how GET / kept 404ing after
-// it was added.
-func Patterns() []string {
-	return []string{patternRoot, patternLogin, patternRegister, patternAccount, patternStatic}
+// parsePages parses every page template against its shell, once, at
+// construction. Each page gets its own parse tree rather than one combined tree
+// over templates/*.html: every page defines a "content" block, and
+// html/template would let the last-parsed definition silently win.
+func parsePages() map[string]*template.Template {
+	pages := make(map[string]*template.Template, len(authPages)+len(appPages))
+	for _, name := range authPages {
+		pages[name] = template.Must(template.ParseFS(templateFS,
+			"templates/layout.html", "templates/"+name+".html"))
+	}
+	for _, name := range appPages {
+		pages[name] = template.Must(template.ParseFS(templateFS,
+			"templates/app.html", "templates/partials.html", "templates/"+name+".html"))
+	}
+	return pages
 }
 
-// handleRoot sends the bare base URL somewhere useful instead of 404ing.
-// There is no dashboard yet, so /account is the closest thing to a home
-// page; requireSession redirects on to /login when there is no session, so
-// this needs no session check of its own.
-//
-// The "/{$}" pattern matches ONLY the root path — a bare "/" in Go's
-// ServeMux is a catch-all prefix and would swallow every unmatched URL,
-// turning genuine 404s into redirects.
-func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
-}
+// authPages render in the narrow layout.html shell: no navigation, because
+// there is no session yet.
+var authPages = []string{"login", "register"}
+
+// appPages render in the app.html shell with the topbar and navigation. Adding
+// a screen is one entry here plus one templates/<name>.html file.
+var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-audit", "admin-server", "error"}

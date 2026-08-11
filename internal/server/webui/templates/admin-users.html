@@ -1,0 +1,44 @@
+{{define "content"}}
+<div class="grid cols-3" style="margin-bottom:var(--space-5)">
+  <div class="card stat"><div class="label">Users</div><div class="value">{{.UserCount}}</div></div>
+  <div class="card stat"><div class="label">Devices</div><div class="value">{{.DeviceCount}}</div></div>
+  <div class="card stat"><div class="label">Disabled</div><div class="value">{{.DisabledCount}}</div></div>
+</div>
+
+<div class="page-head">
+  <div><h1>Users</h1><p class="sub">Manage accounts, roles, and access</p></div>
+  <a class="btn primary" href="/admin/users/new">+ Invite user</a>
+</div>
+
+{{template "errorBanner" .Error}}
+
+<div class="card">
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr><th>Email</th><th>Role</th><th>State</th><th>Auth</th><th></th></tr></thead>
+      <tbody>
+        {{range .Users}}
+        <tr>
+          <td data-label="Email"><span class="primary-cell">{{.Email}}</span>
+            {{if .IsSelf}}<span class="muted">(you)</span>{{end}}</td>
+          <td data-label="Role"><span class="tag {{if eq .Role "admin"}}accent{{else}}neutral{{end}} role-badge">{{.Role}}</span></td>
+          <td data-label="State">{{if .Disabled}}<span class="tag danger">Disabled</span>{{else}}<span class="tag ok">Active</span>{{end}}</td>
+          <td data-label="Auth"><span class="muted">{{.Auth}}</span></td>
+          <td class="actions">
+            <form method="post" action="/admin/users/{{.ID}}/enabled" style="display:inline">
+              <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+              <input type="hidden" name="disabled" value="{{if .Disabled}}false{{else}}true{{end}}">
+              <button class="btn sm" type="submit"
+                {{if or .IsSelf .LastAdmin}}disabled title="The server must keep at least one enabled admin, and you cannot disable your own account."{{end}}>
+                {{if .Disabled}}Enable{{else}}Disable{{end}}
+              </button>
+            </form>
+            <a class="btn sm" href="/admin/users/{{.ID}}">Edit</a>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}

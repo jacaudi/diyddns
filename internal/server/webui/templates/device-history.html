@@ -1,0 +1,41 @@
+{{define "content"}}
+<div class="breadcrumb">
+  <a href="/devices">Devices</a> / <a href="/devices/{{.Device.ID}}">{{.Device.Label}}</a> / History
+</div>
+<div class="page-head"><div>
+  <h1>IP history — {{.Device.Label}}</h1>
+  <p class="sub">Newest first. Times are UTC.</p>
+</div></div>
+
+<div class="card">
+  {{if .Rows}}
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr><th>When</th><th>IPv4</th><th>IPv6</th><th>Client version</th></tr></thead>
+      <tbody>
+        {{range .Rows}}
+        <tr>
+          <td data-label="When" class="muted nowrap" title="{{.ObservedAbs}}">{{.ObservedRel}}</td>
+          <td data-label="IPv4">{{if .IPv4}}<code>{{.IPv4}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="IPv6">{{if .IPv6}}<code class="muted">{{.IPv6}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="Client version" class="muted">{{if .ClientVersion}}{{.ClientVersion}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{template "pager" .Pager}}
+  {{else if .HasCursor}}
+  <div class="empty">
+    <h3>No more history</h3>
+    <p>You have reached the end of this device's records.</p>
+    <a class="btn" href="/devices/{{.Device.ID}}/history">‹ First page</a>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h3>No check-ins recorded yet</h3>
+    <p>This device has not reported an IP address yet. It appears here after its first check-in.</p>
+  </div>
+  {{end}}
+</div>
+{{end}}

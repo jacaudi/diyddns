@@ -3,7 +3,16 @@
 A self-hosted, multi-user public-IP tracker. The client agent discovers its
 own public IP from a quorum of independent lookup providers and reports the
 result to a central server, which stores per-device IP history in SQLite and
-exposes both an API and a web UI.
+exposes both a JSON API and a server-rendered web UI.
+
+The web UI is plain Go: `html/template` pages served by the standard library,
+no Node, no bundler, and no client-side framework. `/login` and `/register`
+handle passkey sign-in and the passkey-based first-run/invite/recovery
+ceremonies; `GET /` redirects to `/devices` or `/login` depending on session
+state. Signed-in screens are `/account`, the devices list and its "new
+enrollment code" form, a device's detail and history pages, and — for
+admins — the users list with invite/edit/recovery, the audit log, and a
+read-only server-info page.
 
 DIYDDNS is **not** an authoritative DNS server and does not push records to
 third-party DNS providers. It is an IP registry: clients check in, the server

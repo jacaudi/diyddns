@@ -1,0 +1,150 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/devices">Devices</a> / {{.Device.Label}}</div>
+
+{{if .Secret}}
+<div class="card" style="max-width:720px">
+  <div class="card-head"><h2>New secret — shown once</h2></div>
+  <div class="card-body">
+    <div class="callout warn">
+      <strong>⚠ Shown once</strong>
+      This secret is displayed a single time and is not recoverable.
+      <strong>Reloading this page rotates the secret again.</strong>
+    </div>
+    {{template "errorBanner" .BaseURLWarning}}
+    <div class="field">
+      <label>Replace your credentials file, at file mode 0600</label>
+      {{template "copyValue" .Credentials}}
+      <div class="hint">
+        Default location — Linux <code>~/.config/diyddns/credentials.json</code>,
+        macOS <code>~/Library/Application Support/diyddns/credentials.json</code>,
+        Windows <code>%AppData%\diyddns\credentials.json</code>
+        — or whatever path you passed to <code>--credentials-file</code>.
+        Then restart <code>diyddns-client</code>.
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{template "errorBanner" .Error}}
+
+<div class="page-head">
+  <div>
+    <h1>{{.Device.Label}} {{template "statusTag" .Status}}</h1>
+    <p class="sub">Last check-in <span title="{{.LastSeenAbs}}">{{.LastSeenRel}}</span> · created {{.CreatedAbs}}</p>
+  </div>
+  <div class="btn-row"><a class="btn" href="/devices/{{.Device.ID}}/history">View full history</a></div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="card-head"><h2>Current addresses</h2></div>
+    <div class="card-body stack-sm">
+      <div><div class="muted">IPv4</div>
+        {{if .Device.CurrentIPv4}}{{template "copyValue" .Device.CurrentIPv4}}{{else}}<span class="muted">—</span>{{end}}</div>
+      <div><div class="muted">IPv6</div>
+        {{if .Device.CurrentIPv6}}{{template "copyValue" .Device.CurrentIPv6}}{{else}}<span class="muted">—</span>{{end}}</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>Metadata</h2></div>
+    <div class="card-body">
+      <dl class="kv">
+        <dt>Device ID</dt><dd>{{template "copyValue" .Device.ID}}</dd>
+        <dt>Label</dt><dd>{{.Device.Label}}</dd>
+        <dt>Owner</dt><dd>{{.Owner}}</dd>
+        <dt>Hostname</dt><dd>{{if .Device.Hostname}}{{.Device.Hostname}}{{else}}<span class="muted">—</span>{{end}}</dd>
+        <dt>OS</dt><dd>{{if .Device.OS}}{{.Device.OS}}{{else}}<span class="muted">—</span>{{end}}</dd>
+        <dt>Client version</dt><dd>{{if .Device.ClientVersion}}{{.Device.ClientVersion}}{{else}}<span class="muted">—</span>{{end}}</dd>
+        <dt>State</dt><dd>{{template "statusTag" .Status}}</dd>
+      </dl>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Recent IP history</h2>
+    <a class="btn sm" href="/devices/{{.Device.ID}}/history">Full history ›</a></div>
+  {{if .History}}
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr><th>When</th><th>IPv4</th><th>IPv6</th><th>Client version</th></tr></thead>
+      <tbody>
+        {{range .History}}
+        <tr>
+          <td data-label="When" class="muted nowrap" title="{{.ObservedAbs}}">{{.ObservedRel}}</td>
+          <td data-label="IPv4">{{if .IPv4}}<code>{{.IPv4}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="IPv6">{{if .IPv6}}<code class="muted">{{.IPv6}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="Client version" class="muted">{{if .ClientVersion}}{{.ClientVersion}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}<div class="card-body"><p class="muted">No check-ins recorded yet.</p></div>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Rename</h2></div>
+  <div class="card-body">
+    <form method="post" action="/devices/{{.Device.ID}}/rename">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="label">Device label</label>
+        <input class="input" id="label" name="label" value="{{.Device.Label}}" required>
+      </div>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card danger-zone">
+  <div class="card-head"><h2>Danger zone</h2></div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>{{if .Device.Disabled}}Enable{{else}}Disable{{end}} device</strong>
+      <span>A disabled device is rejected at check-in but keeps its history.</span>
+    </div>
+    <form method="post" action="/devices/{{.Device.ID}}/enabled">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="disabled" value="{{if .Device.Disabled}}false{{else}}true{{end}}">
+      <button class="btn danger" type="submit">{{if .Device.Disabled}}Enable{{else}}Disable{{end}}</button>
+    </form>
+  </div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Rotate client secret</strong>
+      <span>Invalidates the current secret. The running client stops authenticating until you
+        write the new secret to its credentials file and restart it.</span>
+    </div>
+    <form method="post" action="/devices/{{.Device.ID}}/rotate-secret"
+          data-confirm="Rotate the secret for {{.Device.Label}}? The running client stops authenticating until reconfigured.">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+        <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
+      </div>
+      <button class="btn danger" type="submit">Rotate secret</button>
+    </form>
+  </div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Delete device</strong>
+      <span>Permanently removes the device and its IP history. Cannot be undone.</span>
+    </div>
+    <form method="post" action="/devices/{{.Device.ID}}/delete"
+          data-confirm="Delete {{.Device.Label}} and its history? This cannot be undone.">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+        <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+      </div>
+      <button class="btn solid-danger" type="submit">Delete</button>
+    </form>
+  </div>
+</div>
+{{end}}

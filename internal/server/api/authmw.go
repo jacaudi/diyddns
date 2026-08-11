@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"io"
 	"net/http"
 	"time"
@@ -110,8 +109,7 @@ func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName string)
 func csrfMiddleware(api huma.API) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		sess := SessionFrom(ctx.Context())
-		got := ctx.Header("X-CSRF-Token")
-		if sess.CSRFToken == "" || subtle.ConstantTimeCompare([]byte(got), []byte(sess.CSRFToken)) != 1 {
+		if !auth.ValidCSRF(sess, ctx.Header("X-CSRF-Token")) {
 			_ = huma.WriteErr(api, ctx, http.StatusForbidden, "invalid csrf token")
 			return
 		}

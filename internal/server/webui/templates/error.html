@@ -1,0 +1,9 @@
+{{define "content"}}
+<div class="page-head"><div><h1>{{.Status}}</h1><p class="sub">{{.Message}}</p></div></div>
+<div class="card"><div class="card-body">
+  <div class="btn-row">
+    {{if .LinkURL}}<a class="btn primary" href="{{.LinkURL}}">{{.LinkText}}</a>{{end}}
+    <a class="btn" href="/devices">Back to devices</a>
+  </div>
+</div></div>
+{{end}}
