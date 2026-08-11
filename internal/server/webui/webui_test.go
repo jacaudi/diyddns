@@ -1152,6 +1152,50 @@ func TestDeviceHistory_RendersRows(t *testing.T) {
 	}
 }
 
+// TestDeviceHistory_NextLinkPointsAtTheSameDevice is the device-history half of
+// the pager-link guard (see TestAdminAudit_NextLinkPreservesFilters). This
+// screen has no filters, so the property is narrower: the Next link stays on
+// this device's history and carries a cursor the handler will accept.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceHistory_NextLinkPointsAtTheSameDevice(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "pager@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+
+	// A full page, since HistoryPage.NextCursor is set only when the page is
+	// full (store/ip_history.go:192-197).
+	for range historyPageSize {
+		seedHistory(t, st, dev.ID, "203.0.113.7", "", "diyddns-client/1.4.0")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID+"/history", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	next, err := url.Parse(nextPagerURL(t, rec.Body.String()))
+	if err != nil {
+		t.Fatalf("parse Next URL: %v", err)
+	}
+	if want := "/devices/" + dev.ID + "/history"; next.Path != want {
+		t.Errorf("Next path = %q, want %q", next.Path, want)
+	}
+	if next.Query().Get("cursor") == "" {
+		t.Fatal("Next link carries no cursor")
+	}
+
+	follow := httptest.NewRequest(http.MethodGet, next.String(), nil)
+	follow.AddCookie(cookie)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, follow)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("following the Next link = %d, want 200 — the cursor did not survive escaping", rec2.Code)
+	}
+}
+
 // TestDeviceMutations_RequireCSRF asserts every device mutation is actually
 // wrapped by requirePost. Testing the wrapper in isolation proves the wrapper
 // works; it does not prove each route uses it.
@@ -2081,6 +2125,24 @@ func seedAudit(t *testing.T, st *store.Store, actorID, eventType, targetType, ta
 // the element carries an attribute, and every filter assertion downstream
 // would then be asserting against an empty string — passing an absence check
 // for the wrong reason.
+// nextPagerURL returns the pager's "Next ›" target, un-escaped.
+//
+// It EXTRACTS the rendered href rather than reconstructing the expected one —
+// reconstructing would re-derive the very code under test. Un-escaping is not
+// optional: html/template escapes an attribute's & to &amp; and + to &#43;
+// (url.Values.Encode writes a space as +), so a raw string comparison against
+// the page fails for reasons that have nothing to do with pagination. Callers
+// then assert per-parameter through url.Parse, which is also immune to
+// Encode's alphabetical ordering.
+func nextPagerURL(t *testing.T, body string) string {
+	t.Helper()
+	m := regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>Next ›</a>`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no Next link rendered; the page needs a full page of rows to produce one:\n%s", body)
+	}
+	return html.UnescapeString(m[1])
+}
+
 func tableBody(t *testing.T, body string) string {
 	t.Helper()
 	start := strings.Index(body, "<tbody")
@@ -2184,6 +2246,73 @@ func TestAdminAudit_BadCursorIs400(t *testing.T) {
 	// it must drop only the cursor — an admin sent back to an unfiltered audit
 	// log has lost the query they were reading.
 	assertErrorPageLinksTo(t, rec.Body.String(), "/admin/audit?event_type=device.deleted")
+}
+
+// TestAdminAudit_NextLinkPreservesFilters asserts the rendered Next link keeps
+// every filter parameter (design §6.7). A regression that dropped one would
+// silently WIDEN an admin's query on page 2 — showing them events they had
+// filtered out, under a heading that still says they are filtered — and no
+// other test inspects a rendered pager link at all.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminAudit_NextLinkPreservesFilters(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+
+	// Exactly one full page of MATCHING rows: ListPaginated returns a
+	// NextCursor only when len(rows) == limit (store/audit_log.go:203-207).
+	for range auditPageSize {
+		seedAudit(t, st, admin.ID, "device.deleted", "device", "dev-1")
+	}
+	seedAudit(t, st, admin.ID, "user.created", "user", "someone") // outside the filter
+
+	const query = "event_type=device.deleted&actor=admin@example.com&from=2020-01-01&to=2099-12-31"
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit?"+query, nil)
+	cookie := signIn(t, deps, admin)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	next, err := url.Parse(nextPagerURL(t, rec.Body.String()))
+	if err != nil {
+		t.Fatalf("parse Next URL: %v", err)
+	}
+	if next.Path != "/admin/audit" {
+		t.Errorf("Next path = %q, want /admin/audit", next.Path)
+	}
+	q := next.Query()
+	for key, want := range map[string]string{
+		"event_type": "device.deleted",
+		"actor":      "admin@example.com",
+		"from":       "2020-01-01",
+		"to":         "2099-12-31",
+	} {
+		if got := q.Get(key); got != want {
+			t.Errorf("Next link %s = %q, want %q — page 2 would not be the query the admin was reading", key, got, want)
+		}
+	}
+	if q.Get("cursor") == "" {
+		t.Fatal("Next link carries no cursor")
+	}
+
+	// Follow it. This is what proves the cursor survived url.Values.Encode and
+	// the template's attribute escaping: a mis-escaped cursor answers 400.
+	follow := httptest.NewRequest(http.MethodGet, next.String(), nil)
+	follow.AddCookie(cookie)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, follow)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("following the Next link = %d, want 200", rec2.Code)
+	}
+	// Page 2 holds only the row outside the filter, so a preserved filter shows
+	// an empty table and a dropped one leaks "user.created" into it.
+	if rows := tableBody(t, rec2.Body.String()); strings.Contains(rows, "user.created") {
+		t.Error("an event outside the filter appeared on page 2")
+	}
 }
 
 // TestAdminServer_ShowsInfoAndNoSecrets asserts the three secrets this page
