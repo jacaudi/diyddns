@@ -41,11 +41,14 @@ func (h *handler) newAppData(usr store.User, sess store.Session, title, nav stri
 	}
 }
 
-// errorData is error.html's template data.
+// errorData is error.html's template data. LinkText/LinkURL are the optional
+// caller-supplied action; the page always offers "Back to devices" beside it.
 type errorData struct {
 	appData
-	Status  int
-	Message string
+	Status   int
+	Message  string
+	LinkText string
+	LinkURL  string
 }
 
 // renderError renders the shared error page. Callers pass a message safe to show
@@ -54,10 +57,20 @@ type errorData struct {
 // The zero store.User is acceptable — the shell simply renders an empty user
 // chip — so guards can call this before a user is resolved.
 func (h *handler) renderError(w http.ResponseWriter, r *http.Request, usr store.User, status int, message string) {
+	h.renderErrorLink(w, r, usr, status, message, "", "")
+}
+
+// renderErrorLink is renderError with an extra action, for the failure whose
+// message names somewhere specific to go. A message that says "start from the
+// first page" while the page only offers "Back to devices" is telling the user
+// to go somewhere it does not take them.
+func (h *handler) renderErrorLink(w http.ResponseWriter, r *http.Request, usr store.User, status int, message, linkText, linkURL string) {
 	h.renderStatus(w, r, status, "error", errorData{
-		appData: h.newAppData(usr, store.Session{}, http.StatusText(status), ""),
-		Status:  status,
-		Message: message,
+		appData:  h.newAppData(usr, store.Session{}, http.StatusText(status), ""),
+		Status:   status,
+		Message:  message,
+		LinkText: linkText,
+		LinkURL:  linkURL,
 	})
 }
 

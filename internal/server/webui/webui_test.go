@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1098,6 +1099,33 @@ func TestDeviceHistory_BadCursorIs400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 — a pasted or truncated URL must not 500", rec.Code)
 	}
+	// Design §4.4 mandates a "start from the first page" LINK on this page, not
+	// just those words in the prose. Without it a non-admin's only escape from
+	// their own device's history is "Back to devices" — the page tells them to
+	// go somewhere it does not take them.
+	assertErrorPageLinksTo(t, rec.Body.String(), "/devices/"+dev.ID+"/history")
+}
+
+// assertErrorPageLinksTo fails unless the rendered error page offers an anchor
+// pointing at want. It compares un-escaped hrefs because html/template escapes
+// & and + inside an attribute (see nextPagerURL).
+func assertErrorPageLinksTo(t *testing.T, body, want string) {
+	t.Helper()
+	for _, href := range hrefs(body) {
+		if href == want {
+			return
+		}
+	}
+	t.Errorf("error page offers no link to %q; hrefs = %v", want, hrefs(body))
+}
+
+// hrefs returns every anchor target on a rendered page, un-escaped.
+func hrefs(body string) []string {
+	var out []string
+	for _, m := range regexp.MustCompile(`<a[^>]+href="([^"]*)"`).FindAllStringSubmatch(body, -1) {
+		out = append(out, html.UnescapeString(m[1]))
+	}
+	return out
 }
 
 // TestDeviceHistory_RendersRows asserts a device with history renders its
@@ -2144,7 +2172,7 @@ func TestAdminAudit_BadCursorIs400(t *testing.T) {
 	h, _ := New(deps)
 	admin := seedUser(t, st, "admin@example.com", "admin")
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/audit?cursor=garbage", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit?event_type=device.deleted&cursor=garbage", nil)
 	req.AddCookie(signIn(t, deps, admin))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -2152,6 +2180,10 @@ func TestAdminAudit_BadCursorIs400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
+	// Design §4.4: the page must offer a "start from the first page" link, and
+	// it must drop only the cursor — an admin sent back to an unfiltered audit
+	// log has lost the query they were reading.
+	assertErrorPageLinksTo(t, rec.Body.String(), "/admin/audit?event_type=device.deleted")
 }
 
 // TestAdminServer_ShowsInfoAndNoSecrets asserts the three secrets this page

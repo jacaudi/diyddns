@@ -465,8 +465,7 @@ func (h *handler) handleAdminAudit(w http.ResponseWriter, r *http.Request, usr s
 		h.deps.Log.LogAttrs(r.Context(), slog.LevelError, "webui: list audit failed",
 			slog.Bool("had_cursor", data.HasCursor), slog.Any("error", err))
 		if data.HasCursor {
-			h.renderError(w, r, usr, http.StatusBadRequest,
-				"That page link is no longer valid. Start from the first page.")
+			h.renderBadCursor(w, r, usr)
 			return
 		}
 		h.renderError(w, r, usr, http.StatusInternalServerError, "Something went wrong. Please try again.")

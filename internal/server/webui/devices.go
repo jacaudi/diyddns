@@ -433,6 +433,30 @@ type pager struct {
 	RowCount int
 }
 
+// renderBadCursor renders the 400 both paginated screens answer for a malformed
+// or stale ?cursor= (design §4.4). The message and its companion link are
+// single-sourced here: the copy names a destination, so the two must change
+// together or the page tells the user to go somewhere it does not take them.
+func (h *handler) renderBadCursor(w http.ResponseWriter, r *http.Request, usr store.User) {
+	h.renderErrorLink(w, r, usr, http.StatusBadRequest,
+		"That page link is no longer valid. Start from the first page.",
+		"Start from the first page", firstPageURL(r))
+}
+
+// firstPageURL is the requested URL with only the cursor dropped, so restarting
+// keeps whatever filters the user was reading — an admin sent back to an
+// unfiltered audit log has lost their query. Derived from the request rather
+// than rebuilt per screen, so a new filter is preserved without anyone
+// remembering to add it here.
+func firstPageURL(r *http.Request) string {
+	q := r.URL.Query()
+	q.Del("cursor")
+	if encoded := q.Encode(); encoded != "" {
+		return r.URL.Path + "?" + encoded
+	}
+	return r.URL.Path
+}
+
 // deviceHistoryData is device-history.html's template data.
 type deviceHistoryData struct {
 	appData
@@ -461,8 +485,7 @@ func (h *handler) handleDeviceHistory(w http.ResponseWriter, r *http.Request, us
 		h.deps.Log.LogAttrs(r.Context(), slog.LevelError, "webui: list device history failed",
 			slog.String("device_id", dev.ID), slog.Bool("had_cursor", cursor != ""), slog.Any("error", err))
 		if cursor != "" {
-			h.renderError(w, r, usr, http.StatusBadRequest,
-				"That page link is no longer valid. Start from the first page.")
+			h.renderBadCursor(w, r, usr)
 			return
 		}
 		h.renderError(w, r, usr, http.StatusInternalServerError, "Something went wrong. Please try again.")
