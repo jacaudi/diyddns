@@ -2154,10 +2154,26 @@ func TestAdminAudit_BadCursorIs400(t *testing.T) {
 	}
 }
 
+// TestAdminServer_ShowsInfoAndNoSecrets asserts the three secrets this page
+// sits next to never reach the rendered body.
+//
+// OIDC is ENABLED here on purpose. oidcNote returns "" immediately when
+// auth.oidc.enabled is false (admin.go), so with OIDC left off the
+// client-secret assertion is satisfied by a short-circuit rather than by
+// omission at the source: the whole formatting branch — the single most likely
+// place the secret would ever be added — never executes, and the check passes
+// against code that leaks. Enabling OIDC (and asserting the note actually
+// rendered, below) is what makes the absence load-bearing.
+//
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
 func TestAdminServer_ShowsInfoAndNoSecrets(t *testing.T) {
 	deps, st := testDeps(t)
+	deps.Cfg.Auth.OIDC.Enabled = true
+	deps.Cfg.Auth.OIDC.Issuer = "https://idp.example.com"
+	deps.Cfg.Auth.OIDC.ClientID = "diyddns-web"
+	deps.Cfg.Auth.OIDC.Scopes = []string{"openid", "email"}
 	deps.Cfg.Auth.OIDC.ClientSecret = "super-secret-value"
+	deps.Cfg.Auth.HMAC.SecretKey = "hmac-secret-value"
 	deps.Cfg.Email.Password = "smtp-secret-value"
 	h, _ := New(deps)
 
@@ -2172,12 +2188,17 @@ func TestAdminServer_ShowsInfoAndNoSecrets(t *testing.T) {
 	}
 	body := rec.Body.String()
 
-	for _, secret := range []string{"super-secret-value", "smtp-secret-value"} {
+	for _, secret := range []string{"super-secret-value", "hmac-secret-value", "smtp-secret-value"} {
 		if strings.Contains(body, secret) {
 			t.Errorf("a secret leaked onto /admin/server: %q", secret)
 		}
 	}
-	for _, want := range []string{"Uptime", "Go runtime", "15m0s"} { // 15m0s = staleAfter
+	// Positive companions. An absence check alone is satisfied by a 500 or an
+	// empty body, and the OIDC absence specifically is satisfied by oidcNote
+	// short-circuiting — so assert the page rendered its content AND that the
+	// OIDC branch the secret would live in actually ran.
+	for _, want := range []string{"Uptime", "Go runtime", "15m0s", // 15m0s = staleAfter
+		"https://idp.example.com", "diyddns-web", "openid email"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
 		}
