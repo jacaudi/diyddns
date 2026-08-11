@@ -116,8 +116,18 @@ func deviceSummary(total int, counts map[Status]int) string {
 // logAndFail logs an unexpected service error and renders a 500. The detail goes
 // to the log; the page gets a generic message, so internals never leak to a user.
 func (h *handler) logAndFail(w http.ResponseWriter, r *http.Request, usr store.User, action string, err error) {
+	h.logAndFailMessage(w, r, usr, action, err, "Something went wrong. Please try again.")
+}
+
+// logAndFailMessage is logAndFail with caller-supplied copy, for the failures
+// where "please try again" is actively misleading: a mutation that already took
+// effect before the step that failed. Retrying those either repeats a
+// destructive action or hits a conflict, so the page has to say what happened
+// and what to do instead. The message must still be free of internal detail —
+// that goes to the log, as always.
+func (h *handler) logAndFailMessage(w http.ResponseWriter, r *http.Request, usr store.User, action string, err error, message string) {
 	h.deps.Log.LogAttrs(r.Context(), slog.LevelError, "webui: "+action+" failed", slog.Any("error", err))
-	h.renderError(w, r, usr, http.StatusInternalServerError, "Something went wrong. Please try again.")
+	h.renderError(w, r, usr, http.StatusInternalServerError, message)
 }
 
 // deviceNewData is device-new.html's template data. Code is empty on the form
@@ -351,7 +361,14 @@ func (h *handler) handleDeviceRotate(w http.ResponseWriter, r *http.Request, usr
 	}
 	data, err := h.newDetailData(r, usr, sess, dev)
 	if err != nil {
-		h.logAndFail(w, r, usr, "load device history", err)
+		// The rotation has ALREADY COMMITTED at this point and the plaintext
+		// lives only in the local above — this failure is the cosmetic history
+		// query newDetailData runs to fill the preview card. "Please try again"
+		// would be wrong twice over: nothing was undone, and trying again
+		// rotates the secret a second time.
+		h.logAndFailMessage(w, r, usr, "load device history", err,
+			"The secret was rotated, but the page showing it could not be built. "+
+				"The new secret is not recoverable. Rotate it again to get one you can copy.")
 		return
 	}
 	base := baseURL(h.deps.Cfg, r)

@@ -248,9 +248,12 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 		}
 		// CreateUserInvite creates the user and THEN issues the invite, with no
 		// compensating delete: a failure here can leave a credential-less user
-		// in the list. Surface the failure rather than pretending it worked; the
-		// admin can issue a recovery link to the orphan from its edit page.
-		h.logAndFail(w, r, usr, "create user invite", err)
+		// in the list. Say so rather than offering "try again", which would hit
+		// a duplicate-email conflict and never explain why; the admin can issue
+		// a recovery link to the orphan from its edit page.
+		h.logAndFailMessage(w, r, usr, "create user invite", err,
+			"No invite link could be issued. The account may already have been created — "+
+				"check the users list, and issue a recovery link from it rather than inviting again.")
 		return
 	}
 
@@ -363,7 +366,13 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 			h.renderAdminUserError(w, r, usr, sess, target, status, msg)
 			return
 		}
-		h.logAndFail(w, r, usr, "issue recovery link", err)
+		// IssueRecovery revokes every passkey BEFORE minting, so a failure here
+		// leaves the target locked out with no link. That is more than "try
+		// again" conveys — the damage is already done, and only another link
+		// undoes it.
+		h.logAndFailMessage(w, r, usr, "issue recovery link", err,
+			"No recovery link could be issued. This account's passkeys may already have been "+
+				"revoked, which would leave it locked out — issue another recovery link.")
 		return
 	}
 

@@ -1152,6 +1152,149 @@ func TestDeviceHistory_RendersRows(t *testing.T) {
 	}
 }
 
+// dropTable removes one table so a single downstream query fails while every
+// other one keeps working. That is what makes a PARTIAL failure reachable: the
+// mutation commits and the step after it fails, which is precisely the state
+// the messages below have to describe honestly.
+func dropTable(t *testing.T, st *store.Store, name string) {
+	t.Helper()
+	if _, err := st.DB().ExecContext(t.Context(), "DROP TABLE "+name); err != nil {
+		t.Fatalf("drop %s: %v", name, err)
+	}
+}
+
+// TestDeviceRotate_RenderFailureSaysTheSecretIsGone asserts that when the
+// rotate reveal cannot be prepared, the page says the rotation ALREADY HAPPENED
+// rather than "please try again".
+//
+// RotateSecret returns the plaintext exactly once and never persists it in the
+// clear; newDetailData then runs a fresh ip_history query purely to fill a
+// cosmetic "Recent IP history" card. Dropping ip_history fails that query while
+// leaving the devices and audit_log writes RotateSecret performs intact — so
+// the secret is genuinely rotated, genuinely unrecoverable, and the device
+// cannot authenticate. Telling the operator to "try again" there is wrong
+// twice: nothing was undone, and trying again rotates it a second time.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceRotate_RenderFailureSaysTheSecretIsGone(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "rotate-fail@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-router")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+	dropTable(t, st, "ip_history")
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_label": {dev.Label}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/"+dev.ID+"/rotate-secret",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "Please try again.") {
+		t.Error("the rotate failure page says \"try again\" — but the secret is already rotated and gone")
+	}
+	for _, want := range []string{"rotated", "not recoverable", "Rotate it again"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rotate failure page missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestAdminUserInvite_FailureSaysTheAccountMayExist asserts the invite failure
+// page describes the partial effect instead of "try again".
+//
+// CreateUserInvite creates the user and THEN issues the grant, with no
+// compensating delete (service/admin.go:100-109). Dropping the grant table
+// fails the second step while the user row and its user.created audit entry
+// survive — so a retry hits a duplicate-email conflict and the admin never
+// learns why. The account is asserted to still exist, so the copy is checked
+// against the real state and not just against itself.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminUserInvite_FailureSaysTheAccountMayExist(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+	dropTable(t, st, "account_recovery_tokens")
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "email": {"invitee@example.com"}, "role": {"user"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	users, err := deps.Admin.ListUsers(t.Context())
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if _, ok := userIDByEmail(users, "invitee@example.com"); !ok {
+		t.Fatal("expected the orphaned account to exist; the premise of this test no longer holds")
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "Please try again.") {
+		t.Error("the invite failure page says \"try again\" — a retry hits a duplicate-email conflict")
+	}
+	for _, want := range []string{"may already have been created", "recovery link"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("invite failure page missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestAdminUserRecovery_FailureSaysPasskeysAreRevoked asserts the recovery
+// failure page says the passkeys are already gone.
+//
+// IssueRecovery calls DeleteAllByUser BEFORE minting (service/grants.go:125-131),
+// so a mint failure leaves the target with no credential at all and no link.
+// "Try again" understates it: the user is locked out right now. The credential
+// count is asserted to be zero so the copy is checked against the real state.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestAdminUserRecovery_FailureSaysPasskeysAreRevoked(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "locked-out@example.com", "user")
+	seedPasskey(t, st, target.ID, "laptop")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+	dropTable(t, st, "account_recovery_tokens")
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_email": {target.Email}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/recovery",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	n, err := st.WebAuthnCredentials().CountWebAuthnCredentials(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("credentials = %d, want 0; the premise of this test no longer holds", n)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "Please try again.") {
+		t.Error("the recovery failure page says \"try again\" — the passkeys are already revoked")
+	}
+	for _, want := range []string{"may already have been revoked", "another recovery link"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery failure page missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // TestDeviceHistory_NextLinkPointsAtTheSameDevice is the device-history half of
 // the pager-link guard (see TestAdminAudit_NextLinkPreservesFilters). This
 // screen has no filters, so the property is narrower: the Next link stays on
