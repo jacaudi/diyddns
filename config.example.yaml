@@ -31,10 +31,17 @@ server:
   #
   # Also embedded in every copy-paste artifact the web UI renders: admin
   # invite links, passkey-recovery links, and the `diyddns-client enroll
-  # --code` command shown after minting an enrollment code. Leave it unset
-  # and the web UI derives a best-effort value from the incoming request
-  # instead, which can be wrong behind a reverse proxy — set it explicitly
-  # in that case.
+  # --code` command shown after minting an enrollment code. Where it is
+  # unset the web UI derives a best-effort value from the incoming request,
+  # which can be wrong behind a reverse proxy, and says so on the page.
+  #
+  # But leaving it unset is NOT generally an option: auth.webauthn.rp_id and
+  # rp_origin are derived from it, so with all three empty the server refuses
+  # to start ("auth.webauthn.rp_id/rp_origin not set and server.base_url is
+  # empty"). The request-derived fallback is therefore reachable only when
+  # auth.webauthn.rp_id AND rp_origin are set explicitly — or when
+  # auth.hide_local_login_ui is true, which turns passkey login off entirely.
+  # In every other configuration base_url is required.
   base_url: "http://localhost:8080"
 
 database:
