@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+
+FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+ARG VERSION=v0.0.0-dev
+ARG COMMIT=""
+ARG DATE=""
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+      -ldflags "-s -w \
+        -X github.com/jacaudi/diyddns/internal/version.Version=${VERSION} \
+        -X github.com/jacaudi/diyddns/internal/version.Commit=${COMMIT} \
+        -X github.com/jacaudi/diyddns/internal/version.Date=${DATE}" \
+      -o /out/diyddns-client ./cmd/diyddns-client
+
+# distroless static carries the CA bundle the client needs — all six default
+# IP-discovery providers are https://.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /out/diyddns-client /diyddns-client
+
+USER 65532:65532
+
+ENTRYPOINT ["/diyddns-client"]
+CMD ["run"]
