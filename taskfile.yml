@@ -1,0 +1,131 @@
+# THE CI CONTRACT — `task ci` is what CI runs and what you run locally.
+version: "3"
+
+includes:
+  repo:
+    taskfile: .taskfiles/repo.yml
+  go:
+    taskfile: .taskfiles/go.yml
+
+vars:
+  BIN_DIR: "{{.TASKFILE_DIR}}/bin"
+  LDFLAGS: '-X github.com/jacaudi/diyddns/internal/version.Version={{.VERSION | default "v0.0.0-dev"}} -X github.com/jacaudi/diyddns/internal/version.Commit={{.COMMIT | default ""}} -X github.com/jacaudi/diyddns/internal/version.Date={{.DATE | default ""}}'
+
+tasks:
+  default:
+    desc: List all tasks
+    cmds:
+      - task --list
+
+  ci:
+    desc: Everything CI runs. Run this before pushing.
+    cmds:
+      - task: repo:ci
+      - task: go:ci
+
+  lint:
+    desc: Static checks only
+    cmds:
+      - task: repo:ci
+      - task: go:lint
+
+  test:
+    desc: Tests only
+    cmds:
+      - task: go:test
+
+  build:
+    desc: Build both binaries into ./bin/
+    deps: [build:server, build:client]
+
+  build:server:
+    desc: Build diyddns-server into ./bin/
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/diyddns-server ./cmd/diyddns-server
+
+  build:client:
+    desc: Build diyddns-client into ./bin/
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BIN_DIR}}/diyddns-client ./cmd/diyddns-client
+
+  # Container smoke. Runs identically on a laptop:
+  #   IMAGE=ghcr.io/jacaudi/diyddns/server:sometag task smoke
+  # SMOKE_PORT is overridable because 8080 is often already bound on a dev box;
+  # binding an occupied port would otherwise fail, or worse, let the readiness
+  # probe pass against a DIFFERENT server already listening there.
+  # `env:` as well as `requires:` — without it the `task smoke IMAGE=…` CLI form
+  # satisfies `requires` while leaving $IMAGE empty in the shell.
+  smoke:
+    desc: Boot the server image and assert it serves
+    requires:
+      vars: [IMAGE]
+    env:
+      IMAGE: '{{.IMAGE}}'
+      SMOKE_PORT: '{{.SMOKE_PORT | default "18080"}}'
+    cmds:
+      - |
+        set -eu
+        echo "smoke testing ${IMAGE} on port ${SMOKE_PORT}"
+        key=$(head -c 32 /dev/urandom | base64)
+        docker rm -f diyddns-smoke >/dev/null 2>&1 || true
+        # trap BEFORE docker run: a failed start under `set -e` would otherwise
+        # abort before the trap exists, leaking the container and its logs.
+        trap 'docker logs diyddns-smoke 2>&1 || true; docker rm -f diyddns-smoke >/dev/null 2>&1 || true' EXIT
+        docker run -d --name diyddns-smoke -p "${SMOKE_PORT}:8080" \
+          -e DIYDDNS_DATABASE_PATH=/data/diyddns.db \
+          -e DIYDDNS_SERVER_BASE_URL="http://localhost:${SMOKE_PORT}" \
+          -e DIYDDNS_AUTH_HMAC_SECRET_KEY="${key}" \
+          "${IMAGE}"
+        for i in $(seq 1 30); do
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${SMOKE_PORT}/readyz")" = "200" ]; then
+            echo "ok: /readyz returned 200"; exit 0
+          fi
+          sleep 2
+        done
+        echo "::error::container never became ready on :${SMOKE_PORT}/readyz"
+        exit 1
+
+  smoke:client:
+    desc: Assert the client image starts and reports its version
+    requires:
+      vars: [IMAGE]
+    env:
+      IMAGE: '{{.IMAGE}}'
+    cmds:
+      - |
+        set -eu
+        echo "smoke testing ${IMAGE}"
+        out=$(docker run --rm "${IMAGE}" version)
+        echo "${out}"
+        [ -n "${out}" ] || { echo "::error::client printed no version"; exit 1; }
+
+  test:e2e:
+    desc: "End-to-end test (needs internet; pass -- -skip-discovery offline)"
+    cmds:
+      - go test -tags smoke ./internal/smoke/ -v -timeout 5m {{.CLI_ARGS}}
+
+  test:e2e:browser:
+    desc: "Browser end-to-end test — drives the real pages and passkey.js (needs node/npx)"
+    cmds:
+      - go test -tags browser ./internal/smoke/ -v -timeout 10m {{.CLI_ARGS}}
+
+  clean:
+    desc: Remove build artefacts
+    cmds:
+      - rm -rf {{.BIN_DIR}} ui/dist docs/openapi/*.json
+
+  migrate:new:
+    desc: "Create a new SQL migration in migrations/ (Usage: task migrate:new -- <name>)"
+    cmds:
+      - go run github.com/pressly/goose/v3/cmd/goose@latest -dir migrations create {{.CLI_ARGS}} sql
+
+  db:backup:
+    desc: "Safely back up the SQLite database file (Usage: task db:backup -- <src.db> <out.db>)"
+    cmds:
+      - >
+        go run github.com/pressly/goose/v3/cmd/goose@latest -h >/dev/null 2>&1 || true ;
+        echo "Use the SQLite VACUUM INTO API:" ;
+        echo "  sqlite3 {{.CLI_ARGS}}" ;
+        echo "or, programmatically, .DB().ExecContext(ctx, \"VACUUM INTO ?\", outPath)"

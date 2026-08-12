@@ -1,0 +1,60 @@
+# Go module — checks fail on drift, never fix it. Rationale: github-actions-align/templates/README.md#goyml
+version: '3'
+
+# The `go` directive in go.mod is a MINIMUM, not a pin: a newer local toolchain
+# satisfies it and stays vulnerable to GO-2026-5856. Keep this value in lockstep
+# with go.mod's `go` directive — Renovate bumps go.mod but NOT this line, and the
+# resulting mismatch fails hard ("go.mod requires go >= X, running go1.25.12").
+env:
+  GOTOOLCHAIN: go1.25.12
+
+tasks:
+  ci:
+    desc: All Go checks
+    cmds:
+      - task: fmt:check
+      - task: tidy:check
+      - task: lint
+      - task: vuln
+      - task: test
+
+  lint:
+    desc: golangci-lint
+    cmds:
+      - golangci-lint run
+
+  fmt:
+    desc: Format Go sources
+    cmds:
+      - golangci-lint fmt
+
+  fmt:check:
+    desc: Fail if sources are unformatted
+    cmds:
+      - golangci-lint fmt --diff
+
+  tidy:check:
+    desc: Fail if go.mod/go.sum are not tidy
+    cmds:
+      - go mod tidy -diff   # -diff exits non-zero; a bare `tidy` MUTATES go.mod in CI
+
+  vuln:
+    desc: Scan dependencies for known vulnerabilities
+    cmds:
+      # Installed pinned by the setup action; @latest would be a live fetch on
+      # every run in a pipeline whose whole thesis is pinning.
+      - |
+        set -eu
+        command -v govulncheck >/dev/null \
+          || { echo "govulncheck not installed: go install golang.org/x/vuln/cmd/govulncheck@latest" >&2; exit 1; }
+        govulncheck ./...
+
+  test:
+    desc: Run tests with the race detector
+    cmds:
+      - go test ./... -race
+
+  build:
+    desc: Build binaries into ./bin/
+    cmds:
+      - go build -o bin/ ./...
