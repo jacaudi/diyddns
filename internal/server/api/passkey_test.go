@@ -38,7 +38,7 @@ func jarClient(t *testing.T) *http.Client {
 	return &http.Client{Jar: jar}
 }
 
-// jarDo sends method to url via client with an optional JSON-marshalable
+// jarDo sends method to endpoint via client with an optional JSON-marshalable
 // body and CSRF header, and returns the status, response header (for
 // Set-Cookie inspection via findCookie), and raw body bytes.
 func jarDo(t *testing.T, client *http.Client, method, endpoint string, body any, csrf string) (int, http.Header, []byte) {
