@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+
+# --platform=$BUILDPLATFORM keeps the compile native; GOARCH cross-compiles.
+# Without it the arm64 build runs under QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
+
+# Supplied automatically by BuildKit.
+ARG TARGETOS
+ARG TARGETARCH
+
+# Supplied by ci-build.yml (M1). Declared INSIDE the stage: an ARG before the
+# first FROM is not visible here, and an empty VERSION makes
+# version.Info.String() return "unknown".
+ARG VERSION=v0.0.0-dev
+ARG COMMIT=""
+ARG DATE=""
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# CGO_ENABLED=0: modernc.org/sqlite is pure Go, so this links statically and
+# needs no libc in the runtime image.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+      -ldflags "-s -w \
+        -X github.com/jacaudi/diyddns/internal/version.Version=${VERSION} \
+        -X github.com/jacaudi/diyddns/internal/version.Commit=${COMMIT} \
+        -X github.com/jacaudi/diyddns/internal/version.Date=${DATE}" \
+      -o /out/diyddns-server ./cmd/diyddns-server \
+ && mkdir -p /data
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /out/diyddns-server /diyddns-server
+# The runtime image has no shell, so /data cannot be created there.
+# internal/store.Open never calls MkdirAll, so a missing /data is fatal.
+COPY --from=builder --chown=65532:65532 /data /data
+
+# The base image's own Config.User is the bare string "65532", no group.
+USER 65532:65532
+
+EXPOSE 8080
+
+# CMD is required: the binary is cobra-rooted and prints help with no
+# subcommand, and the smoke harness runs the image with no arguments.
+ENTRYPOINT ["/diyddns-server"]
+CMD ["serve"]
