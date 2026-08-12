@@ -41,7 +41,7 @@ func jarClient(t *testing.T) *http.Client {
 // jarDo sends method to url via client with an optional JSON-marshalable
 // body and CSRF header, and returns the status, response header (for
 // Set-Cookie inspection via findCookie), and raw body bytes.
-func jarDo(t *testing.T, client *http.Client, method, url string, body any, csrf string) (int, http.Header, []byte) {
+func jarDo(t *testing.T, client *http.Client, method, endpoint string, body any, csrf string) (int, http.Header, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != nil {
@@ -51,7 +51,7 @@ func jarDo(t *testing.T, client *http.Client, method, url string, body any, csrf
 		}
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, url, reader)
+	req, err := http.NewRequest(method, endpoint, reader)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
@@ -63,7 +63,7 @@ func jarDo(t *testing.T, client *http.Client, method, url string, body any, csrf
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("%s %s: %v", method, url, err)
+		t.Fatalf("%s %s: %v", method, endpoint, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
@@ -73,9 +73,9 @@ func jarDo(t *testing.T, client *http.Client, method, url string, body any, csrf
 	return resp.StatusCode, resp.Header, respBody
 }
 
-func jarPost(t *testing.T, client *http.Client, url string, body any, csrf string) (int, http.Header, []byte) {
+func jarPost(t *testing.T, client *http.Client, endpoint string, body any, csrf string) (int, http.Header, []byte) {
 	t.Helper()
-	return jarDo(t, client, http.MethodPost, url, body, csrf)
+	return jarDo(t, client, http.MethodPost, endpoint, body, csrf)
 }
 
 // jarSeedSession mints a real DB-backed browser session for the user with

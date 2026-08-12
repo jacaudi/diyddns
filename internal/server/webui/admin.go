@@ -112,23 +112,23 @@ func (h *handler) renderAdminUsers(w http.ResponseWriter, r *http.Request, usr s
 // nothing on this path returns store.ErrNotFound. O(users) per request is
 // correct at this scale; if the user count grows, add AdminService.GetUser
 // rather than reaching past the service layer.
-func (h *handler) adminUser(w http.ResponseWriter, r *http.Request, usr store.User) (store.User, []store.User, bool) {
+func (h *handler) adminUser(w http.ResponseWriter, r *http.Request, usr store.User) (store.User, bool) {
 	users, err := h.deps.Admin.ListUsers(r.Context())
 	if err != nil {
 		h.logAndFail(w, r, usr, "list users", err)
-		return store.User{}, nil, false
+		return store.User{}, false
 	}
 	target, ok := findUser(users, r.PathValue("id"))
 	if !ok {
 		h.renderError(w, r, usr, http.StatusNotFound, "That user does not exist.")
-		return store.User{}, nil, false
+		return store.User{}, false
 	}
-	return target, users, true
+	return target, true
 }
 
 // handleAdminUserSetEnabled toggles a user's disabled flag from the list.
 func (h *handler) handleAdminUserSetEnabled(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	target, _, ok := h.adminUser(w, r, usr)
+	target, ok := h.adminUser(w, r, usr)
 	if !ok {
 		return
 	}
@@ -264,7 +264,7 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 
 // handleAdminUserEdit renders one user's edit screen.
 func (h *handler) handleAdminUserEdit(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	target, _, ok := h.adminUser(w, r, usr)
+	target, ok := h.adminUser(w, r, usr)
 	if !ok {
 		return
 	}
@@ -289,7 +289,7 @@ func (h *handler) renderAdminUserError(w http.ResponseWriter, r *http.Request, u
 
 // handleAdminUserUpdate applies a role and/or disabled change.
 func (h *handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	target, _, ok := h.adminUser(w, r, usr)
+	target, ok := h.adminUser(w, r, usr)
 	if !ok {
 		return
 	}
@@ -323,7 +323,7 @@ func (h *handler) handleAdminUserUpdate(w http.ResponseWriter, r *http.Request, 
 // handleAdminUserDelete deletes a user after a server-verified typed
 // confirmation.
 func (h *handler) handleAdminUserDelete(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	target, _, ok := h.adminUser(w, r, usr)
+	target, ok := h.adminUser(w, r, usr)
 	if !ok {
 		return
 	}
@@ -351,7 +351,7 @@ func (h *handler) handleAdminUserDelete(w http.ResponseWriter, r *http.Request, 
 // credential they own and the only way back in is the link below, which expires
 // in an hour.
 func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	target, _, ok := h.adminUser(w, r, usr)
+	target, ok := h.adminUser(w, r, usr)
 	if !ok {
 		return
 	}
