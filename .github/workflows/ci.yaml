@@ -1,0 +1,171 @@
+# Orchestrator (service variant) — local reusable stages, PR-gated builds, one required check `ci`. Rationale: github-actions-align/templates/README.md#ciserviceyaml
+name: CI
+
+# push only, no pull_request — branch-push checks surface on the PR anyway, and
+# adding pull_request would double-run every same-repo PR.
+#
+# THIS REQUIRES APP SECRETS. GITHUB_TOKEN cannot trigger workflows, so without
+# them release-please's own release PR gets no run, `ci` never reports, and the
+# PR is unmergeable forever. See README#github-app-handling.
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Does not cancel a RUNNING main job. A third main push can still cancel the
+  # one sitting pending — GitHub allows only one pending run per group.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Decides whether this push warrants building an image. Code testing always
+  # runs; building does not — most feature-branch commits are WIP, and a
+  # multi-arch build plus smoke on each is the bulk of the runner time and
+  # registry churn. A DRAFT PR counts.
+  context:
+    name: context
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build: ${{ steps.q.outputs.build }}
+    steps:
+      - id: q
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${EVENT}" = "workflow_dispatch" ]; then
+            echo "main or manual dispatch -> build"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n=$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "${GITHUB_REF_NAME}" \
+                --state open --json number --jq 'length')
+          if [ "${n}" -gt 0 ]; then
+            echo "${n} open PR(s) for ${GITHUB_REF_NAME} -> build"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no open PR for ${GITHUB_REF_NAME} -> test only (open a draft PR to get an image)"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    uses: ./.github/workflows/ci-test.yml
+
+  build:
+    needs: [context, test]
+    if: ${{ needs.context.outputs.build == 'true' }}
+    permissions: {contents: read, packages: write}
+    uses: ./.github/workflows/ci-build.yml
+    with:
+      image: ghcr.io/${{ github.repository }}/server
+      file: packaging/docker/Dockerfile.server
+
+  build-client:
+    needs: [context, test]
+    if: ${{ needs.context.outputs.build == 'true' }}
+    permissions: {contents: read, packages: write}
+    uses: ./.github/workflows/ci-build.yml
+    with:
+      image: ghcr.io/${{ github.repository }}/client
+      file: packaging/docker/Dockerfile.client
+
+  smoke:
+    needs: [build]
+    permissions: {contents: read, packages: read}
+    uses: ./.github/workflows/ci-smoke.yml
+    with:
+      image: ${{ needs.build.outputs.image }}
+
+  smoke-client:
+    needs: [build-client]
+    permissions: {contents: read, packages: read}
+    uses: ./.github/workflows/ci-smoke.yml
+    with:
+      image: ${{ needs.build-client.outputs.image }}
+      task: smoke:client
+
+  release:
+    needs: [smoke, smoke-client]
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions: {contents: write, pull-requests: write}
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+    uses: ./.github/workflows/ci-release.yml
+
+  release-image:
+    needs: [release]
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    permissions: {contents: read, packages: write}
+    uses: ./.github/workflows/ci-build.yml
+    with:
+      image: ghcr.io/${{ github.repository }}/server
+      file: packaging/docker/Dockerfile.server
+      version: ${{ needs.release.outputs.tag_name }}
+      ref: ${{ needs.release.outputs.tag_name }}
+
+  release-image-client:
+    needs: [release]
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    permissions: {contents: read, packages: write}
+    uses: ./.github/workflows/ci-build.yml
+    with:
+      image: ghcr.io/${{ github.repository }}/client
+      file: packaging/docker/Dockerfile.client
+      version: ${{ needs.release.outputs.tag_name }}
+      ref: ${{ needs.release.outputs.tag_name }}
+
+  release-smoke:
+    needs: [release-image]
+    permissions: {contents: read, packages: read}
+    uses: ./.github/workflows/ci-smoke.yml
+    with:
+      image: ${{ needs.release-image.outputs.image }}
+
+  release-smoke-client:
+    needs: [release-image-client]
+    permissions: {contents: read, packages: read}
+    uses: ./.github/workflows/ci-smoke.yml
+    with:
+      image: ${{ needs.release-image-client.outputs.image }}
+      task: smoke:client
+
+  # THE single required status check — point every ruleset at `ci` and nothing else.
+  ci:
+    # `context` MUST be here. Without it, a failing context skips build and
+    # smoke, this gate accepts `skipped`, and the required check goes GREEN on a
+    # PR whose image was never built or tested.
+    needs: [context, test, build, build-client, smoke, smoke-client]
+    if: ${{ !cancelled() }}   # required: else this is SKIPPED on failure, which can satisfy protection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert required stages
+        env:
+          CONTEXT: ${{ needs.context.result }}
+          TEST: ${{ needs.test.result }}
+          BUILD: ${{ needs.build.result }}
+          BUILD_CLIENT: ${{ needs.build-client.result }}
+          SMOKE: ${{ needs.smoke.result }}
+          SMOKE_CLIENT: ${{ needs.smoke-client.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for stage in context:"${CONTEXT}" test:"${TEST}"; do
+            name="${stage%%:*}"; result="${stage##*:}"
+            printf '%-14s %s (must be success)\n' "${name}" "${result}"
+            [ "${result}" = "success" ] || fail=1
+          done
+          for stage in build:"${BUILD}" build-client:"${BUILD_CLIENT}" smoke:"${SMOKE}" smoke-client:"${SMOKE_CLIENT}"; do
+            name="${stage%%:*}"; result="${stage##*:}"
+            printf '%-14s %s (success, or skipped when no PR is open)\n' "${name}" "${result}"
+            case "${result}" in success|skipped) ;; *) fail=1 ;; esac
+          done
+          [ "${fail}" = "0" ] || { echo "::error::one or more required stages did not pass"; exit 1; }
