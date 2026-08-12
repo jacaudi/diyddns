@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -110,8 +111,8 @@ func Recover(log *slog.Logger) func(http.Handler) http.Handler {
 
 // Chain wraps h with mws so that mws[0] is the outermost layer (runs first).
 func Chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler {
-	for i := len(mws) - 1; i >= 0; i-- {
-		h = mws[i](h)
+	for _, v := range slices.Backward(mws) {
+		h = v(h)
 	}
 	return h
 }

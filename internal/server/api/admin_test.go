@@ -13,7 +13,7 @@ import (
 // walk. The rows' content is irrelevant to the pagination assertions.
 func seedAudit(t *testing.T, st *store.Store, n int) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if _, err := st.AuditLog().Append(t.Context(), store.AuditEntry{EventType: "test.event"}); err != nil {
 			t.Fatalf("seed audit %d: %v", i, err)
 		}

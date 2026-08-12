@@ -7,7 +7,7 @@ import (
 )
 
 func TestNewIDIsValidUUIDv7(t *testing.T) {
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		got := NewID()
 		parsed, err := uuid.Parse(got)
 		if err != nil {
@@ -22,7 +22,7 @@ func TestNewIDIsValidUUIDv7(t *testing.T) {
 func TestNewIDsAreDistinct(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]struct{}, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := NewID()
 		if _, dup := seen[id]; dup {
 			t.Fatalf("duplicate ID at iteration %d: %q", i, id)

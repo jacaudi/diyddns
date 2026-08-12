@@ -76,7 +76,7 @@ func (m *Manager) DeviceStart(ctx context.Context) (DeviceAuth, error) {
 		VerificationURI:         resp.VerificationURI,
 		VerificationURIComplete: resp.VerificationURIComplete,
 		ExpiresAt:               expiry.Unix(),
-		Interval:                int64(resp.Interval),
+		Interval:                resp.Interval,
 	}, nil
 }
 

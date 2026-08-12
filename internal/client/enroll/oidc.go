@@ -47,10 +47,7 @@ func DeviceCodeEnroll(ctx context.Context, c *Client, p Prompter, clk Clock) (Re
 	p.Waiting()
 
 	deadline := clk.Now().Add(time.Duration(ds.ExpiresIn) * time.Second)
-	intervalSecs := ds.Interval
-	if intervalSecs < minIntervalSeconds {
-		intervalSecs = minIntervalSeconds
-	}
+	intervalSecs := max(ds.Interval, minIntervalSeconds)
 	interval := time.Duration(intervalSecs) * time.Second
 
 	consecutive502 := 0
