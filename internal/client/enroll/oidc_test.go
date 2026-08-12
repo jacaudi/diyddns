@@ -44,13 +44,13 @@ func scriptServer(t *testing.T, start string, pollBodies []struct {
 	body   string
 }) *Client {
 	t.Helper()
-	var n int64
+	var n atomic.Int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/agent/v1/enroll/oidc/start":
 			_, _ = w.Write([]byte(start))
 		case "/agent/v1/enroll/oidc/poll":
-			i := int(atomic.AddInt64(&n, 1)) - 1
+			i := int(n.Add(1)) - 1
 			if i >= len(pollBodies) {
 				i = len(pollBodies) - 1
 			}

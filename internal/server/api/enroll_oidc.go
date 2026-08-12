@@ -79,10 +79,9 @@ func startOIDCDevice(ctx context.Context, deps ServerDeps) (*oidcDeviceStartOutp
 		return nil, huma.Error500InternalServerError("internal error")
 	}
 	now := store.NowUnix()
-	interval := da.Interval
-	if interval < 5 {
-		interval = 5 // design §6 default; also prevents a 0-interval disabling the pacing guard
-	}
+	interval := max(da.Interval,
+		// design §6 default; also prevents a 0-interval disabling the pacing guard
+		5)
 	if _, err := deps.Store.OIDCDeviceFlows().Create(ctx, store.OIDCDeviceFlow{
 		FlowID:     flowID,
 		DeviceCode: da.DeviceCode,
