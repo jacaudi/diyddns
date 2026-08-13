@@ -61,6 +61,13 @@ in a container unless you mount it — use a volume, or pass `--credentials-file
     docker run --rm -v diyddns-client:/home/nonroot/.config \
       ghcr.io/jacaudi/diyddns/client:v0.1.0 enroll --code <code> --server <url>
 
+Use a volume name you haven't used before: Docker only seeds a named volume's
+ownership from the image the first time it's mounted, so a volume left over
+from an earlier attempt keeps its old ownership and will still fail. And
+because the enrollment code is consumed before credentials are written, any
+failure in this command — including that one — spends it; mint a fresh code
+at `/devices/new` rather than retrying with the same one.
+
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md)
