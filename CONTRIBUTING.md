@@ -16,8 +16,8 @@ Thanks for your interest in DIYDDNS.
 task --list           # see available tasks
 task build            # build both binaries into ./bin/
 task test             # run unit + integration tests with the race detector
-task lint             # run golangci-lint and ui:lint
-task fmt              # format Go and UI sources
+task lint             # run golangci-lint
+task go:fmt           # format Go sources
 ```
 
 ## Commit messages
@@ -29,8 +29,12 @@ We use **Conventional Commits**. Examples:
 - `chore: bump golangci-lint config`
 - `docs: clarify enrollment-code TTL`
 
-`feat:` and `fix:` drive minor / patch releases via semantic-release.
-`feat!:` (or a `BREAKING CHANGE:` footer) drives a major release.
+`feat:` and `fix:` drive minor / patch releases via
+[release-please](https://github.com/googleapis/release-please), which opens a release PR
+automatically; the release is cut when that PR is merged.
+`feat!:` (or a `BREAKING CHANGE:` footer) drives a **minor** release pre-1.0 (this repo is
+configured with `bump-minor-pre-major`); it will drive a major release once the project
+reaches 1.0.0.
 
 ## Pull requests
 
@@ -45,7 +49,6 @@ We use **Conventional Commits**. Examples:
 - Go: `gofmt`, `goimports`, full `golangci-lint` (see `.golangci.yml`).
 - Errors: wrap with `fmt.Errorf("…: %w", err)`. The `errorlint` linter enforces this.
 - Tests: stdlib `testing`, table-driven where inputs are enumerable. No third-party assertion libraries.
-- TypeScript / React: `eslint` + `prettier` (configured in `ui/`).
 
 ## Reporting security issues
 
