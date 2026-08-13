@@ -27,7 +27,9 @@ documents kept outside this repository.
 
 1. `task build`
 2. Copy `config.example.yaml` to `config.yaml` and generate an HMAC key:
-   `head -c 32 /dev/urandom | base64`
+   `head -c 32 /dev/urandom | base64`. Also set `database.path` to a writable
+   local path such as `./diyddns.db` — the shipped example value is a
+   production default, and the server does not create its parent directory.
 3. `./bin/diyddns-server serve --config config.yaml`
 4. The startup log prints `BOOTSTRAP_TOKEN=…` once. Copy it.
 5. Open `/register`, enter the token **and an admin email** — the email is what
@@ -51,13 +53,20 @@ ceremony, with a virtual authenticator.
       -e DIYDDNS_DATABASE_PATH=/data/diyddns.db \
       -e DIYDDNS_SERVER_BASE_URL=http://localhost:8080 \
       -e DIYDDNS_AUTH_HMAC_SECRET_KEY="$(head -c 32 /dev/urandom | base64)" \
-      ghcr.io/jacaudi/diyddns/server:latest
+      ghcr.io/jacaudi/diyddns/server:v0.1.0
 
 The client stores its credentials under `$HOME/.config`, which is not persisted
 in a container unless you mount it — use a volume, or pass `--credentials-file`:
 
     docker run --rm -v diyddns-client:/home/nonroot/.config \
-      ghcr.io/jacaudi/diyddns/client:latest enroll --code <code> --server <url>
+      ghcr.io/jacaudi/diyddns/client:v0.1.0 enroll --code <code> --server <url>
+
+Use a volume name you haven't used before: Docker only seeds a named volume's
+ownership from the image the first time it's mounted, so a volume left over
+from an earlier attempt keeps its old ownership and will still fail. And
+because the enrollment code is consumed before credentials are written, any
+failure in this command — including that one — spends it; mint a fresh code
+at `/devices/new` rather than retrying with the same one.
 
 ## Documentation
 

@@ -22,13 +22,19 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
         -X github.com/jacaudi/diyddns/internal/version.Version=${VERSION} \
         -X github.com/jacaudi/diyddns/internal/version.Commit=${COMMIT} \
         -X github.com/jacaudi/diyddns/internal/version.Date=${DATE}" \
-      -o /out/diyddns-client ./cmd/diyddns-client
+      -o /out/diyddns-client ./cmd/diyddns-client \
+ && mkdir -p /config
 
 # distroless static carries the CA bundle the client needs — all six default
 # IP-discovery providers are https://.
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/diyddns-client /diyddns-client
+# The runtime image has no shell, so /home/nonroot/.config cannot be created
+# there. Docker would otherwise create a missing volume mount point as
+# root:root, and credentials.Save's MkdirAll then fails EACCES under the
+# non-root USER below — after the enrollment code is already spent.
+COPY --from=builder --chown=65532:65532 /config /home/nonroot/.config
 
 USER 65532:65532
 
