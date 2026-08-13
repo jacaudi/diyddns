@@ -41,6 +41,9 @@ front of the server. A plain-HTTP LAN address will not work, and neither will an
 IP address — `server.base_url` must be a hostname, because an IP is not a valid
 WebAuthn Relying Party ID and the server refuses to start with one.
 
+`task test:e2e` drives this whole flow end to end, including the WebAuthn
+ceremony, with a virtual authenticator.
+
 ### Containers
 
     docker run -d --name diyddns \
