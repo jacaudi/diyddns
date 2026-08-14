@@ -6,7 +6,7 @@ version: '3'
 # with go.mod's `go` directive — Renovate bumps go.mod but NOT this line, and the
 # resulting mismatch fails hard ("go.mod requires go >= X, running go1.25.12").
 env:
-  GOTOOLCHAIN: go1.25.12
+  GOTOOLCHAIN: go1.25.13
 
 tasks:
   ci:
