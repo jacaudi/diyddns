@@ -276,7 +276,7 @@ func baseURLWarning(cfg config.Server, derived string) string {
 		return ""
 	}
 	return "server.base_url is not configured, so " + derived +
-		" was derived from the address you are browsing. Check the scheme before running this — " +
+		" was derived from the address you are browsing. Check the scheme before running the commands below — " +
 		"if the server sits behind a TLS-terminating proxy this may say http:// when it should say https://."
 }
 

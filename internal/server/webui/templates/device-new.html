@@ -17,6 +17,8 @@
       <div class="hint">Expires in {{.ExpiresIn}} ({{.ExpiresAt}}) · single use.</div>
     </div>
 
+    {{template "errorBanner" .BaseURLWarning}}
+
     <div class="field">
       <label>Run the client on the device — container (recommended)</label>
 
@@ -32,19 +34,25 @@
     <div class="callout info">
       <strong>If enroll fails, read the message before doing anything</strong>
       <p><code>credentials already exist</code> — this host already has credentials, and your
-      code is <b>not spent</b>. If another device still reports from this host, leave it alone
+      code is <b>not spent</b>. If a device you still use reports from this host, leave it alone
       and enroll the new device somewhere else. If you deleted or replaced that device, its
       credentials are dead — clear them, in this order, then run the same enroll command
       again:</p>
       {{template "copyValue" "docker rm -f diyddns-client-run"}}
       {{template "copyValue" "docker volume rm diyddns-client"}}
-      <p><code>permission denied</code> — the volume has the wrong owner. Your code
+      <p><code>credentials: ... permission denied</code> — the volume has the wrong owner. This is
+      the client's own message; <code>docker: permission denied ... docker daemon socket</code> is a
+      different problem, and means your user is not in the <code>docker</code> group. Your code
       <b>may or may not have been spent</b>: this message is emitted both before and after the
-      code is sent. Check the device list before minting another — if the device is listed the
-      code was spent and you need a fresh one; if it is absent the code is still good, so clear
-      the volume with the two commands above and run the same enroll command again.</p>
-      <p><b>any other message</b> — nothing was changed on the server. Do not remove the
-      volume; fix what the message reports and run the same command again.</p>
+      code is sent. Check the device list before minting another — if <b>the device you just
+      named</b> is listed the code was spent and you need a fresh one; if it is absent the code is
+      still good, so clear the volume with the two commands above and run the same enroll command
+      again.</p>
+      <p><b>any other message</b> — your code <b>may or may not have been spent</b>, because the
+      server records the device before the client stores anything. Check the device list: if
+      <b>the device you just named</b> is listed the code was spent and you need a fresh one; if it
+      is absent the code is still good, so fix what the message reports and run the same command
+      again, without removing the volume.</p>
     </div>
 
     <div class="field">
@@ -52,8 +60,6 @@
       {{template "copyValue" .Command}}
       <div class="hint">The code appears in your shell history when you run this.</div>
     </div>
-
-    {{template "errorBanner" .BaseURLWarning}}
 
     <div class="callout info">
       <strong>Next step</strong>

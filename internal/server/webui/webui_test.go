@@ -1008,6 +1008,73 @@ func TestDeviceNew_RecoveryHints(t *testing.T) {
 	if strings.Contains(body, "Run the command on the device") {
 		t.Error("the stale Next-step callout still claims one command starts reporting")
 	}
+
+	// B1: the default ("any other message") branch must not assert that the
+	// server was left untouched — EnrollmentService.ConsumeCode commits the
+	// device and consumes the code before the client persists anything, so a
+	// client-side failure after that point (dropped connection, non-JSON 200
+	// from a proxy, credentials.Save hitting a full disk) can leave the code
+	// spent while matching neither of the other two branches.
+	if strings.Contains(body, "nothing was changed on the server") {
+		t.Error(`the default branch still claims "nothing was changed on the server", which is false once the client has POSTed`)
+	}
+
+	// B1 + S5: the default branch's discriminator must name the row the
+	// operator just tried to enroll, not an unresolvable "the device" — the
+	// devices list has no hostname column, so nothing on the page tells them
+	// which row corresponds to "this host".
+	if !strings.Contains(body, "the device you just named") {
+		t.Error(`the default branch does not point the operator at "the device you just named" as the discriminator`)
+	}
+
+	// S3: the permission-denied branch must be scoped to the CLIENT's own
+	// "credentials: ... permission denied" message, not the bare substring
+	// "permission denied" — that also matches Docker's own
+	// "permission denied while trying to connect to the Docker daemon socket",
+	// which fires before any container runs and must not be mis-triaged into
+	// this branch.
+	if !strings.Contains(body, "credentials: ... permission denied") {
+		t.Error(`the permission-denied branch is not scoped to the client's own "credentials: ... permission denied" message`)
+	}
+}
+
+// TestDeviceNew_BaseURLWarningPlacement guards two properties of the
+// cleartext-credential warning on the reveal screen: it renders once, and it
+// renders ABOVE the commands it warns about rather than below all four of
+// them, where "this" in its text would be ambiguous.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_BaseURLWarningPlacement(t *testing.T) {
+	deps, st := testDeps(t)
+	deps.Cfg.Server.BaseURL = ""
+	h, _ := New(deps)
+	usr := seedUser(t, st, "baseurlwarn@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"scheme-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// S2: "this" no longer stands in for four rendered commands.
+	if !strings.Contains(body, "Check the scheme before running the commands below") {
+		t.Error(`baseURLWarning no longer says "Check the scheme before running the commands below"`)
+	}
+
+	warnIdx := strings.Index(body, "server.base_url is not configured")
+	containerIdx := strings.Index(body, "docker run --rm -v diyddns-client:/home/nonroot/.config")
+	if warnIdx == -1 || containerIdx == -1 || warnIdx > containerIdx {
+		t.Errorf("the base-URL warning does not render before the container commands: warning at %d, container command at %d",
+			warnIdx, containerIdx)
+	}
 }
 
 // TestDeviceNew_RejectsEmptyLabel asserts the handler owns the non-empty-label

@@ -64,14 +64,20 @@ in a container unless you mount it — use a volume, or pass `--credentials-file
 If enroll fails, read the message before retrying. `credentials already exist`
 means this host is already enrolled and your code is **not** spent — reuse it
 elsewhere, or, if you replaced that device, `docker rm -f diyddns-client-run &&
-docker volume rm diyddns-client` and run the same command again. `permission
-denied` means the volume has the wrong owner; the code may or may not have been
-spent, because that message is emitted both before and after the code is sent —
-check `/devices` first: if the device is listed the code was spent and you
-need a fresh one; if it is absent the code is still good, so clear the
-volume with the two commands above and run the same command again. Any
-other message means nothing was changed on the server: fix what it
-reports and run the same command again, without removing the volume.
+docker volume rm diyddns-client` and run the same command again. `credentials:
+... permission denied` means the volume has the wrong owner — this is the
+client's own message; `docker: permission denied ... docker daemon socket` is
+a different problem and means your user is not in the `docker` group. For the
+client's message, the code may or may not have been spent, because it is
+emitted both before and after the code is sent — check `/devices` first: if
+the device you just named is listed the code was spent and you need a fresh
+one; if it is absent the code is still good, so clear the volume with the two
+commands above and run the same command again. Any other message also leaves
+the code's status unclear, because the server records the device before the
+client stores anything — check `/devices` the same way: if the device you
+just named is listed the code was spent and you need a fresh one; if it is
+absent the code is still good, so fix what the message reports and run the
+same command again, without removing the volume.
 
 ## Documentation
 
