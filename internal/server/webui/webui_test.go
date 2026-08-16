@@ -656,7 +656,10 @@ func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
 		{"field -> field (.field margin-bottom)", `^\.field\s*\{\s*margin-bottom:\s*var\(--space-4\)`},
 		{"input -> button (.field + .btn margin-top)", `\.field \+ \.btn\s*\{\s*margin-top:\s*var\(--space-4\)`},
 		{"button -> status (.status margin-top)", `^\.status\s*\{[^}]*margin:\s*var\(--space-4\)\s+0\s+0`},
-		{"field hint (.field .hint margin-top)", `\.field \.hint\s*\{[^}]*margin-top:\s*var\(--space-2\)`},
+		// [^{]* rather than \s*: the declaration may be shared with another
+		// selector in a group (.disclosure .hint reuses it). What this guards is
+		// the 8px top margin, not whether the rule is written on its own.
+		{"field hint (.field .hint margin-top)", `\.field \.hint[^{]*\{[^}]*margin-top:\s*var\(--space-2\)`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1098,6 +1101,61 @@ func TestDeviceNew_BaseURLWarningPlacement(t *testing.T) {
 	if warnIdx == -1 || containerIdx == -1 || warnIdx > containerIdx {
 		t.Errorf("the base-URL warning does not render before the container commands: warning at %d, container command at %d",
 			warnIdx, containerIdx)
+	}
+}
+
+// TestDeviceNew_BinaryPathIsCollapsed pins the bare-binary command behind a
+// collapsed disclosure. The container path is the recommended one and the only
+// one an operator can follow from a standing start; the binary command serves
+// the minority who already have it, and shown open it competes for attention
+// with the path most readers must actually take.
+//
+// It must stay in the markup rather than being dropped: collapsed still copies,
+// greps, and prints. So the assertion is about WHERE it renders, not whether —
+// a Contains check alone would pass with the command sitting in the open.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_BinaryPathIsCollapsed(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "collapsed@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"collapsed-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	start := strings.Index(body, `<details class="disclosure">`)
+	if start == -1 {
+		t.Fatal("the binary path does not render inside a disclosure")
+	}
+	// An `open` attribute would defeat the point, so assert its absence on the
+	// element itself rather than anywhere in the page.
+	if strings.Contains(body, `<details class="disclosure" open>`) {
+		t.Error("the disclosure renders open; it must start collapsed")
+	}
+	end := strings.Index(body[start:], "</details>")
+	if end == -1 {
+		t.Fatal("the disclosure is never closed")
+	}
+	seg := body[start : start+end]
+
+	if !strings.Contains(seg, "<summary>") {
+		t.Error("the disclosure has no summary, so there is nothing to click")
+	}
+	// The load-bearing assertion: the command is INSIDE the disclosure. Placed
+	// outside it, the page would look collapsed while the command still showed.
+	if !strings.Contains(seg, `data-copy="diyddns-client enroll`) {
+		t.Error("the bare-binary command renders outside the disclosure")
+	}
+	// The shell-history warning travels with the command it warns about.
+	if !strings.Contains(seg, "shell history") {
+		t.Error("the shell-history hint did not move inside the disclosure with its command")
 	}
 }
 

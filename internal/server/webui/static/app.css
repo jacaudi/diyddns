@@ -382,7 +382,8 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 /* ---------- Forms: filter bar, field hint ----------
    The base .field/.input rules stay as they are above. */
 
-.field .hint { color: var(--text-muted); font-size: 12.5px; margin-top: var(--space-2); }
+.field .hint,
+.disclosure .hint { color: var(--text-muted); font-size: 12.5px; margin-top: var(--space-2); }
 /* Two captions in a row means a new group started; give it the same 16px the
    page uses between blocks, so the steps read as separate. */
 .field .hint + .hint { margin-top: var(--space-4); }
@@ -423,9 +424,23 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
    contexts. The inline-flex base above still applies where a pill sits inside
    running content (a <dd>, a table cell), which full width would break. */
 .field .copy,
-.callout .copy { display: flex; width: 100%; }
 .callout .copy,
+.disclosure .copy { display: flex; width: 100%; }
+.callout .copy,
+.disclosure .copy,
 .field .hint + .copy { margin-top: var(--space-2); }
+
+/* ---------- Disclosure ---------- */
+
+/* Secondary content that most readers should not have to step over. Native
+   <details>, so it needs no JavaScript and stays copyable and greppable while
+   collapsed. */
+.disclosure { margin-bottom: var(--space-4); }
+.disclosure > summary {
+  cursor: pointer; font-size: 12.5px; font-weight: 600;
+  color: var(--text-muted); padding: var(--space-1) 0;
+}
+.disclosure > summary:hover { color: var(--accent); }
 
 /* ---------- Callouts / banners ---------- */
 
