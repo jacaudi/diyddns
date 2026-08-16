@@ -35,8 +35,9 @@
      layer. Scheme-invariant like --mono, so it lives in :root only, not the
      dark-mode block below. Every value not on this scale that appears
      hard-coded past this point is either 0 (no token needed) or the 26px
-     logo/avatar box, a border-width, a font-size, or a line-height — none of
-     which are spacing and are deliberately out of scope for this scale. */
+     logo/avatar box, a border-width, or a line-height — none of which are
+     spacing and are deliberately out of scope for this scale. Font sizes were
+     out of scope too until they got a scale of their own, below. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -44,6 +45,29 @@
   --space-5: 24px;
   --space-6: 32px;
   --space-7: 48px;
+
+  /* Type scale: the only source of font-size in this file. Same shape as the
+     spacing scale — numeric steps, no semantic alias layer.
+
+     Before this existed there were fifteen hard-coded declarations rendering
+     twelve distinct sizes, including three (11.5, 12.5, 13.5) that only a
+     measurement tells apart and one (0.85rem) in a different unit entirely.
+     The steps below are values already in use rather than a computed ratio,
+     so the headings that were signed off do not move; what collapses is the
+     in-between values landing on their neighbours.
+
+     Named --type-N, not --text-N: --text, --text-muted and --text-faint are
+     the text COLOUR tokens, and a --text-2 among them would read as a shade.
+
+     One size stays off the scale: .empty .icon, which sizes a decorative
+     emoji rather than text anyone reads. */
+  --type-1: 12px;
+  --type-2: 13px;
+  --type-3: 14px;
+  --type-4: 16px;
+  --type-5: 19px;
+  --type-6: 22px;
+  --type-7: 26px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -75,8 +99,8 @@
 body {
   margin: 0;
   font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--type-3);
+  line-height: 1.6;
   color: var(--text);
   background: var(--bg);
 }
@@ -105,7 +129,7 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: var(--space-2);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--type-4);
 }
 /* Auth-shell-only: the brand mark sits stacked above the card in
    layout.html, so only here does it need space below it. */
@@ -118,7 +142,7 @@ a:hover { text-decoration: underline; }
   display: grid;
   place-items: center;
   color: #fff;
-  font-size: 14px;
+  font-size: var(--type-3);
   font-weight: 800;
 }
 
@@ -131,14 +155,14 @@ a:hover { text-decoration: underline; }
   margin-bottom: var(--space-4);
 }
 .card-head { margin-bottom: var(--space-3); }
-.card h1 { font-size: 19px; margin: 0 0 var(--space-2); }
-.card h2 { font-size: 15px; margin: 0 0 var(--space-3); }
+.card h1 { font-size: var(--type-5); margin: 0 0 var(--space-2); }
+.card h2 { font-size: var(--type-4); margin: 0 0 var(--space-3); }
 
-.muted { color: var(--text-muted); font-size: 13px; }
+.muted { color: var(--text-muted); font-size: var(--type-2); }
 .center { text-align: center; }
 
 .field { margin-bottom: var(--space-4); }
-.field label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: var(--space-2); }
+.field label { display: block; font-size: var(--type-2); font-weight: 600; margin-bottom: var(--space-2); }
 /* A field's own margin-bottom above (--space-4, the normal field-to-field
    gap) is the wrong gap above a submit button — it makes a primary action
    read as just another field (Task 5 review round 3; the maintainer
@@ -185,7 +209,7 @@ a:hover { text-decoration: underline; }
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--type-3);
 }
 .input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -196,7 +220,7 @@ a:hover { text-decoration: underline; }
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--type-3);
   font-weight: 600;
   cursor: pointer;
   text-align: center;
@@ -219,7 +243,7 @@ a:hover { text-decoration: underline; }
    larger than that 12px, so it now decides all four and they render an
    identical 16px. Keep it at or above .btn.block's bottom margin or the
    sites will silently diverge again. */
-.status { font-size: 13px; min-height: 1.2em; margin: var(--space-4) 0 0; }
+.status { font-size: var(--type-2); min-height: 1.2em; margin: var(--space-4) 0 0; }
 .status-error { color: var(--danger); }
 
 .passkey-list { list-style: none; margin: 0 0 var(--space-4); padding: 0; }
@@ -233,11 +257,14 @@ a:hover { text-decoration: underline; }
 }
 .passkey-list li:last-child { border-bottom: none; }
 .passkey-list .actions { display: flex; gap: var(--space-2); }
-.passkey-list button { font-size: 12.5px; padding: var(--space-1) var(--space-2); }
+/* The row's buttons carry .btn.sm — there is no ".passkey-list button" rule,
+   deliberately. It used to hand-roll its own smaller font and padding, which
+   was a second definition of "a small button" that drifted 8px below the
+   real one and put Rename/Remove under the touch-target floor. */
 
 /* Inline help under a form field. */
 .small {
-  font-size: 0.85rem;
+  font-size: var(--type-2);
   margin-top: 0.35rem;
 }
 
@@ -276,7 +303,7 @@ a:hover { text-decoration: underline; }
    shells' brand marks genuinely have in common. */
 .topbar .brand {
   display: flex; align-items: center; gap: var(--space-2);
-  font-weight: 700; font-size: 15px; letter-spacing: .2px;
+  font-weight: 700; font-size: var(--type-4); letter-spacing: .2px;
   color: var(--text);
 }
 .nav { display: flex; gap: var(--space-1); margin-left: var(--space-2); flex: 1; }
@@ -286,7 +313,6 @@ a:hover { text-decoration: underline; }
 }
 .nav a:hover { background: var(--neutral-soft); text-decoration: none; color: var(--text); }
 .nav a.active { background: var(--accent-soft); color: var(--accent); }
-.nav a.admin::before { content: "⚙ "; opacity: .7; }
 
 .userchip {
   display: flex; align-items: center; gap: var(--space-2);
@@ -296,14 +322,13 @@ a:hover { text-decoration: underline; }
 .userchip .avatar {
   width: 26px; height: 26px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent);
-  display: grid; place-items: center; font-weight: 700; font-size: 12px;
+  display: grid; place-items: center; font-weight: 700; font-size: var(--type-1);
 }
-.userchip .email { color: var(--text-muted); font-size: 13px; }
 
 .menu-toggle {
   display: none; margin-left: auto;
   background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text); padding: var(--space-2) var(--space-3); font-size: 16px; cursor: pointer;
+  color: var(--text); padding: var(--space-2) var(--space-3); font-size: var(--type-4); cursor: pointer;
 }
 
 .main { flex: 1; width: 100%; max-width: 1080px; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-7); }
@@ -314,9 +339,9 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: flex-start; justify-content: space-between;
   gap: var(--space-4); margin-bottom: var(--space-5); flex-wrap: wrap;
 }
-.page-head h1 { margin: 0 0 var(--space-1); font-size: 22px; letter-spacing: -.2px; }
-.page-head .sub { color: var(--text-muted); margin: 0; font-size: 13.5px; }
-.breadcrumb { color: var(--text-faint); font-size: 12.5px; margin-bottom: var(--space-3); }
+.page-head h1 { margin: 0 0 var(--space-1); font-size: var(--type-6); letter-spacing: -.2px; }
+.page-head .sub { color: var(--text-muted); margin: 0; font-size: var(--type-3); }
+.breadcrumb { color: var(--text-faint); font-size: var(--type-2); margin-bottom: var(--space-3); }
 .breadcrumb a { color: var(--text-muted); }
 
 /* ---------- Cards: grid / stat tiles ----------
@@ -326,24 +351,28 @@ a:hover { text-decoration: underline; }
 .card + .card { margin-top: var(--space-4); }
 .grid > .card + .card { margin-top: 0; }
 
+/* minmax(0, 1fr), never a bare 1fr: `1fr` alone is minmax(auto, 1fr), and auto
+   as a track minimum is the item's min-content width, so the track can never
+   shrink below the widest unbreakable thing in it. A card holding a nowrap
+   .copy pill then pins its column open and the document scrolls sideways. */
 .grid { display: grid; gap: var(--space-4); }
-.grid.cols-2 { grid-template-columns: 1fr 1fr; }
-.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
-.grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+.grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .stat { padding: var(--space-4); }
-.stat .label { color: var(--text-muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .4px; }
-.stat .value { font-size: 26px; font-weight: 700; margin-top: var(--space-1); letter-spacing: -.5px; }
-.stat .value.small { font-size: 18px; }
+.stat .label { color: var(--text-muted); font-size: var(--type-2); text-transform: uppercase; letter-spacing: .4px; }
+.stat .value { font-size: var(--type-7); font-weight: 700; margin-top: var(--space-1); letter-spacing: -.5px; }
+.stat .value.small { font-size: var(--type-5); }
 
 /* ---------- Tables ---------- */
 
 .table-wrap { overflow-x: auto; }
-table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type-3); }
 .grid-table th {
   text-align: left; font-weight: 600; color: var(--text-muted);
   padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border);
-  background: var(--surface-2); white-space: nowrap; font-size: 12.5px;
+  background: var(--surface-2); white-space: nowrap; font-size: var(--type-2);
   text-transform: uppercase; letter-spacing: .3px;
 }
 .grid-table td { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); vertical-align: middle; }
@@ -357,7 +386,7 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 
 .tag {
   display: inline-flex; align-items: center; gap: var(--space-1);
-  padding: var(--space-1) var(--space-2); border-radius: 999px; font-size: 12px; font-weight: 600;
+  padding: var(--space-1) var(--space-2); border-radius: 999px; font-size: var(--type-1); font-weight: 600;
   line-height: 1.7; border: 1px solid transparent;
 }
 .tag .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
@@ -376,27 +405,48 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .btn.solid-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
 .btn.ghost:hover { background: var(--neutral-soft); }
-.btn.sm { padding: var(--space-1) var(--space-3); font-size: 12.5px; }
+/* A compact button is still a touch target. The floor is a min-height rather
+   than more padding because the same padding produces two different heights
+   depending on the element: measured at 390px, .btn.sm was 24px as a <button>
+   ("Copy", "Disable") and 30px as an <a> ("Open", "Full history ›"). No
+   padding value lands both on one number, so the box gets a floor and centres
+   its label inside it instead. */
+.btn.sm {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: var(--space-6);
+  padding: var(--space-1) var(--space-3); font-size: var(--type-2);
+}
 .btn-row { display: flex; gap: var(--space-3); flex-wrap: wrap; }
 
 /* ---------- Forms: filter bar, field hint ----------
    The base .field/.input rules stay as they are above. */
 
-.field .hint { color: var(--text-muted); font-size: 12.5px; margin-top: var(--space-2); }
+.field .hint,
+.disclosure .hint { color: var(--text-muted); font-size: var(--type-2); margin-top: var(--space-2); }
+/* Two captions in a row means a new group started; give it the same 16px the
+   page uses between blocks, so the steps read as separate. */
+.field .hint + .hint { margin-top: var(--space-4); }
 
 .filterbar {
   display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end;
   padding: var(--space-4); border-bottom: 1px solid var(--border); background: var(--surface-2);
 }
 .filterbar .field { margin: 0; min-width: 150px; }
-.filterbar .field label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
+.filterbar .field label { font-size: var(--type-1); text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
 .filterbar .grow { flex: 1; }
 
 /* ---------- Descriptions (key/value) ---------- */
 
-.kv { display: grid; grid-template-columns: 160px 1fr; }
-.kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-.kv > dd { margin: 0; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); }
+.kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: var(--type-2); }
+/* Values here are operator-configured — a database path, a listen address, a
+   base URL, a build string — so they are unbounded in length and often carry
+   no spaces at all. Without a break opportunity the <dd> box stays the width
+   of its track while the text spills out of it as an anonymous inline box,
+   which widens the document without any element reporting as oversized.
+   `anywhere` rather than `break-word` so the box's min-content size shrinks
+   too, and the track is never held open to begin with. */
+.kv > dd { margin: 0; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .kv > dt:last-of-type, .kv > dd:last-of-type { border-bottom: none; }
 
 /* ---------- Copy field ---------- */
@@ -409,47 +459,130 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .copy code { color: var(--text); overflow: auto; white-space: nowrap; }
 .copy button {
   border: 1px solid var(--border-strong); background: var(--surface);
-  border-radius: 6px; padding: var(--space-1) var(--space-2); font-size: 12px; cursor: pointer; color: var(--text-muted);
+  border-radius: 6px; padding: var(--space-1) var(--space-2); font-size: var(--type-1); cursor: pointer; color: var(--text-muted);
   flex-shrink: 0;
 }
 .copy button:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Wherever copy pills are LISTED vertically — a field's command list, a
+   callout's recovery steps — each is its own full-width row, so every command
+   has the same footprint and overflows the same way. One definition for both
+   contexts. The inline-flex base above still applies where a pill sits inside
+   running content (a <dd>, a table cell), which full width would break. */
+.field .copy,
+.callout .copy,
+.disclosure .copy { display: flex; width: 100%; }
+.callout .copy,
+.disclosure .copy,
+.field .hint + .copy { margin-top: var(--space-2); }
+
+/* ---------- Disclosure ---------- */
+
+/* Secondary content that most readers should not have to step over. Native
+   <details>, so it needs no JavaScript and stays copyable and greppable while
+   collapsed. */
+.disclosure { margin-bottom: var(--space-4); }
+/* Shared by every <details>-based control. The marker is suppressed because
+   these summaries are styled as buttons or quiet headings, where a stray
+   triangle reads as a rendering fault; user-select stops a click from
+   highlighting the label. */
+.disclosure > summary,
+.modal > summary { cursor: pointer; user-select: none; list-style: none; }
+.disclosure > summary::-webkit-details-marker,
+.modal > summary::-webkit-details-marker { display: none; }
+
+/* A quiet inline toggle. .modal's summary deliberately inherits none of this —
+   it carries .btn and must match every other button's type size. */
+.disclosure > summary {
+  font-size: var(--type-2); font-weight: 600;
+  color: var(--text-muted); padding: var(--space-1) 0;
+}
+.disclosure > summary:hover { color: var(--accent); }
 
 /* ---------- Callouts / banners ---------- */
 
 .callout {
   border: 1px solid var(--border); border-left-width: 3px;
-  border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); font-size: 13px;
+  border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); font-size: var(--type-2);
   background: var(--surface-2);
+  /* Same rhythm as .field, so a callout between two blocks is separated from
+     both. Without this a callout carries no vertical margin at all and the
+     block after it sits flush against its border — measured 0px. */
+  margin-bottom: var(--space-4);
 }
+.callout:last-child { margin-bottom: 0; }
 .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
 .callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
 .callout strong { display: block; margin-bottom: var(--space-1); }
+/* Body rhythm on the spacing scale. Without these the UA's 1em paragraph
+   margins apply, so gaps land off-scale and the last paragraph's margin does
+   not collapse into the callout's padding — leaving more space below the text
+   than above it. */
+.callout p { margin: var(--space-3) 0 0; }
+.callout p:last-child { margin-bottom: 0; }
 
 /* ---------- Danger zone ---------- */
 
 .danger-zone { border-color: var(--danger); }
 .danger-zone .card-head { border-bottom-color: var(--danger-soft); }
 .danger-zone .card-head h2 { color: var(--danger); }
+/* A fixed action column, not a content-sized flex child. As flex with
+   justify-content: space-between the action side shrank by however long that
+   row's description happened to be, so two rows carrying the identical confirm
+   field landed at different widths and no two buttons shared an edge. */
 .danger-item {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
+  display: grid; grid-template-columns: minmax(0, 1fr) 200px;
+  align-items: start; column-gap: var(--space-5);
   padding: var(--space-4); border-bottom: 1px solid var(--border);
 }
 .danger-item:last-child { border-bottom: none; }
 .danger-item .meta strong { display: block; }
-.danger-item .meta span { color: var(--text-muted); font-size: 12.5px; }
+.danger-item .meta span { color: var(--text-muted); font-size: var(--type-2); }
+/* Every action fills the column, so the buttons align regardless of label.
+   Scoped to the column itself — inside a modal card the buttons sit on one
+   row at their natural width. */
+.danger-item .btn { width: 100%; }
+.danger-item .modal-card .btn { width: auto; }
+.danger-item form { display: flex; flex-direction: column; gap: var(--space-2); }
+.danger-item form .field { margin-bottom: 0; }
+.danger-item .disclosure { margin-bottom: 0; }
+
+/* Modal: a <details> whose panel renders as an overlay instead of inline.
+   Deliberately NOT <dialog> — ui.js's contract is that every action still works
+   with JavaScript blocked, and a <dialog> with no open attribute is
+   display:none, which would put the typed confirmation out of reach. As a
+   <details> the panel simply appears in place; JS only adds dismissal. */
+.modal > summary { display: block; text-align: center; }
+.modal[open] > .modal-panel {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center; padding: var(--space-5);
+  background: rgba(0, 0, 0, .55);
+}
+/* The panel IS a .card — surface, border, radius, shadow and padding all come
+   from that component. Only what a card cannot know about lives here: the
+   overlay's width cap, its scroll behaviour, and dropping the stacking margin
+   a card carries for a document flow this one is not in. */
+.modal-card {
+  width: min(440px, 100%); max-height: calc(100vh - var(--space-7));
+  overflow: auto; margin-bottom: 0; text-align: left;
+}
+.modal-card p { margin: 0 0 var(--space-4); }
 
 /* ---------- Empty state ---------- */
 
 .empty { text-align: center; padding: var(--space-7) var(--space-5); }
 .empty .icon { font-size: 40px; opacity: .5; }
-.empty h3 { margin: var(--space-3) 0 var(--space-1); }
+/* Every <h3> in the UI is an empty state's heading. Without a size here it
+   took the UA's 1.17em against a 14px parent and rendered at 16.38px — a
+   number nobody chose, and the only fractional size left in the file. */
+.empty h3 { font-size: var(--type-4); margin: var(--space-3) 0 var(--space-1); }
 .empty p { color: var(--text-muted); margin: 0 0 var(--space-4); }
 
 /* ---------- Pagination ---------- */
 
 .pager {
   display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
-  padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px;
+  padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); color: var(--text-muted); font-size: var(--type-2);
 }
 .pager .pages { display: flex; gap: var(--space-2); }
 
@@ -461,8 +594,11 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 /* ---------- Responsive ---------- */
 
 @media (max-width: 780px) {
-  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
-  .kv { grid-template-columns: 1fr; }
+  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
+  /* The fixed action column has nowhere to go at this width; stack it under
+     the description rather than squeezing both. */
+  .danger-item { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-3); }
+  .kv { grid-template-columns: minmax(0, 1fr); }
   .kv > dt { padding-bottom: 0; border-bottom: none; }
   .kv > dd { padding-top: var(--space-1); }
   .nav { display: none; position: absolute; top: 56px; left: 0; right: 0;
@@ -478,7 +614,7 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   .grid-table.responsive tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: var(--space-3); }
   .grid-table.responsive td { border: none; padding: var(--space-2) var(--space-4); }
   .grid-table.responsive td::before {
-    content: attr(data-label); display: block; font-size: 11px; text-transform: uppercase;
+    content: attr(data-label); display: block; font-size: var(--type-1); text-transform: uppercase;
     letter-spacing: .3px; color: var(--text-muted); margin-bottom: var(--space-1);
   }
   .grid-table.responsive td.actions { text-align: left; }

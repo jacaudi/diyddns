@@ -270,6 +270,85 @@ try {
     }
   }
 
+  // Phone-width geometry, asserted here because neither property is decidable
+  // from the stylesheet text. A `1fr` grid track and a 4px-padded `.btn.sm`
+  // both read as fine in the CSS; only a layout engine knows that the first
+  // refuses to shrink below a nowrap UUID and that the second lands on two
+  // different heights depending on whether it is an <a> or a <button>.
+  step("nothing overflows and every compact control is reachable at 390px");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${BASE_URL}/devices`, { waitUntil: "domcontentloaded" });
+  await page.click('a:has-text("browser-test-device")');
+  const deviceURL = page.url();
+  const MIN_TARGET = 32;
+  for (const url of [
+    `${BASE_URL}/devices`,
+    deviceURL,
+    `${BASE_URL}/devices/new`,
+    `${BASE_URL}/account`,
+    `${BASE_URL}/admin/users`,
+    `${BASE_URL}/admin/users/new`,
+    `${BASE_URL}/admin/audit`,
+    `${BASE_URL}/admin/server`,
+  ]) {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    const geometry = await page.evaluate((min) => {
+      const doc = document.documentElement;
+      const small = [];
+      // Only button-shaped controls. Inline text links — a breadcrumb, a
+      // device name inside a table cell — are deliberately excluded: they are
+      // exempt from WCAG 2.2 Target Size, and giving them a height would
+      // wreck the line box they sit in.
+      for (const el of doc.querySelectorAll(".btn")) {
+        const box = el.getBoundingClientRect();
+        if (box.width === 0 && box.height === 0) continue; // inside a closed <details>
+        if (box.height < min) {
+          small.push(`${JSON.stringify(el.textContent.trim().slice(0, 20))} at ${Math.round(box.height)}px`);
+        }
+      }
+      const overflow = doc.scrollWidth - doc.clientWidth;
+      // Name the deepest offender. Without it the failure reports only that
+      // the page is too wide, which is the one fact that does not help —
+      // every ancestor of the real culprit is too wide too.
+      //
+      // Two shapes have to be caught. An element whose BOX is past the right
+      // edge (a grid track that refused to shrink), and an element whose box
+      // fits but whose CONTENT does not — a long unbreakable string, where
+      // the block stays viewport-wide and the text spills out of it as an
+      // anonymous inline box that no getBoundingClientRect reports.
+      let culprit = null;
+      if (overflow > 0) {
+        let deepest = -1;
+        for (const el of doc.querySelectorAll("body *")) {
+          const box = el.getBoundingClientRect();
+          if (box.width === 0 && box.height === 0) continue;
+          const pastEdge = box.right > doc.clientWidth + 0.5;
+          // A scroll container overflowing itself is doing its job.
+          const scrolls = getComputedStyle(el).overflowX !== "visible";
+          const spills = !scrolls && el.scrollWidth > el.clientWidth + 1;
+          if (!pastEdge && !spills) continue;
+          let depth = 0;
+          for (let p = el; (p = p.parentElement); ) depth++;
+          if (depth > deepest) {
+            deepest = depth;
+            culprit = `<${el.tagName.toLowerCase()} class="${el.className}"> ` +
+              `${spills ? "content spills" : "box past edge"}: ` +
+              JSON.stringify(el.textContent.trim().slice(0, 60));
+          }
+        }
+      }
+      return { overflow, small, culprit };
+    }, MIN_TARGET);
+    if (geometry.overflow > 0) {
+      fail(`${url} scrolls sideways at 390px: the document is ${geometry.overflow}px wider than ` +
+        `the viewport. Widest element past the edge: ${geometry.culprit}`);
+    }
+    if (geometry.small.length) {
+      fail(`${url} has controls under ${MIN_TARGET}px tall at 390px: ${geometry.small.join(", ")}`);
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+
   step("the audit log recorded the enrollment");
   await page.goto(`${BASE_URL}/admin/audit?event_type=device.enroll.code`, { waitUntil: "domcontentloaded" });
   if (!(await page.textContent("main")).includes("device.enroll.code")) {

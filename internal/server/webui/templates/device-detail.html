@@ -41,9 +41,9 @@
     <div class="card-head"><h2>Current addresses</h2></div>
     <div class="card-body stack-sm">
       <div><div class="muted">IPv4</div>
-        {{if .Device.CurrentIPv4}}{{template "copyValue" .Device.CurrentIPv4}}{{else}}<span class="muted">—</span>{{end}}</div>
+        {{template "copyOrDash" .Device.CurrentIPv4}}</div>
       <div><div class="muted">IPv6</div>
-        {{if .Device.CurrentIPv6}}{{template "copyValue" .Device.CurrentIPv6}}{{else}}<span class="muted">—</span>{{end}}</div>
+        {{template "copyOrDash" .Device.CurrentIPv6}}</div>
     </div>
   </div>
 
@@ -54,9 +54,9 @@
         <dt>Device ID</dt><dd>{{template "copyValue" .Device.ID}}</dd>
         <dt>Label</dt><dd>{{.Device.Label}}</dd>
         <dt>Owner</dt><dd>{{.Owner}}</dd>
-        <dt>Hostname</dt><dd>{{if .Device.Hostname}}{{.Device.Hostname}}{{else}}<span class="muted">—</span>{{end}}</dd>
-        <dt>OS</dt><dd>{{if .Device.OS}}{{.Device.OS}}{{else}}<span class="muted">—</span>{{end}}</dd>
-        <dt>Client version</dt><dd>{{if .Device.ClientVersion}}{{.Device.ClientVersion}}{{else}}<span class="muted">—</span>{{end}}</dd>
+        <dt>Hostname</dt><dd>{{template "textOrDash" .Device.Hostname}}</dd>
+        <dt>OS</dt><dd>{{template "textOrDash" .Device.OS}}</dd>
+        <dt>Client version</dt><dd>{{template "textOrDash" .Device.ClientVersion}}</dd>
         <dt>State</dt><dd>{{template "statusTag" .Status}}</dd>
       </dl>
     </div>
@@ -74,15 +74,15 @@
         {{range .History}}
         <tr>
           <td data-label="When" class="muted nowrap" title="{{.ObservedAbs}}">{{.ObservedRel}}</td>
-          <td data-label="IPv4">{{if .IPv4}}<code>{{.IPv4}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td data-label="IPv6">{{if .IPv6}}<code class="muted">{{.IPv6}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="IPv4">{{template "codeOrDash" .IPv4}}</td>
+          <td data-label="IPv6">{{template "mutedCodeOrDash" .IPv6}}</td>
           <td data-label="Client version" class="muted">{{if .ClientVersion}}{{.ClientVersion}}{{else}}—{{end}}</td>
         </tr>
         {{end}}
       </tbody>
     </table>
   </div>
-  {{else}}<div class="card-body"><p class="muted">No check-ins recorded yet.</p></div>{{end}}
+  {{else}}<div class="empty"><h3>No check-ins recorded yet</h3></div>{{end}}
 </div>
 
 <div class="card">
@@ -120,15 +120,27 @@
       <span>Invalidates the current secret. The running client stops authenticating until you
         write the new secret to its credentials file and restart it.</span>
     </div>
-    <form method="post" action="/devices/{{.Device.ID}}/rotate-secret"
-          data-confirm="Rotate the secret for {{.Device.Label}}? The running client stops authenticating until reconfigured.">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
-        <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
+    <details class="modal">
+      <summary class="btn danger">Rotate secret…</summary>
+      <div class="modal-panel">
+        <div class="card modal-card">
+          <h2>Rotate client secret</h2>
+          <p class="muted">The running client stops authenticating until you write the new
+            secret to its credentials file and restart it.</p>
+          <form method="post" action="/devices/{{.Device.ID}}/rotate-secret">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+              <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn danger" type="submit">Rotate secret</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
+        </div>
       </div>
-      <button class="btn danger" type="submit">Rotate secret</button>
-    </form>
+    </details>
   </div>
 
   <div class="danger-item">
@@ -136,15 +148,27 @@
       <strong>Delete device</strong>
       <span>Permanently removes the device and its IP history. Cannot be undone.</span>
     </div>
-    <form method="post" action="/devices/{{.Device.ID}}/delete"
-          data-confirm="Delete {{.Device.Label}} and its history? This cannot be undone.">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
-        <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+    <details class="modal">
+      <summary class="btn solid-danger">Delete…</summary>
+      <div class="modal-panel">
+        <div class="card modal-card">
+          <h2>Delete device</h2>
+          <p class="muted">Permanently removes the device and its IP history. This cannot be
+            undone.</p>
+          <form method="post" action="/devices/{{.Device.ID}}/delete">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+              <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn solid-danger" type="submit">Delete</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
+        </div>
       </div>
-      <button class="btn solid-danger" type="submit">Delete</button>
-    </form>
+    </details>
   </div>
 </div>
 {{end}}

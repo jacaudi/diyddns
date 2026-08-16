@@ -61,12 +61,23 @@ in a container unless you mount it — use a volume, or pass `--credentials-file
     docker run --rm -v diyddns-client:/home/nonroot/.config \
       ghcr.io/jacaudi/diyddns/client:v0.1.0 enroll --code <code> --server <url>
 
-Use a volume name you haven't used before: Docker only seeds a named volume's
-ownership from the image the first time it's mounted, so a volume left over
-from an earlier attempt keeps its old ownership and will still fail. And
-because the enrollment code is consumed before credentials are written, any
-failure in this command — including that one — spends it; mint a fresh code
-at `/devices/new` rather than retrying with the same one.
+If enroll fails, read the message before retrying. `credentials already exist`
+means this host is already enrolled and your code is **not** spent — reuse it
+elsewhere, or, if you replaced that device, `docker rm -f diyddns-client-run &&
+docker volume rm diyddns-client` and run the same command again. `credentials:
+... permission denied` means the volume has the wrong owner — this is the
+client's own message; `docker: permission denied ... docker daemon socket` is
+a different problem and means your user is not in the `docker` group. For the
+client's message, the code may or may not have been spent, because it is
+emitted both before and after the code is sent — check `/devices` first: if
+the device you just named is listed the code was spent and you need a fresh
+one; if it is absent the code is still good, so clear the volume with the two
+commands above and run the same command again. Any other message also leaves
+the code's status unclear, because the server records the device before the
+client stores anything — check `/devices` the same way: if the device you
+just named is listed the code was spent and you need a fresh one; if it is
+absent the code is still good, so fix what the message reports and run the
+same command again, without removing the volume.
 
 ## Documentation
 

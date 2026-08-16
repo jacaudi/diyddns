@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"html"
 	"io"
 	"log/slog"
@@ -656,7 +657,10 @@ func TestAppCSS_CrampedFormSpacingIsCorrected(t *testing.T) {
 		{"field -> field (.field margin-bottom)", `^\.field\s*\{\s*margin-bottom:\s*var\(--space-4\)`},
 		{"input -> button (.field + .btn margin-top)", `\.field \+ \.btn\s*\{\s*margin-top:\s*var\(--space-4\)`},
 		{"button -> status (.status margin-top)", `^\.status\s*\{[^}]*margin:\s*var\(--space-4\)\s+0\s+0`},
-		{"field hint (.field .hint margin-top)", `\.field \.hint\s*\{[^}]*margin-top:\s*var\(--space-2\)`},
+		// [^{]* rather than \s*: the declaration may be shared with another
+		// selector in a group (.disclosure .hint reuses it). What this guards is
+		// the 8px top margin, not whether the rule is written on its own.
+		{"field hint (.field .hint margin-top)", `\.field \.hint[^{]*\{[^}]*margin-top:\s*var\(--space-2\)`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -708,6 +712,272 @@ func TestAppCSS_ActionGapDoesNotRelyOnMarginCollapsing(t *testing.T) {
 			`field's own var(--space-4) bottom margin adds to the button's margin-top instead of ` +
 			`collapsing with it, and the rendered input->button gap on /account is the sum of the ` +
 			`two rather than the button's margin-top alone`)
+	}
+}
+
+// TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent guards the whole
+// stylesheet against one defect class, not one rule.
+//
+// A grid track written as bare `1fr` is `minmax(auto, 1fr)`, and `auto` as a
+// track MINIMUM is the item's min-content width — so such a track can grow to
+// fill, but can never shrink below the widest unbreakable thing inside it. On
+// /devices/{id} that unbreakable thing is the Device ID `.copy` pill, which is
+// `white-space: nowrap` around a 36-char UUID: measured in Chromium at a 390px
+// viewport, each `.grid.cols-2` card was pinned at 440px and the document
+// scrolled to 464px. `minmax(0, 1fr)` lets the track shrink, and the pill's
+// own `max-width: 100%` plus its `overflow: auto` code element then absorb the
+// difference by scrolling in place — which is what they were written to do.
+//
+// `.danger-item` was already fixed this way once, and that fix is exactly why
+// this test is file-wide rather than a list of three selectors: the 780px
+// override of `.danger-item` was left as a bare `1fr` and reintroduced the
+// same defect one media query down. Guarding the class instead of the instance
+// is what stops the next grid from repeating it.
+//
+// Scope note: this asserts only that a FLEXIBLE track may shrink. Fixed tracks
+// (`160px`, `200px`) are untouched — they carry a deliberate width, and their
+// media-query overrides are where they get to stop being fixed.
+//
+// Like the spacing tests above this is a text-level proxy for a geometric
+// property; the rendered 390px document width stays a browser measurement.
+func TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	decl := regexp.MustCompile(`grid-template-columns:[^;}]*`)
+	found := decl.FindAllString(string(css), -1)
+	if len(found) == 0 {
+		t.Fatal("no grid-template-columns declarations found; this test has lost its subject")
+	}
+
+	for _, d := range found {
+		// Remove the correct form, then anything still saying 1fr is bare.
+		if strings.Contains(strings.ReplaceAll(d, "minmax(0, 1fr)", ""), "1fr") {
+			t.Errorf("bare 1fr track in %q: a track that is minmax(auto, 1fr) cannot shrink "+
+				"below its content's min-content width, so an unbreakable child (a nowrap .copy "+
+				"pill) forces document overflow at narrow viewports; write minmax(0, 1fr)", d)
+		}
+	}
+}
+
+// TestAppCSS_TypographyIsOnOneScale holds every type size to a declared scale,
+// the way --space-1..7 already holds every margin, padding and gap.
+//
+// Spacing was tokenised; typography never was, and it showed: measured live
+// across nine screens there were twelve distinct rendered font sizes, from
+// fifteen hard-coded declarations. The half-pixel values (11.5, 12.5, 13.5)
+// and the lone 0.85rem are the tell that these were picked per component
+// rather than chosen from a set — and 13.5px, 13px and 12.5px are three
+// different numbers that no reader can tell apart.
+//
+// Two of the twelve were not decisions at all. <h3> had no rule, so it
+// inherited the UA's 1.17em against a 14px parent and rendered at 16.38px, a
+// number nobody typed. The stacked-table micro-label sat at 11px, below every
+// other size in the file.
+//
+// The scale keeps values already in use (12/13/14/16/19/22/26) rather than
+// imposing a ratio, so headings the maintainer already signed off on do not
+// move: what changes is that the in-between values collapse onto their
+// neighbours. Numeric steps with no semantic alias layer, matching the
+// spacing scale's shape — that alias layer was offered and declined once
+// already, and this scale does not reopen it.
+//
+// Named --type-N and not --text-N: --text, --text-muted and --text-faint are
+// already the text COLOUR tokens, and a --text-2 sitting among them would
+// read as a third shade rather than a size.
+//
+// The single exception is .empty .icon, which sizes a decorative emoji glyph
+// rather than any text a reader parses; putting it on the type scale would
+// make the scale mean two different things.
+func TestAppCSS_TypographyIsOnOneScale(t *testing.T) {
+	raw, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	// Comments quote braces and selectors; parsing rules without stripping
+	// them first produces phantom rules with prose for a body.
+	css := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(string(raw), "")
+
+	for i := 1; i <= 7; i++ {
+		token := fmt.Sprintf("--type-%d:", i)
+		if !strings.Contains(css, token) {
+			t.Errorf(":root does not declare %s; the type scale is incomplete", token)
+		}
+	}
+
+	rules := regexp.MustCompile(`([^{}]+)\{([^{}]*)\}`).FindAllStringSubmatch(css, -1)
+	if len(rules) == 0 {
+		t.Fatal("parsed no rules out of app.css; this test has lost its subject")
+	}
+	for _, rule := range rules {
+		selector, body := strings.TrimSpace(rule[1]), rule[2]
+		if !strings.Contains(body, "font-size:") {
+			continue
+		}
+		// The decorative glyph, per the note above.
+		if strings.Contains(selector, ".empty .icon") {
+			continue
+		}
+		for _, decl := range regexp.MustCompile(`font-size:\s*([^;}]+)`).FindAllStringSubmatch(body, -1) {
+			if value := strings.TrimSpace(decl[1]); !strings.HasPrefix(value, "var(--type-") {
+				t.Errorf("%s sets font-size: %s — every type size comes from the scale, "+
+					"so that a size is chosen from a set rather than picked per component",
+					selector, value)
+			}
+		}
+	}
+}
+
+// TestAppCSS_DescriptionValuesWrapOperatorSuppliedStrings guards the one place
+// in the UI that renders arbitrary operator-configured text.
+//
+// Every value on /admin/server — a database path, a listen address, a base
+// URL, a build string — comes from the config file or the build, so none of
+// them has a bounded length and several contain no spaces at all. With the
+// default `overflow-wrap: normal` a <dd> holding one of those has no break
+// opportunity, so its box stays viewport-wide while the text spills out of it
+// as an anonymous inline box: measured in the browser smoke at a 390px
+// viewport, a temp-directory database path pushed the document 296px wider
+// than the viewport while every element box still reported as fitting.
+//
+// That invisibility is the reason this is asserted rather than eyeballed. The
+// overflow is not attributable to any element's geometry, so it survives a
+// screenshot review of a page whose boxes all look correct — and it only
+// appears with real config, which is why the audit that ran against seeded
+// test data never saw it.
+//
+// `anywhere` rather than `break-word`: only `anywhere` also lets the box's
+// min-content size shrink, which is what stops the containing grid track from
+// being held open in the first place.
+func TestAppCSS_DescriptionValuesWrapOperatorSuppliedStrings(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	rule := regexp.MustCompile(`(?s)\.kv > dd\s*\{(.*?)\}`).FindStringSubmatch(string(css))
+	if rule == nil {
+		t.Fatal("no `.kv > dd` rule in app.css; this test has lost its subject")
+	}
+	if !strings.Contains(rule[1], "overflow-wrap: anywhere") {
+		t.Error("`.kv > dd` is missing `overflow-wrap: anywhere`; a config value with no spaces " +
+			"(a filesystem path, a URL) then has no break opportunity and spills out of the page")
+	}
+}
+
+// TestAppCSS_SmallButtonsAreStillTouchTargets pins the one rule that decides
+// whether the compact controls can be hit with a thumb.
+//
+// Measured in Chromium at a 390px viewport, .btn.sm rendered 24px tall as a
+// <button> ("Copy" on /devices/{id}, "Disable" on /admin/users) and 30px as an
+// <a> ("Open" on /devices, "Full history ›" on /devices/{id}) — the same class,
+// two different heights, because the two element types compute different
+// content box heights from identical padding. That is why the fix is a
+// min-height and not more padding: padding cannot land both on one number, and
+// whichever value fixed the <button> would overshoot the <a>.
+//
+// var(--space-6) is 32px on the project's 4px scale. WCAG 2.2 Target Size
+// (Minimum) would be satisfied at 24px, so the 24px controls were arguably
+// already conformant; 32px is a deliberate choice above the floor, because the
+// audit measured these as uncomfortable on a real phone-width viewport rather
+// than merely non-conformant.
+//
+// A text assertion can only prove the rule is present. That it produces 32px
+// in a real layout engine is asserted by internal/smoke/browser/smoke.mjs,
+// which measures the rendered boxes.
+func TestAppCSS_SmallButtonsAreStillTouchTargets(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	rule := regexp.MustCompile(`(?s)\.btn\.sm\s*\{(.*?)\}`).FindStringSubmatch(string(css))
+	if rule == nil {
+		t.Fatal("no .btn.sm rule in app.css; this test has lost its subject")
+	}
+	body := rule[1]
+
+	for _, want := range []struct{ name, decl string }{
+		{"a floor on the target height", "min-height: var(--space-6)"},
+		{"a box that can centre the label vertically", "display: inline-flex"},
+		{"the label centred in that box", "align-items: center"},
+	} {
+		if !strings.Contains(body, want.decl) {
+			t.Errorf(".btn.sm is missing %s (%q); without it the rendered control is "+
+				"24px tall as a <button> and 30px as an <a>", want.name, want.decl)
+		}
+	}
+}
+
+// TestPages_EachRenderExactlyOneH1 guards the document outline across every
+// app-shell screen at once.
+//
+// A page with no <h1> starts its heading hierarchy at <h2>, which leaves a
+// screen reader's heading list with no entry naming the page and makes
+// "jump to the top heading" land on a section instead. A page with two
+// competing <h1>s is the same defect from the other side. Twelve of the
+// fourteen screens already got this right by convention (.page-head > h1);
+// /devices/new and /admin/users/new rendered zero, in BOTH of their states —
+// the audit only caught the form step, but the reveal step was missing one
+// too.
+//
+// Both of those screens are two pages behind one URL: a form, and the
+// once-only reveal that the POST renders inline. Each state is listed here
+// separately, because a fix applied to only the branch the auditor happened
+// to screenshot is exactly the half-fix this test exists to prevent.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestPages_EachRenderExactlyOneH1(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "outline@example.com", "admin")
+	dev := seedDevice(t, st, usr.ID, "outline-box")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		form   url.Values
+	}{
+		{"devices list", http.MethodGet, "/devices", nil},
+		{"device new (form step)", http.MethodGet, "/devices/new", nil},
+		{"device new (reveal step)", http.MethodPost, "/devices/new", url.Values{"label": {"outline-pi"}}},
+		{"device detail", http.MethodGet, "/devices/" + dev.ID, nil},
+		{"device history", http.MethodGet, "/devices/" + dev.ID + "/history", nil},
+		{"account", http.MethodGet, "/account", nil},
+		{"admin users", http.MethodGet, "/admin/users", nil},
+		{"admin user new (form step)", http.MethodGet, "/admin/users/new", nil},
+		{"admin user new (reveal step)", http.MethodPost, "/admin/users/new", url.Values{"email": {"invitee@example.com"}, "role": {"user"}}},
+		{"admin user edit", http.MethodGet, "/admin/users/" + usr.ID, nil},
+		{"admin audit", http.MethodGet, "/admin/audit", nil},
+		{"admin server", http.MethodGet, "/admin/server", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req *http.Request
+			if tt.method == http.MethodPost {
+				tt.form.Set("csrf", sess.CSRFToken)
+				req = httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			} else {
+				req = httptest.NewRequest(http.MethodGet, tt.path, nil)
+			}
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s = %d, want 200", tt.method, tt.path, rec.Code)
+			}
+			if n := strings.Count(rec.Body.String(), "<h1"); n != 1 {
+				t.Errorf("%d <h1> elements, want exactly 1: a page with none has no heading "+
+					"naming it, and a page with two has no single one that does", n)
+			}
+		})
 	}
 }
 
@@ -845,8 +1115,32 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	if !strings.Contains(body, "Shown once") {
 		t.Error("the shown-once warning is missing")
 	}
+	// The shown-once callout must say the code can't be shown again, not just
+	// that this page won't show it — the trimmed copy still has to carry the
+	// non-recoverable fact, not merely the display policy.
+	if !strings.Contains(body, "can't be shown again") {
+		t.Error("the shown-once callout no longer says the code can't be shown again")
+	}
 	if !strings.Contains(body, "single use") {
 		t.Error("the single-use note is missing")
+	}
+	// The container path is the recommended install route, so both steps must
+	// render with the exact volume and container names the recovery copy and
+	// the README also use — a mismatch hands the operator commands that do not
+	// refer to the same objects.
+	if !strings.Contains(body, "docker run --rm -v diyddns-client:/home/nonroot/.config") {
+		t.Error("the container enroll command is missing")
+	}
+	if !strings.Contains(body, "--name diyddns-client-run") {
+		t.Error("the container run command is missing")
+	}
+	if !strings.Contains(body, "--restart unless-stopped") {
+		t.Error("the run command does not survive a reboot")
+	}
+	// testDeps pins Version:"test", which is not a published release shape, so
+	// the page must advertise :latest rather than a tag that 404s.
+	if !strings.Contains(body, "ghcr.io/jacaudi/diyddns/client:latest") {
+		t.Error("the image reference is missing or is not the dev fallback")
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", got)
@@ -855,6 +1149,280 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	// the device row appears only when a client redeems it.
 	if strings.Contains(body, "Device created") {
 		t.Error("the reveal claims a device was created")
+	}
+}
+
+// TestDeviceNew_DevBuildNote pins the version-dependent half of the reveal. The
+// note exists to stop an operator reading ":latest" as "newest stable"; a
+// release build must not show it, because there the pinned tag IS the release.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_DevBuildNote(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		version  string
+		wantTag  string
+		wantNote bool
+	}{
+		{"dev", "v0.0.0-dev", "ghcr.io/jacaudi/diyddns/client:latest", true},
+		{"release", "v0.1.0", "ghcr.io/jacaudi/diyddns/client:v0.1.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, st := testDeps(t)
+			// Set Info on the local copy rather than a package global: Deps is
+			// passed by value into New, and the goose race documented above
+			// makes global mutation unsafe in this package.
+			deps.Info = version.Info{Version: tc.version}
+			h, _ := New(deps)
+			usr := seedUser(t, st, "devnote-"+tc.name+"@example.com", "user")
+			cookie := signIn(t, deps, usr)
+			sess := sessionFor(t, deps, cookie)
+
+			form := url.Values{"csrf": {sess.CSRFToken}, "label": {"note-" + tc.name}}
+			req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			body := rec.Body.String()
+			if !strings.Contains(body, tc.wantTag) {
+				t.Errorf("image tag %q is missing", tc.wantTag)
+			}
+			if got := strings.Contains(body, "development build"); got != tc.wantNote {
+				t.Errorf("dev-build note present = %v, want %v", got, tc.wantNote)
+			}
+		})
+	}
+}
+
+// TestDeviceNew_RecoveryHints guards the copy that tells an operator what to do
+// when enroll fails. Three properties, each of which has been got wrong before:
+//
+//  1. The branches must not over-claim. "credentials already exist" fires before
+//     any server contact, so the code is intact. "permission denied" is emitted
+//     by TWO states — a 0700 root-owned dir fails in credentials.Load before the
+//     code is sent, while a traversable one fails after — so the message alone
+//     cannot tell the operator whether the code was spent, and the copy must
+//     send them to the device list instead of asserting it.
+//  2. The destructive commands must be SCOPED to the branches that need them.
+//     Rendered as an unconditional trailer, they are one click from destroying a
+//     live device's credentials for an operator whose error said to leave it be.
+//  3. Emphasis inside a callout must be <b>, never <strong>: .callout strong is
+//     a descendant selector setting display:block, which shatters the sentence
+//     around it. A Contains() check cannot see that, so assert the tag.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_RecoveryHints(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "recovery@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"recovery-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// All three branches, including the default arm.
+	for _, want := range []string{
+		"credentials already exist",
+		"permission denied",
+		"Anything else, including that one",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery copy is missing the %q branch", want)
+		}
+	}
+
+	// Property 1: permission denied must NOT assert the code was spent, and must
+	// send the operator to the device list.
+	if !strings.Contains(body, "may or may not be spent") {
+		t.Error("the permission-denied branch over-claims: it must not assert spent-ness")
+	}
+	if !strings.Contains(body, "device list") {
+		t.Error("the permission-denied branch does not tell the operator how to check")
+	}
+	// The permission-denied paragraph's job is to discriminate the client's own
+	// message from Docker's daemon-socket message, not to explain the volume's
+	// ownership — the operator can't act on "wrong owner" directly, only on
+	// which branch applies to them.
+	if !strings.Contains(body, "is the client's own message") {
+		t.Error("the permission-denied branch does not say it is the client's own message")
+	}
+	// The trimmed "credentials already exist" paragraph must not restate what
+	// the code snippet already told the reader.
+	if strings.Contains(body, "This host is already enrolled") {
+		t.Error("the credentials-already-exist branch still repeats the code snippet in prose")
+	}
+
+	// Property 3: inline emphasis renders as <b>, not <strong>.
+	if !strings.Contains(body, "<b>not spent</b>") {
+		t.Error(`emphasis must be <b>; <strong> inside a callout renders display:block`)
+	}
+
+	// Both recovery commands sit inside copy pills. Asserting the pill markup
+	// rather than the bare string is the point: bare text satisfies a naive
+	// Contains check while being unusable on the page.
+	for _, cmd := range []string{
+		"docker rm -f diyddns-client-run",
+		"docker volume rm diyddns-client",
+	} {
+		if !strings.Contains(body, `data-copy="`+cmd+`"`) {
+			t.Errorf("%q does not render inside a copyValue pill", cmd)
+		}
+	}
+
+	// Container-then-volume: a volume cannot be removed while a container holds
+	// it, so the reverse order fails with "volume is in use".
+	rmIdx := strings.Index(body, "docker rm -f diyddns-client-run")
+	volIdx := strings.Index(body, "docker volume rm diyddns-client")
+	if rmIdx == -1 || volIdx == -1 || rmIdx > volIdx {
+		t.Errorf("recovery commands are out of order: rm at %d, volume rm at %d", rmIdx, volIdx)
+	}
+
+	// Property 2: the commands must appear exactly once, inside the branch that
+	// needs them — not repeated as an unconditional trailer.
+	if n := strings.Count(body, `data-copy="docker volume rm diyddns-client"`); n != 1 {
+		t.Errorf("docker volume rm renders %d times, want exactly 1 (scoped to its branch)", n)
+	}
+
+	// The corrected Next-step callout must not tell the operator that enroll
+	// alone starts reporting — that belief is what makes them skip step 2.
+	if strings.Contains(body, "Run the command on the device") {
+		t.Error("the stale Next-step callout still claims one command starts reporting")
+	}
+	// The trimmed Next-step callout must still say the device does not report
+	// until the second container command is running — the fact that made the
+	// stale claim above a defect in the first place.
+	if !strings.Contains(body, "won't report until the second") {
+		t.Error("the Next-step callout no longer says the device waits on the second command")
+	}
+
+	// B1: the default ("any other message") branch must not assert that the
+	// server was left untouched — EnrollmentService.ConsumeCode commits the
+	// device and consumes the code before the client persists anything, so a
+	// client-side failure after that point (dropped connection, non-JSON 200
+	// from a proxy, credentials.Save hitting a full disk) can leave the code
+	// spent while matching neither of the other two branches.
+	if strings.Contains(body, "nothing was changed on the server") {
+		t.Error(`the default branch still claims "nothing was changed on the server", which is false once the client has POSTed`)
+	}
+
+	// B1 + S5: the default branch's discriminator must name the row the
+	// operator just tried to enroll, not an unresolvable "the device" — the
+	// devices list has no hostname column, so nothing on the page tells them
+	// which row corresponds to "this host".
+	if !strings.Contains(body, "the device you just named") {
+		t.Error(`the default branch does not point the operator at "the device you just named" as the discriminator`)
+	}
+
+	// S3: the permission-denied branch must be scoped to the CLIENT's own
+	// "credentials: ... permission denied" message, not the bare substring
+	// "permission denied" — that also matches Docker's own
+	// "permission denied while trying to connect to the Docker daemon socket",
+	// which fires before any container runs and must not be mis-triaged into
+	// this branch.
+	if !strings.Contains(body, "credentials: ... permission denied") {
+		t.Error(`the permission-denied branch is not scoped to the client's own "credentials: ... permission denied" message`)
+	}
+}
+
+// TestDeviceNew_BaseURLWarningPlacement guards two properties of the
+// cleartext-credential warning on the reveal screen: it renders once, and it
+// renders ABOVE the commands it warns about rather than below all four of
+// them, where "this" in its text would be ambiguous.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_BaseURLWarningPlacement(t *testing.T) {
+	deps, st := testDeps(t)
+	deps.Cfg.Server.BaseURL = ""
+	h, _ := New(deps)
+	usr := seedUser(t, st, "baseurlwarn@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"scheme-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// S2: "this" no longer stands in for four rendered commands.
+	if !strings.Contains(body, "Check the scheme before running the commands below") {
+		t.Error(`baseURLWarning no longer says "Check the scheme before running the commands below"`)
+	}
+
+	warnIdx := strings.Index(body, "server.base_url is not configured")
+	containerIdx := strings.Index(body, "docker run --rm -v diyddns-client:/home/nonroot/.config")
+	if warnIdx == -1 || containerIdx == -1 || warnIdx > containerIdx {
+		t.Errorf("the base-URL warning does not render before the container commands: warning at %d, container command at %d",
+			warnIdx, containerIdx)
+	}
+}
+
+// TestDeviceNew_BinaryPathIsCollapsed pins the bare-binary command behind a
+// collapsed disclosure. The container path is the recommended one and the only
+// one an operator can follow from a standing start; the binary command serves
+// the minority who already have it, and shown open it competes for attention
+// with the path most readers must actually take.
+//
+// It must stay in the markup rather than being dropped: collapsed still copies,
+// greps, and prints. So the assertion is about WHERE it renders, not whether —
+// a Contains check alone would pass with the command sitting in the open.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_BinaryPathIsCollapsed(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "collapsed@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"collapsed-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	start := strings.Index(body, `<details class="disclosure">`)
+	if start == -1 {
+		t.Fatal("the binary path does not render inside a disclosure")
+	}
+	// An `open` attribute would defeat the point, so assert its absence on the
+	// element itself rather than anywhere in the page.
+	if strings.Contains(body, `<details class="disclosure" open>`) {
+		t.Error("the disclosure renders open; it must start collapsed")
+	}
+	end := strings.Index(body[start:], "</details>")
+	if end == -1 {
+		t.Fatal("the disclosure is never closed")
+	}
+	seg := body[start : start+end]
+
+	if !strings.Contains(seg, "<summary>") {
+		t.Error("the disclosure has no summary, so there is nothing to click")
+	}
+	// The load-bearing assertion: the command is INSIDE the disclosure. Placed
+	// outside it, the page would look collapsed while the command still showed.
+	if !strings.Contains(seg, `data-copy="diyddns-client enroll`) {
+		t.Error("the bare-binary command renders outside the disclosure")
+	}
+	// The shell-history warning travels with the command it warns about.
+	if !strings.Contains(seg, "shell history") {
+		t.Error("the shell-history hint did not move inside the disclosure with its command")
 	}
 }
 
@@ -990,6 +1558,146 @@ func TestDevices_QueryFilter_MatchesPositively(t *testing.T) {
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
 // calls store.Open, and store.Migrate mutates goose's package-level globals
 // with no synchronization, so concurrent store opens race under -race.
+// TestTemplates_AbsentValueIsSingleSourced keeps the "this value is absent"
+// representation in one place. It was hand-written at 12 call sites across five
+// templates, so changing the em dash to anything else — "Never", "not
+// reported" — meant twelve synchronised edits, and missing one leaves the UI
+// saying two different things about the same condition.
+//
+// Source-level rather than render-level on purpose: rendering proves the dash
+// still appears, not that it stopped being copy-pasted. Same approach as
+// TestAppCSS_CrampedFormSpacingIsCorrected.
+func TestTemplates_AbsentValueIsSingleSourced(t *testing.T) {
+	entries, err := templateFS.ReadDir("templates")
+	if err != nil {
+		t.Fatalf("read templates dir: %v", err)
+	}
+	const dash = `<span class="muted">—</span>`
+	for _, e := range entries {
+		if e.Name() == "partials.html" {
+			continue // the one place it is allowed to live
+		}
+		b, err := templateFS.ReadFile("templates/" + e.Name())
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if n := strings.Count(string(b), dash); n > 0 {
+			t.Errorf("%s hand-writes the absent-value dash %d time(s); call the partial instead", e.Name(), n)
+		}
+	}
+}
+
+// TestDeviceDetail_EmptyHistoryUsesTheEmptyComponent stops this page telling
+// the operator "nothing here yet" in a shape no other page uses. Every other
+// empty state on the site is .empty with a heading; this one hand-rolled a
+// muted paragraph.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceDetail_EmptyHistoryUsesTheEmptyComponent(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "emptyhist@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "no-checkins")
+	cookie := signIn(t, deps, usr)
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `<div class="empty">`) {
+		t.Error("the no-history state does not use the .empty component")
+	}
+	if strings.Contains(body, `<p class="muted">No check-ins recorded yet.</p>`) {
+		t.Error("the hand-rolled empty state is still rendering")
+	}
+}
+
+// TestDeviceDetail_DestructiveConfirmsAreCollapsed pins the danger zone's
+// confirm fields behind a disclosure, so at rest the card shows one button per
+// action instead of three open forms competing for the same right edge.
+//
+// Only the two DESTRUCTIVE actions collapse. Disable is reversible and keeps
+// its history, so it stays a single click — collapsing it would add friction
+// where none is warranted, which is how friction stops being read as a signal.
+//
+// The assertion is about WHERE each confirm input renders, not whether it
+// exists: a Contains check would pass with the field sitting in the open,
+// which is the exact layout this replaces.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceDetail_DestructiveConfirmsAreCollapsed(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "danger@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "danger-pi")
+	cookie := signIn(t, deps, usr)
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	const open = `<details class="modal">`
+	if n := strings.Count(body, open); n != 2 {
+		t.Errorf("%d collapsed actions, want exactly 2 (rotate and delete)", n)
+	}
+	if strings.Contains(body, `<details class="modal" open>`) {
+		t.Error("a destructive action renders already expanded")
+	}
+	// Built on <details>, not <dialog>: ui.js's contract is that every action
+	// still works with JavaScript blocked, and a <dialog> without an open
+	// attribute is display:none, which would put the confirm field out of reach.
+	if strings.Contains(body, "<dialog") {
+		t.Error("a <dialog> is unreachable with JS blocked; this must stay a <details>")
+	}
+	if n := strings.Count(body, `class="modal-panel"`); n != 2 {
+		t.Errorf("%d modal panels, want 2", n)
+	}
+
+	// Collect each disclosure's inner markup, then require every confirm input
+	// to live in one of them.
+	var blocks []string
+	for rest := body; ; {
+		_, after, found := strings.Cut(rest, open)
+		if !found {
+			break
+		}
+		inner, _, closed := strings.Cut(after, "</details>")
+		if !closed {
+			t.Fatal("a disclosure is never closed")
+		}
+		blocks = append(blocks, inner)
+		rest = after
+	}
+	for _, id := range []string{`id="rotate-confirm"`, `id="delete-confirm"`} {
+		if !strings.Contains(body, id) {
+			t.Errorf("%s is missing from the page entirely", id)
+			continue
+		}
+		found := false
+		for _, b := range blocks {
+			if strings.Contains(b, id) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s renders outside a disclosure, so it is visible at rest", id)
+		}
+	}
+
+	// Disable is reversible; it must NOT have been swept up in the change.
+	if strings.Contains(body, `<summary class="btn danger">Disable`) {
+		t.Error("Disable was collapsed too; only destructive actions should be")
+	}
+}
+
 func TestDeviceDetail_ForeignDeviceIs404(t *testing.T) {
 	deps, st := testDeps(t)
 	h, _ := New(deps)

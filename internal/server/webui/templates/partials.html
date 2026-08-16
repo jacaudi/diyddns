@@ -3,6 +3,20 @@
 {{define "copyValue"}}<span class="copy"><code>{{.}}</code>
   <button class="btn sm" type="button" data-copy="{{.}}">Copy</button></span>{{end}}
 
+{{/* An absent value renders as a muted em dash. Defined once: it was
+     hand-written at 12 call sites, so changing this representation used to
+     mean twelve synchronised edits. The wrappers differ only in how a PRESENT
+     value is marked up. */}}
+{{define "dash"}}<span class="muted">—</span>{{end}}
+
+{{define "codeOrDash"}}{{if .}}<code>{{.}}</code>{{else}}{{template "dash"}}{{end}}{{end}}
+
+{{define "mutedCodeOrDash"}}{{if .}}<code class="muted">{{.}}</code>{{else}}{{template "dash"}}{{end}}{{end}}
+
+{{define "textOrDash"}}{{if .}}{{.}}{{else}}{{template "dash"}}{{end}}{{end}}
+
+{{define "copyOrDash"}}{{if .}}{{template "copyValue" .}}{{else}}{{template "dash"}}{{end}}{{end}}
+
 {{define "errorBanner"}}{{if .}}<div class="callout warn" role="alert">{{.}}</div>{{end}}{{end}}
 
 {{define "pager"}}

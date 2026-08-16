@@ -2,13 +2,12 @@
 <div class="breadcrumb"><a href="/devices">Devices</a> / New device</div>
 
 {{if .Code}}
+<div class="page-head"><div><h1>Enrollment code created</h1></div></div>
 <div class="card" style="max-width:640px">
-  <div class="card-head"><h2>Enrollment code created</h2></div>
   <div class="card-body">
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
-      This code is displayed a single time and is not recoverable. Copy it now.
-      Reloading this page mints another code.
+      Copy it now — it can't be shown again. Reloading this page mints another code.
     </div>
 
     <div class="field">
@@ -17,27 +16,55 @@
       <div class="hint">Expires in {{.ExpiresIn}} ({{.ExpiresAt}}) · single use.</div>
     </div>
 
+    {{template "errorBanner" .BaseURLWarning}}
+
     <div class="field">
-      <label>Or paste this ready-to-run command on the device</label>
-      {{template "copyValue" .Command}}
+      <label>Run the client on the device — container (recommended)</label>
+
+      <div class="hint"><b>Step 1.</b> Enroll once. This exchanges the code and exits.</div>
+      {{template "copyValue" .ContainerEnroll}}
       <div class="hint">The code appears in your shell history when you run this.</div>
+
+      <div class="hint"><b>Step 2.</b> Start the agent. This one keeps running and reports the IP.</div>
+      {{template "copyValue" .ContainerRun}}
+      {{if .DevImageNote}}<div class="hint">{{.DevImageNote}}</div>{{end}}
     </div>
 
-    {{template "errorBanner" .BaseURLWarning}}
+    <div class="callout info">
+      <strong>If enroll fails, read the message before doing anything</strong>
+      <p><code>credentials already exist</code> — your code is <b>not spent</b>. Leave a device you
+      still use alone. If you replaced it, clear the dead credentials in this order, then enroll
+      again:</p>
+      {{template "copyValue" "docker rm -f diyddns-client-run"}}
+      {{template "copyValue" "docker volume rm diyddns-client"}}
+      <p><code>credentials: ... permission denied</code> is the client's own message. Docker's own
+      <code>permission denied ... daemon socket</code> is a different problem: add your user to the
+      <code>docker</code> group.</p>
+      <p><b>Anything else, including that one</b> — your code <b>may or may not be spent</b>, so
+      check the device list. If <b>the device you just named</b> is there, mint a fresh code. If it
+      is absent the code still works: clear the volume with the two commands above, then enroll
+      again.</p>
+    </div>
+
+    <details class="disclosure">
+      <summary>Advanced — already have the binary?</summary>
+      {{template "copyValue" .Command}}
+      <div class="hint">The code appears in your shell history when you run this.</div>
+    </details>
 
     <div class="callout info">
       <strong>Next step</strong>
-      Run the command on the device. It exchanges the code for a permanent secret,
-      then begins reporting its IP. The device appears in your list within a minute —
-      until its first check-in it shows as <em>Never seen</em>.
+      Run both container commands on the device, in order — the device won't report until the second
+      one is running. It appears in your list within a minute; until then it shows as
+      <em>Never seen</em>.
     </div>
 
     <div class="btn-row"><a class="btn primary" href="/devices">Back to devices</a></div>
   </div>
 </div>
 {{else}}
+<div class="page-head"><div><h1>Create a device</h1></div></div>
 <div class="card" style="max-width:560px">
-  <div class="card-head"><h2>Create a device</h2></div>
   <div class="card-body">
     {{template "errorBanner" .FieldErr}}
     <form method="post" action="/devices/new">

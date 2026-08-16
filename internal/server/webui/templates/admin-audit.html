@@ -41,7 +41,7 @@
           <td data-label="Time" class="muted nowrap" title="{{.TimeAbs}}">{{.TimeRel}}</td>
           <td data-label="Actor">{{.Actor}}</td>
           <td data-label="Action"><span class="tag neutral">{{.EventType}}</span></td>
-          <td data-label="Target">{{if .Target}}<code>{{.Target}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="Target">{{template "codeOrDash" .Target}}</td>
           <td data-label="Source IP" class="muted">{{if .IP}}<code>{{.IP}}</code>{{else}}—{{end}}</td>
         </tr>
         {{end}}

@@ -42,8 +42,8 @@
         <tr>
           <td data-label="Device"><a class="primary-cell" href="/devices/{{.ID}}">{{.Label}}</a></td>
           <td data-label="Status">{{template "statusTag" .Status}}</td>
-          <td data-label="IPv4">{{if .IPv4}}<code>{{.IPv4}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td data-label="IPv6">{{if .IPv6}}<code class="muted">{{.IPv6}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="IPv4">{{template "codeOrDash" .IPv4}}</td>
+          <td data-label="IPv6">{{template "mutedCodeOrDash" .IPv6}}</td>
           <td data-label="Last seen" class="muted nowrap" title="{{.LastSeenAbs}}">{{.LastSeenAt}}</td>
           <td class="actions"><a class="btn sm" href="/devices/{{.ID}}">Open</a></td>
         </tr>
