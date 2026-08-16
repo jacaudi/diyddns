@@ -845,6 +845,12 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	if !strings.Contains(body, "Shown once") {
 		t.Error("the shown-once warning is missing")
 	}
+	// The shown-once callout must say the code can't be shown again, not just
+	// that this page won't show it — the trimmed copy still has to carry the
+	// non-recoverable fact, not merely the display policy.
+	if !strings.Contains(body, "can't be shown again") {
+		t.Error("the shown-once callout no longer says the code can't be shown again")
+	}
 	if !strings.Contains(body, "single use") {
 		t.Error("the single-use note is missing")
 	}
@@ -971,6 +977,18 @@ func TestDeviceNew_RecoveryHints(t *testing.T) {
 	if !strings.Contains(body, "device list") {
 		t.Error("the permission-denied branch does not tell the operator how to check")
 	}
+	// The permission-denied paragraph's job is to discriminate the client's own
+	// message from Docker's daemon-socket message, not to explain the volume's
+	// ownership — the operator can't act on "wrong owner" directly, only on
+	// which branch applies to them.
+	if !strings.Contains(body, "is the client's own message") {
+		t.Error("the permission-denied branch does not say it is the client's own message")
+	}
+	// The trimmed "credentials already exist" paragraph must not restate what
+	// the code snippet already told the reader.
+	if strings.Contains(body, "This host is already enrolled") {
+		t.Error("the credentials-already-exist branch still repeats the code snippet in prose")
+	}
 
 	// Property 3: inline emphasis renders as <b>, not <strong>.
 	if !strings.Contains(body, "<b>not spent</b>") {
@@ -1007,6 +1025,12 @@ func TestDeviceNew_RecoveryHints(t *testing.T) {
 	// alone starts reporting — that belief is what makes them skip step 2.
 	if strings.Contains(body, "Run the command on the device") {
 		t.Error("the stale Next-step callout still claims one command starts reporting")
+	}
+	// The trimmed Next-step callout must still say the device does not report
+	// until the second container command is running — the fact that made the
+	// stale claim above a defect in the first place.
+	if !strings.Contains(body, "won't report until the second") {
+		t.Error("the Next-step callout no longer says the device waits on the second command")
 	}
 
 	// B1: the default ("any other message") branch must not assert that the

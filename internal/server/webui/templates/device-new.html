@@ -7,8 +7,7 @@
   <div class="card-body">
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
-      This code is displayed a single time and is not recoverable. Copy it now.
-      Reloading this page mints another code.
+      Copy it now — it can't be shown again. Reloading this page mints another code.
     </div>
 
     <div class="field">
@@ -33,14 +32,14 @@
 
     <div class="callout info">
       <strong>If enroll fails, read the message before doing anything</strong>
-      <p><code>credentials already exist</code> — your code is <b>not spent</b>. This host is
-      already enrolled: leave a device you still use alone. If you replaced it, clear the dead
-      credentials in this order, then enroll again:</p>
+      <p><code>credentials already exist</code> — your code is <b>not spent</b>. Leave a device you
+      still use alone. If you replaced it, clear the dead credentials in this order, then enroll
+      again:</p>
       {{template "copyValue" "docker rm -f diyddns-client-run"}}
       {{template "copyValue" "docker volume rm diyddns-client"}}
-      <p><code>credentials: ... permission denied</code> — the volume has the wrong owner. Docker's
-      own <code>permission denied ... daemon socket</code> is a different problem: add your user to
-      the <code>docker</code> group.</p>
+      <p><code>credentials: ... permission denied</code> is the client's own message. Docker's own
+      <code>permission denied ... daemon socket</code> is a different problem: add your user to the
+      <code>docker</code> group.</p>
       <p><b>Anything else, including that one</b> — your code <b>may or may not be spent</b>, so
       check the device list. If <b>the device you just named</b> is there, mint a fresh code. If it
       is absent the code still works: clear the volume with the two commands above, then enroll
@@ -55,10 +54,9 @@
 
     <div class="callout info">
       <strong>Next step</strong>
-      Run both container commands on the device, in order. The first exchanges the code for a
-      permanent secret and exits; the second starts the agent that reports the IP. The device
-      appears in your list within a minute of the second command — until its first check-in it
-      shows as <em>Never seen</em>.
+      Run both container commands on the device, in order — the device won't report until the second
+      one is running. It appears in your list within a minute; until then it shows as
+      <em>Never seen</em>.
     </div>
 
     <div class="btn-row"><a class="btn primary" href="/devices">Back to devices</a></div>
