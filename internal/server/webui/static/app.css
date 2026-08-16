@@ -420,7 +420,12 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   border: 1px solid var(--border); border-left-width: 3px;
   border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); font-size: 13px;
   background: var(--surface-2);
+  /* Same rhythm as .field, so a callout between two blocks is separated from
+     both. Without this a callout carries no vertical margin at all and the
+     block after it sits flush against its border — measured 0px. */
+  margin-bottom: var(--space-4);
 }
+.callout:last-child { margin-bottom: 0; }
 .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
 .callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
 .callout strong { display: block; margin-bottom: var(--space-1); }
