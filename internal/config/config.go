@@ -259,6 +259,52 @@ func (a Auth) ResolveWebAuthn(baseURL string) (rpID, rpOrigin string, err error)
 	return rpID, rpOrigin, validateRPID(rpID)
 }
 
+// InsecureCookieWarning returns a startup warning when auth.session.
+// cookie_secure marks the session cookie Secure but server.base_url is plain
+// HTTP on a non-loopback host, and "" when the configuration is fine.
+//
+// This is a WARNING, not a validation error: secure-by-default is correct and
+// the operator may legitimately be running TLS termination that base_url does
+// not describe. But a browser only keeps a Secure cookie from a
+// potentially-trustworthy origin, and plain HTTP qualifies on loopback and
+// nowhere else — so in this configuration the browser silently discards both
+// the session cookie and the in-flight OIDC flow cookie. The observable
+// result is an OIDC login bouncing back to /login?error=no_account, which
+// names neither cookies nor the scheme (issue #39).
+//
+// Loopback is the exemption because that is exactly what browsers exempt:
+// localhost and the loopback IP ranges are potentially trustworthy over plain
+// HTTP, which is why every localhost test of this configuration passes.
+func InsecureCookieWarning(cfg Server) string {
+	if !cfg.Auth.Session.CookieSecure || cfg.Server.BaseURL == "" {
+		return ""
+	}
+	u, err := url.Parse(cfg.Server.BaseURL)
+	if err != nil || u.Scheme != "http" {
+		return "" // https, or unparseable — Load already reports parse failures where they matter
+	}
+	if isLoopbackHost(u.Hostname()) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"auth.session.cookie_secure is true but server.base_url %q is plain HTTP on a "+
+			"non-loopback host: browsers discard Secure cookies from this origin, so logins "+
+			"will fail with no session and no explanation. Put TLS in front of the server "+
+			"(recommended), or set auth.session.cookie_secure to false for plain-HTTP use.",
+		cfg.Server.BaseURL)
+}
+
+// isLoopbackHost reports whether host is one browsers treat as a
+// potentially-trustworthy origin over plain HTTP: the literal "localhost" (and
+// its subdomains) or any loopback IP.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // validateRPID rejects an IP-address Relying Party ID. The WebAuthn spec
 // requires the RP ID to be a valid domain string, and browsers enforce it —
 // but nothing on the server side does, so without this check the server

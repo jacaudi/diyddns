@@ -66,6 +66,14 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", err)
 	}
 
+	// A warning, not a fail-closed: the operator may be terminating TLS in
+	// front of a base_url that does not say so. But if they are not, every
+	// login silently loses its cookie and the UI blames the account (#39), so
+	// say it at boot where it can still be acted on.
+	if w := config.InsecureCookieWarning(cfg); w != "" {
+		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Auth.Session.TTL, cfg.Auth.Session.SlideWindow)
 

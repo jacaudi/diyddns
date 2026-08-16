@@ -405,3 +405,40 @@ func TestSecretKeyBytes_Requires32(t *testing.T) {
 		t.Errorf("DecodeSecretKey returned %d bytes, want 32", len(got))
 	}
 }
+
+func TestInsecureCookieWarning(t *testing.T) {
+	// The misconfiguration issue #39 describes: cookie_secure marks the
+	// session cookie Secure, but a browser only keeps a Secure cookie from a
+	// potentially-trustworthy origin. Plain HTTP is trustworthy on loopback
+	// and nowhere else, so only the off-loopback plain-HTTP case warns.
+	tests := []struct {
+		name        string
+		baseURL     string
+		secure      bool
+		wantWarning bool
+	}{
+		{"plain http on a LAN hostname warns", "http://diyddns.lan:8080", true, true},
+		{"plain http on a LAN IP warns", "http://192.168.1.10:8080", true, true},
+		{"localhost is trustworthy", "http://localhost:8080", true, false},
+		{"127.0.0.1 is trustworthy", "http://127.0.0.1:8080", true, false},
+		{"::1 is trustworthy", "http://[::1]:8080", true, false},
+		{"https is fine anywhere", "https://diyddns.example.com", true, false},
+		{"cookie_secure off is the operator's choice", "http://diyddns.lan:8080", false, false},
+		{"no base_url, nothing to judge", "", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg config.Server
+			cfg.Server.BaseURL = tt.baseURL
+			cfg.Auth.Session.CookieSecure = tt.secure
+
+			got := config.InsecureCookieWarning(cfg)
+			if (got != "") != tt.wantWarning {
+				t.Fatalf("InsecureCookieWarning() = %q, want warning=%v", got, tt.wantWarning)
+			}
+			if tt.wantWarning && !strings.Contains(got, "cookie_secure") {
+				t.Errorf("warning must name the key to change; got %q", got)
+			}
+		})
+	}
+}
