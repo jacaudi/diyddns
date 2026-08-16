@@ -76,7 +76,7 @@ body {
   margin: 0;
   font-family: var(--sans);
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.6;
   color: var(--text);
   background: var(--bg);
 }
@@ -383,11 +383,6 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
    The base .field/.input rules stay as they are above. */
 
 .field .hint { color: var(--text-muted); font-size: 12.5px; margin-top: var(--space-2); }
-/* A caption, its command, and the note under it are one group. Block-level so
-   vertical margins apply predictably — as inline-flex the pill carried none,
-   leaving a caption sitting flush on its own command (measured 0px). */
-.field .copy { display: flex; width: fit-content; max-width: 100%; }
-.field .hint + .copy { margin-top: var(--space-2); }
 /* Two captions in a row means a new group started; give it the same 16px the
    page uses between blocks, so the steps read as separate. */
 .field .hint + .hint { margin-top: var(--space-4); }
@@ -422,6 +417,16 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 }
 .copy button:hover { color: var(--accent); border-color: var(--accent); }
 
+/* Wherever copy pills are LISTED vertically — a field's command list, a
+   callout's recovery steps — each is its own full-width row, so every command
+   has the same footprint and overflows the same way. One definition for both
+   contexts. The inline-flex base above still applies where a pill sits inside
+   running content (a <dd>, a table cell), which full width would break. */
+.field .copy,
+.callout .copy { display: flex; width: 100%; }
+.callout .copy,
+.field .hint + .copy { margin-top: var(--space-2); }
+
 /* ---------- Callouts / banners ---------- */
 
 .callout {
@@ -443,10 +448,6 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
    than above it. */
 .callout p { margin: var(--space-3) 0 0; }
 .callout p:last-child { margin-bottom: 0; }
-/* Each command owns its own row: .copy is inline-flex, so two adjacent pills
-   sit side by side wherever they happen to fit, which reads as unordered when
-   the copy says "in this order". */
-.callout .copy { display: flex; width: fit-content; max-width: 100%; margin-top: var(--space-2); }
 
 /* ---------- Danger zone ---------- */
 
