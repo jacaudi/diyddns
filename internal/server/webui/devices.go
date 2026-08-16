@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
+	"github.com/jacaudi/diyddns/internal/version"
 )
 
 // deviceRow is one row of the devices list.
@@ -141,6 +143,50 @@ type deviceNewData struct {
 	ExpiresIn      string
 	ExpiresAt      string
 	BaseURLWarning string
+}
+
+// clientImageRepo is the client image published by this project's CI. The
+// release path is ci.yaml:115-124 (release-image-client); ci.yaml:77 builds the
+// same repo for non-release pushes. Keep this and the two constants below in
+// sync with README.md's container section — both describe one operator
+// contract, and someone who follows one and then the other must not be given
+// two different answers.
+const clientImageRepo = "ghcr.io/jacaudi/diyddns/client"
+
+// clientVolume is the credentials volume, deliberately identical to the name
+// README.md already tells operators to use, so the two surfaces cannot diverge.
+const clientVolume = "diyddns-client"
+
+// clientContainer is the run container's name. Deliberately NOT clientVolume:
+// `docker rm -f X` removes a container and leaves the volume untouched, so one
+// string naming both object kinds makes the recovery instruction ambiguous —
+// it looks like it clears the volume when it does not.
+const clientContainer = "diyddns-client-run"
+
+// releaseTagRe matches the only tag shape this project publishes: release-please
+// emits vMAJOR.MINOR.PATCH and ci-build.yml pushes it via
+// type=semver,pattern=v{{version}}.
+//
+// Everything else falls back to :latest, which always exists. That covers a dev
+// build, an operator's own -ldflags string, and semver build metadata — the last
+// of which matters because `+` is legal in a version but ILLEGAL in a Docker
+// tag ("invalid reference format").
+//
+// Prereleases are excluded because release-please-config.json sets no prerelease
+// key, so none can be produced. That coupling is enforced by
+// TestReleasePleaseHasNoPrerelease, not by this comment.
+var releaseTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+
+// clientImage returns the client image reference to advertise and, when it had
+// to fall back, the note explaining why. An empty note means "release build,
+// render nothing" — the same convention baseURLWarning uses in this file.
+func clientImage(v version.Info) (ref, note string) {
+	if releaseTagRe.MatchString(v.Version) {
+		return clientImageRepo + ":" + v.Version, ""
+	}
+	return clientImageRepo + ":latest",
+		"This server is a development build, so the command pins :latest, which tracks main " +
+			"rather than the newest release. Pin a released tag in production."
 }
 
 // handleDeviceNewForm renders step 1: name the device.
