@@ -761,6 +761,87 @@ func TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent(t *testing.T) {
 	}
 }
 
+// TestAppCSS_DescriptionValuesWrapOperatorSuppliedStrings guards the one place
+// in the UI that renders arbitrary operator-configured text.
+//
+// Every value on /admin/server — a database path, a listen address, a base
+// URL, a build string — comes from the config file or the build, so none of
+// them has a bounded length and several contain no spaces at all. With the
+// default `overflow-wrap: normal` a <dd> holding one of those has no break
+// opportunity, so its box stays viewport-wide while the text spills out of it
+// as an anonymous inline box: measured in the browser smoke at a 390px
+// viewport, a temp-directory database path pushed the document 296px wider
+// than the viewport while every element box still reported as fitting.
+//
+// That invisibility is the reason this is asserted rather than eyeballed. The
+// overflow is not attributable to any element's geometry, so it survives a
+// screenshot review of a page whose boxes all look correct — and it only
+// appears with real config, which is why the audit that ran against seeded
+// test data never saw it.
+//
+// `anywhere` rather than `break-word`: only `anywhere` also lets the box's
+// min-content size shrink, which is what stops the containing grid track from
+// being held open in the first place.
+func TestAppCSS_DescriptionValuesWrapOperatorSuppliedStrings(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	rule := regexp.MustCompile(`(?s)\.kv > dd\s*\{(.*?)\}`).FindStringSubmatch(string(css))
+	if rule == nil {
+		t.Fatal("no `.kv > dd` rule in app.css; this test has lost its subject")
+	}
+	if !strings.Contains(rule[1], "overflow-wrap: anywhere") {
+		t.Error("`.kv > dd` is missing `overflow-wrap: anywhere`; a config value with no spaces " +
+			"(a filesystem path, a URL) then has no break opportunity and spills out of the page")
+	}
+}
+
+// TestAppCSS_SmallButtonsAreStillTouchTargets pins the one rule that decides
+// whether the compact controls can be hit with a thumb.
+//
+// Measured in Chromium at a 390px viewport, .btn.sm rendered 24px tall as a
+// <button> ("Copy" on /devices/{id}, "Disable" on /admin/users) and 30px as an
+// <a> ("Open" on /devices, "Full history ›" on /devices/{id}) — the same class,
+// two different heights, because the two element types compute different
+// content box heights from identical padding. That is why the fix is a
+// min-height and not more padding: padding cannot land both on one number, and
+// whichever value fixed the <button> would overshoot the <a>.
+//
+// var(--space-6) is 32px on the project's 4px scale. WCAG 2.2 Target Size
+// (Minimum) would be satisfied at 24px, so the 24px controls were arguably
+// already conformant; 32px is a deliberate choice above the floor, because the
+// audit measured these as uncomfortable on a real phone-width viewport rather
+// than merely non-conformant.
+//
+// A text assertion can only prove the rule is present. That it produces 32px
+// in a real layout engine is asserted by internal/smoke/browser/smoke.mjs,
+// which measures the rendered boxes.
+func TestAppCSS_SmallButtonsAreStillTouchTargets(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	rule := regexp.MustCompile(`(?s)\.btn\.sm\s*\{(.*?)\}`).FindStringSubmatch(string(css))
+	if rule == nil {
+		t.Fatal("no .btn.sm rule in app.css; this test has lost its subject")
+	}
+	body := rule[1]
+
+	for _, want := range []struct{ name, decl string }{
+		{"a floor on the target height", "min-height: var(--space-6)"},
+		{"a box that can centre the label vertically", "display: inline-flex"},
+		{"the label centred in that box", "align-items: center"},
+	} {
+		if !strings.Contains(body, want.decl) {
+			t.Errorf(".btn.sm is missing %s (%q); without it the rendered control is "+
+				"24px tall as a <button> and 30px as an <a>", want.name, want.decl)
+		}
+	}
+}
+
 // TestPages_EachRenderExactlyOneH1 guards the document outline across every
 // app-shell screen at once.
 //

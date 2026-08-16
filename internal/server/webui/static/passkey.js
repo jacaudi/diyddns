@@ -187,14 +187,14 @@
 
       const renameBtn = document.createElement("button");
       renameBtn.type = "button";
-      renameBtn.className = "btn";
+      renameBtn.className = "btn sm";
       renameBtn.textContent = "Rename";
       renameBtn.addEventListener("click", function () { renamePasskey(pk.id, pk.name); });
       actions.appendChild(renameBtn);
 
       const removeBtn = document.createElement("button");
       removeBtn.type = "button";
-      removeBtn.className = "btn";
+      removeBtn.className = "btn sm";
       removeBtn.textContent = "Remove";
       removeBtn.addEventListener("click", function () { removePasskey(pk.id); });
       actions.appendChild(removeBtn);
