@@ -123,9 +123,10 @@ func (s *server) Write(p []byte) (int, error) {
 
 // startServer runs the real binary against the shipped config.example.yaml
 // with DIYDDNS_* overrides, so every smoke run also proves the committed
-// example still boots. Teardown is registered with t.Cleanup, so a failure
-// anywhere still stops the process.
-func startServer(t *testing.T, repoRoot, bin, addr string) *server {
+// example still boots. extraEnv appends further DIYDDNS_* overrides for tests
+// that need a non-default configuration. Teardown is registered with
+// t.Cleanup, so a failure anywhere still stops the process.
+func startServer(t *testing.T, repoRoot, bin, addr string, extraEnv ...string) *server {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "smoke.db")
 	baseURL := browserBaseURL(t, addr)
@@ -138,6 +139,7 @@ func startServer(t *testing.T, repoRoot, bin, addr string) *server {
 		"DIYDDNS_DATABASE_PATH="+dbPath,
 		"DIYDDNS_AUTH_HMAC_SECRET_KEY="+randomKeyB64(t),
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdout = s
 	cmd.Stderr = s
 	if err := cmd.Start(); err != nil {

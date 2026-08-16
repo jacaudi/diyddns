@@ -39,8 +39,12 @@ func discoveryArg() string {
 }
 
 func TestBrowserSmoke(t *testing.T) {
-	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skip("npx not found; skipping the browser check (see internal/smoke/browser/smoke.mjs)")
+	// Provisioned first so a machine without Node skips before paying for two
+	// Go builds and a server boot.
+	step(t, "provision playwright into a scratch directory")
+	work, ok := provisionPlaywright(t)
+	if !ok {
+		return // provisionPlaywright already skipped
 	}
 
 	repoRoot := repoRoot(t)
@@ -64,29 +68,10 @@ func TestBrowserSmoke(t *testing.T) {
 	step(t, "scrape BOOTSTRAP_TOKEN")
 	token := scrapeToken(t, srv)
 
-	step(t, "provision playwright into a scratch directory")
-	// The script is copied next to a node_modules rather than run in place:
-	// ESM resolves a bare "playwright" import by walking up from the
-	// IMPORTING FILE's directory, and ignores NODE_PATH — so `npx -p` does
-	// not work here even though it looks like it should. Installing into a
-	// temp dir also keeps node_modules out of the repo entirely.
-	work := t.TempDir()
-	if out, err := runIn(work, "npm", "install", "playwright@1.62.1", "--no-audit", "--no-fund"); err != nil {
-		t.Skipf("could not provision playwright (offline?): %v\n%s", err, out)
-	}
-
-	src := filepath.Join(repoRoot, "internal", "smoke", "browser", "smoke.mjs")
-	script, err := os.ReadFile(src)
-	if err != nil {
-		t.Fatalf("read %s: %v", src, err)
-	}
-	dst := filepath.Join(work, "smoke.mjs")
-	if err := os.WriteFile(dst, script, 0o600); err != nil {
-		t.Fatalf("write %s: %v", dst, err)
-	}
+	script := copyScript(t, repoRoot, work, "smoke.mjs")
 
 	step(t, "drive the real pages through Chromium")
-	out, err := runIn(work, "node", dst, baseURL, token, clientBin, credsPath, discoveryArg())
+	out, err := runIn(work, "node", script, baseURL, token, clientBin, credsPath, discoveryArg())
 	t.Logf("%s", out)
 	if err != nil {
 		t.Fatalf("browser smoke failed: %v", err)
@@ -94,6 +79,46 @@ func TestBrowserSmoke(t *testing.T) {
 	if !strings.Contains(out, "BROWSER SMOKE OK") {
 		t.Fatalf("browser smoke did not report success:\n%s", out)
 	}
+}
+
+// provisionPlaywright installs playwright into a scratch directory and returns
+// it, so a script copied there can resolve a bare "playwright" import: ESM
+// resolves it by walking up from the IMPORTING FILE's directory and ignores
+// NODE_PATH, so `npx -p` does not work here even though it looks like it
+// should. A temp dir also keeps node_modules out of the repo entirely.
+//
+// Returns ok=false after skipping the test when the Node toolchain or the
+// download is unavailable, so the check degrades to a no-op rather than
+// turning an optional harness into a broken build.
+func provisionPlaywright(t *testing.T) (string, bool) {
+	t.Helper()
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Skip("npx not found; skipping the browser check (see internal/smoke/browser/)")
+		return "", false
+	}
+	work := t.TempDir()
+	if out, err := runIn(work, "npm", "install", "playwright@1.62.1", "--no-audit", "--no-fund"); err != nil {
+		t.Skipf("could not provision playwright (offline?): %v\n%s", err, out)
+		return "", false
+	}
+	return work, true
+}
+
+// copyScript copies internal/smoke/browser/<name> next to work's node_modules
+// and returns the destination path. See provisionPlaywright for why in place
+// does not work.
+func copyScript(t *testing.T, repoRoot, work, name string) string {
+	t.Helper()
+	src := filepath.Join(repoRoot, "internal", "smoke", "browser", name)
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	dst := filepath.Join(work, name)
+	if err := os.WriteFile(dst, b, 0o600); err != nil {
+		t.Fatalf("write %s: %v", dst, err)
+	}
+	return dst
 }
 
 // runIn runs name with args in dir and returns combined output.
