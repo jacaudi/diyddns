@@ -123,8 +123,8 @@
     <details class="modal">
       <summary class="btn danger">Rotate secret…</summary>
       <div class="modal-panel">
-        <div class="modal-card">
-          <h3>Rotate client secret</h3>
+        <div class="card modal-card">
+          <h2>Rotate client secret</h2>
           <p class="muted">The running client stops authenticating until you write the new
             secret to its credentials file and restart it.</p>
           <form method="post" action="/devices/{{.Device.ID}}/rotate-secret">
@@ -151,8 +151,8 @@
     <details class="modal">
       <summary class="btn solid-danger">Delete…</summary>
       <div class="modal-panel">
-        <div class="modal-card">
-          <h3>Delete device</h3>
+        <div class="card modal-card">
+          <h2>Delete device</h2>
           <p class="muted">Permanently removes the device and its IP history. This cannot be
             undone.</p>
           <form method="post" action="/devices/{{.Device.ID}}/delete">

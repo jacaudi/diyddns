@@ -511,14 +511,14 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   display: grid; place-items: center; padding: var(--space-5);
   background: rgba(0, 0, 0, .55);
 }
+/* The panel IS a .card — surface, border, radius, shadow and padding all come
+   from that component. Only what a card cannot know about lives here: the
+   overlay's width cap, its scroll behaviour, and dropping the stacking margin
+   a card carries for a document flow this one is not in. */
 .modal-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); box-shadow: var(--shadow);
-  padding: var(--space-5); width: min(440px, 100%);
-  max-height: calc(100vh - var(--space-7)); overflow: auto;
-  text-align: left;
+  width: min(440px, 100%); max-height: calc(100vh - var(--space-7));
+  overflow: auto; margin-bottom: 0; text-align: left;
 }
-.modal-card h3 { font-size: 15px; margin: 0 0 var(--space-2); }
 .modal-card p { margin: 0 0 var(--space-4); }
 
 /* ---------- Empty state ---------- */
