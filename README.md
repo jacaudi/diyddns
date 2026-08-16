@@ -67,8 +67,10 @@ elsewhere, or, if you replaced that device, `docker rm -f diyddns-client-run &&
 docker volume rm diyddns-client` and run the same command again. `permission
 denied` means the volume has the wrong owner; the code may or may not have been
 spent, because that message is emitted both before and after the code is sent —
-check `/devices` first, and only mint a fresh code if the device is already
-listed. Any other message means nothing was changed on the server: fix what it
+check `/devices` first: if the device is listed the code was spent and you
+need a fresh one; if it is absent the code is still good, so clear the
+volume with the two commands above and run the same command again. Any
+other message means nothing was changed on the server: fix what it
 reports and run the same command again, without removing the volume.
 
 ## Documentation
