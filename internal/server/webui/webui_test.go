@@ -714,6 +714,53 @@ func TestAppCSS_ActionGapDoesNotRelyOnMarginCollapsing(t *testing.T) {
 	}
 }
 
+// TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent guards the whole
+// stylesheet against one defect class, not one rule.
+//
+// A grid track written as bare `1fr` is `minmax(auto, 1fr)`, and `auto` as a
+// track MINIMUM is the item's min-content width — so such a track can grow to
+// fill, but can never shrink below the widest unbreakable thing inside it. On
+// /devices/{id} that unbreakable thing is the Device ID `.copy` pill, which is
+// `white-space: nowrap` around a 36-char UUID: measured in Chromium at a 390px
+// viewport, each `.grid.cols-2` card was pinned at 440px and the document
+// scrolled to 464px. `minmax(0, 1fr)` lets the track shrink, and the pill's
+// own `max-width: 100%` plus its `overflow: auto` code element then absorb the
+// difference by scrolling in place — which is what they were written to do.
+//
+// `.danger-item` was already fixed this way once, and that fix is exactly why
+// this test is file-wide rather than a list of three selectors: the 780px
+// override of `.danger-item` was left as a bare `1fr` and reintroduced the
+// same defect one media query down. Guarding the class instead of the instance
+// is what stops the next grid from repeating it.
+//
+// Scope note: this asserts only that a FLEXIBLE track may shrink. Fixed tracks
+// (`160px`, `200px`) are untouched — they carry a deliberate width, and their
+// media-query overrides are where they get to stop being fixed.
+//
+// Like the spacing tests above this is a text-level proxy for a geometric
+// property; the rendered 390px document width stays a browser measurement.
+func TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	decl := regexp.MustCompile(`grid-template-columns:[^;}]*`)
+	found := decl.FindAllString(string(css), -1)
+	if len(found) == 0 {
+		t.Fatal("no grid-template-columns declarations found; this test has lost its subject")
+	}
+
+	for _, d := range found {
+		// Remove the correct form, then anything still saying 1fr is bare.
+		if strings.Contains(strings.ReplaceAll(d, "minmax(0, 1fr)", ""), "1fr") {
+			t.Errorf("bare 1fr track in %q: a track that is minmax(auto, 1fr) cannot shrink "+
+				"below its content's min-content width, so an unbreakable child (a nowrap .copy "+
+				"pill) forces document overflow at narrow viewports; write minmax(0, 1fr)", d)
+		}
+	}
+}
+
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
 // calls store.Open, and store.Migrate mutates goose's package-level globals
 // with no synchronization, so concurrent store opens race under -race.

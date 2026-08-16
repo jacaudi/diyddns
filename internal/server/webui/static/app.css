@@ -324,10 +324,14 @@ a:hover { text-decoration: underline; }
 .card + .card { margin-top: var(--space-4); }
 .grid > .card + .card { margin-top: 0; }
 
+/* minmax(0, 1fr), never a bare 1fr: `1fr` alone is minmax(auto, 1fr), and auto
+   as a track minimum is the item's min-content width, so the track can never
+   shrink below the widest unbreakable thing in it. A card holding a nowrap
+   .copy pill then pins its column open and the document scrolls sideways. */
 .grid { display: grid; gap: var(--space-4); }
-.grid.cols-2 { grid-template-columns: 1fr 1fr; }
-.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
-.grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+.grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .stat { padding: var(--space-4); }
 .stat .label { color: var(--text-muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .4px; }
@@ -396,7 +400,7 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 
 /* ---------- Descriptions (key/value) ---------- */
 
-.kv { display: grid; grid-template-columns: 160px 1fr; }
+.kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); }
 .kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .kv > dd { margin: 0; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
 .kv > dt:last-of-type, .kv > dd:last-of-type { border-bottom: none; }
@@ -543,11 +547,11 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 /* ---------- Responsive ---------- */
 
 @media (max-width: 780px) {
-  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
   /* The fixed action column has nowhere to go at this width; stack it under
      the description rather than squeezing both. */
-  .danger-item { grid-template-columns: 1fr; row-gap: var(--space-3); }
-  .kv { grid-template-columns: 1fr; }
+  .danger-item { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-3); }
+  .kv { grid-template-columns: minmax(0, 1fr); }
   .kv > dt { padding-bottom: 0; border-bottom: none; }
   .kv > dd { padding-top: var(--space-1); }
   .nav { display: none; position: absolute; top: 56px; left: 0; right: 0;
