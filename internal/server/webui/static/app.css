@@ -383,6 +383,14 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
    The base .field/.input rules stay as they are above. */
 
 .field .hint { color: var(--text-muted); font-size: 12.5px; margin-top: var(--space-2); }
+/* A caption, its command, and the note under it are one group. Block-level so
+   vertical margins apply predictably — as inline-flex the pill carried none,
+   leaving a caption sitting flush on its own command (measured 0px). */
+.field .copy { display: flex; width: fit-content; max-width: 100%; }
+.field .hint + .copy { margin-top: var(--space-2); }
+/* Two captions in a row means a new group started; give it the same 16px the
+   page uses between blocks, so the steps read as separate. */
+.field .hint + .hint { margin-top: var(--space-4); }
 
 .filterbar {
   display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end;
