@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/jacaudi/diyddns/compare/v0.1.0...v0.2.0) (2026-08-16)
+
+
+### Features
+
+* **config:** warn at startup when cookie_secure cannot work over plain HTTP ([c8c4e9b](https://github.com/jacaudi/diyddns/commit/c8c4e9bb12e3e6fe6e5dccf9b4aa34692e0e6481))
+* **webui:** offer a container install path and fix the UI at phone width ([#70](https://github.com/jacaudi/diyddns/issues/70)) ([171f80a](https://github.com/jacaudi/diyddns/commit/171f80aba918cf9f60d972c6a5e5f97921252106)), closes [#53](https://github.com/jacaudi/diyddns/issues/53) [#63](https://github.com/jacaudi/diyddns/issues/63)
+
+
+### Bug Fixes
+
+* **build:** bump Go toolchain to 1.25.13 for stdlib security fixes ([#68](https://github.com/jacaudi/diyddns/issues/68)) ([790a0a4](https://github.com/jacaudi/diyddns/commit/790a0a472078b6145ef390624c688514f112e9a9))
+* **client/credentials:** close TOCTOU window on non-force Save ([#34](https://github.com/jacaudi/diyddns/issues/34)) ([8cb8e1f](https://github.com/jacaudi/diyddns/commit/8cb8e1fe99df8365b42806dfa61cb36c4e1fb20a))
+
 ## 0.1.0 (2026-08-13)
 
 
