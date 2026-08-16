@@ -2,8 +2,8 @@
 <div class="breadcrumb"><a href="/admin/users">Users</a> / Invite</div>
 
 {{if .Link}}
+<div class="page-head"><div><h1>Invite created for {{.InvitedUser}}</h1></div></div>
 <div class="card" style="max-width:680px">
-  <div class="card-head"><h2>Invite created for {{.InvitedUser}}</h2></div>
   <div class="card-body">
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
@@ -24,8 +24,8 @@
   </div>
 </div>
 {{else}}
+<div class="page-head"><div><h1>Invite a user</h1></div></div>
 <div class="card" style="max-width:560px">
-  <div class="card-head"><h2>Invite a user</h2></div>
   <div class="card-body">
     {{template "errorBanner" .Error}}
     <form method="post" action="/admin/users/new">

@@ -761,6 +761,76 @@ func TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent(t *testing.T) {
 	}
 }
 
+// TestPages_EachRenderExactlyOneH1 guards the document outline across every
+// app-shell screen at once.
+//
+// A page with no <h1> starts its heading hierarchy at <h2>, which leaves a
+// screen reader's heading list with no entry naming the page and makes
+// "jump to the top heading" land on a section instead. A page with two
+// competing <h1>s is the same defect from the other side. Twelve of the
+// fourteen screens already got this right by convention (.page-head > h1);
+// /devices/new and /admin/users/new rendered zero, in BOTH of their states —
+// the audit only caught the form step, but the reveal step was missing one
+// too.
+//
+// Both of those screens are two pages behind one URL: a form, and the
+// once-only reveal that the POST renders inline. Each state is listed here
+// separately, because a fix applied to only the branch the auditor happened
+// to screenshot is exactly the half-fix this test exists to prevent.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestPages_EachRenderExactlyOneH1(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "outline@example.com", "admin")
+	dev := seedDevice(t, st, usr.ID, "outline-box")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		form   url.Values
+	}{
+		{"devices list", http.MethodGet, "/devices", nil},
+		{"device new (form step)", http.MethodGet, "/devices/new", nil},
+		{"device new (reveal step)", http.MethodPost, "/devices/new", url.Values{"label": {"outline-pi"}}},
+		{"device detail", http.MethodGet, "/devices/" + dev.ID, nil},
+		{"device history", http.MethodGet, "/devices/" + dev.ID + "/history", nil},
+		{"account", http.MethodGet, "/account", nil},
+		{"admin users", http.MethodGet, "/admin/users", nil},
+		{"admin user new (form step)", http.MethodGet, "/admin/users/new", nil},
+		{"admin user new (reveal step)", http.MethodPost, "/admin/users/new", url.Values{"email": {"invitee@example.com"}, "role": {"user"}}},
+		{"admin user edit", http.MethodGet, "/admin/users/" + usr.ID, nil},
+		{"admin audit", http.MethodGet, "/admin/audit", nil},
+		{"admin server", http.MethodGet, "/admin/server", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req *http.Request
+			if tt.method == http.MethodPost {
+				tt.form.Set("csrf", sess.CSRFToken)
+				req = httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			} else {
+				req = httptest.NewRequest(http.MethodGet, tt.path, nil)
+			}
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s = %d, want 200", tt.method, tt.path, rec.Code)
+			}
+			if n := strings.Count(rec.Body.String(), "<h1"); n != 1 {
+				t.Errorf("%d <h1> elements, want exactly 1: a page with none has no heading "+
+					"naming it, and a page with two has no single one that does", n)
+			}
+		})
+	}
+}
+
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
 // calls store.Open, and store.Migrate mutates goose's package-level globals
 // with no synchronization, so concurrent store opens race under -race.
