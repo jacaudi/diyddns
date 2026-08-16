@@ -120,15 +120,18 @@
       <span>Invalidates the current secret. The running client stops authenticating until you
         write the new secret to its credentials file and restart it.</span>
     </div>
-    <form method="post" action="/devices/{{.Device.ID}}/rotate-secret"
-          data-confirm="Rotate the secret for {{.Device.Label}}? The running client stops authenticating until reconfigured.">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
-        <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
-      </div>
-      <button class="btn danger" type="submit">Rotate secret</button>
-    </form>
+    <details class="disclosure action">
+      <summary class="btn danger">Rotate secret…</summary>
+      <form method="post" action="/devices/{{.Device.ID}}/rotate-secret"
+            data-confirm="Rotate the secret for {{.Device.Label}}? The running client stops authenticating until reconfigured.">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <div class="field">
+          <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+          <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
+        </div>
+        <button class="btn danger" type="submit">Rotate secret</button>
+      </form>
+    </details>
   </div>
 
   <div class="danger-item">
@@ -136,15 +139,18 @@
       <strong>Delete device</strong>
       <span>Permanently removes the device and its IP history. Cannot be undone.</span>
     </div>
-    <form method="post" action="/devices/{{.Device.ID}}/delete"
-          data-confirm="Delete {{.Device.Label}} and its history? This cannot be undone.">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
-        <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
-      </div>
-      <button class="btn solid-danger" type="submit">Delete</button>
-    </form>
+    <details class="disclosure action">
+      <summary class="btn solid-danger">Delete…</summary>
+      <form method="post" action="/devices/{{.Device.ID}}/delete"
+            data-confirm="Delete {{.Device.Label}} and its history? This cannot be undone.">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <div class="field">
+          <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+          <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+        </div>
+        <button class="btn solid-danger" type="submit">Delete</button>
+      </form>
+    </details>
   </div>
 </div>
 {{end}}

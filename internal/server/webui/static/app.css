@@ -439,6 +439,9 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .disclosure > summary {
   cursor: pointer; font-size: 12.5px; font-weight: 600;
   color: var(--text-muted); padding: var(--space-1) 0;
+  /* Clicking a summary otherwise text-selects its label, which on a
+     button-styled summary reads as a rendering fault. */
+  user-select: none;
 }
 .disclosure > summary:hover { color: var(--accent); }
 
@@ -469,13 +472,31 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .danger-zone { border-color: var(--danger); }
 .danger-zone .card-head { border-bottom-color: var(--danger-soft); }
 .danger-zone .card-head h2 { color: var(--danger); }
+/* A fixed action column, not a content-sized flex child. As flex with
+   justify-content: space-between the action side shrank by however long that
+   row's description happened to be, so two rows carrying the identical confirm
+   field landed at different widths and no two buttons shared an edge. */
 .danger-item {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
+  display: grid; grid-template-columns: minmax(0, 1fr) 200px;
+  align-items: start; column-gap: var(--space-5);
   padding: var(--space-4); border-bottom: 1px solid var(--border);
 }
 .danger-item:last-child { border-bottom: none; }
 .danger-item .meta strong { display: block; }
 .danger-item .meta span { color: var(--text-muted); font-size: 12.5px; }
+/* Every action fills the column, so the buttons align regardless of label. */
+.danger-item .btn { width: 100%; }
+.danger-item form { display: flex; flex-direction: column; gap: var(--space-2); }
+.danger-item form .field { margin-bottom: 0; }
+.danger-item .disclosure { margin-bottom: 0; }
+
+/* A disclosure whose summary IS the action: the confirm field appears only
+   once the operator asks for it, so the card shows one button per action at
+   rest. The marker is suppressed because the summary is styled as a button and
+   a stray triangle inside it reads as a rendering fault. */
+.disclosure.action > summary { list-style: none; text-align: center; }
+.disclosure.action > summary::-webkit-details-marker { display: none; }
+.disclosure.action[open] > summary { margin-bottom: var(--space-2); }
 
 /* ---------- Empty state ---------- */
 
@@ -501,6 +522,9 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 
 @media (max-width: 780px) {
   .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+  /* The fixed action column has nowhere to go at this width; stack it under
+     the description rather than squeezing both. */
+  .danger-item { grid-template-columns: 1fr; row-gap: var(--space-3); }
   .kv { grid-template-columns: 1fr; }
   .kv > dt { padding-bottom: 0; border-bottom: none; }
   .kv > dd { padding-top: var(--space-1); }

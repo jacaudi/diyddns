@@ -1291,6 +1291,81 @@ func TestDevices_QueryFilter_MatchesPositively(t *testing.T) {
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
 // calls store.Open, and store.Migrate mutates goose's package-level globals
 // with no synchronization, so concurrent store opens race under -race.
+// TestDeviceDetail_DestructiveConfirmsAreCollapsed pins the danger zone's
+// confirm fields behind a disclosure, so at rest the card shows one button per
+// action instead of three open forms competing for the same right edge.
+//
+// Only the two DESTRUCTIVE actions collapse. Disable is reversible and keeps
+// its history, so it stays a single click — collapsing it would add friction
+// where none is warranted, which is how friction stops being read as a signal.
+//
+// The assertion is about WHERE each confirm input renders, not whether it
+// exists: a Contains check would pass with the field sitting in the open,
+// which is the exact layout this replaces.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceDetail_DestructiveConfirmsAreCollapsed(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "danger@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "danger-pi")
+	cookie := signIn(t, deps, usr)
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	const open = `<details class="disclosure action">`
+	if n := strings.Count(body, open); n != 2 {
+		t.Errorf("%d collapsed actions, want exactly 2 (rotate and delete)", n)
+	}
+	if strings.Contains(body, `<details class="disclosure action" open>`) {
+		t.Error("a destructive action renders already expanded")
+	}
+
+	// Collect each disclosure's inner markup, then require every confirm input
+	// to live in one of them.
+	var blocks []string
+	for rest := body; ; {
+		_, after, found := strings.Cut(rest, open)
+		if !found {
+			break
+		}
+		inner, _, closed := strings.Cut(after, "</details>")
+		if !closed {
+			t.Fatal("a disclosure is never closed")
+		}
+		blocks = append(blocks, inner)
+		rest = after
+	}
+	for _, id := range []string{`id="rotate-confirm"`, `id="delete-confirm"`} {
+		if !strings.Contains(body, id) {
+			t.Errorf("%s is missing from the page entirely", id)
+			continue
+		}
+		found := false
+		for _, b := range blocks {
+			if strings.Contains(b, id) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s renders outside a disclosure, so it is visible at rest", id)
+		}
+	}
+
+	// Disable is reversible; it must NOT have been swept up in the change.
+	if strings.Contains(body, `<summary class="btn danger">Disable`) {
+		t.Error("Disable was collapsed too; only destructive actions should be")
+	}
+}
+
 func TestDeviceDetail_ForeignDeviceIs404(t *testing.T) {
 	deps, st := testDeps(t)
 	h, _ := New(deps)
