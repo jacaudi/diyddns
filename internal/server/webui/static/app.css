@@ -286,7 +286,6 @@ a:hover { text-decoration: underline; }
 }
 .nav a:hover { background: var(--neutral-soft); text-decoration: none; color: var(--text); }
 .nav a.active { background: var(--accent-soft); color: var(--accent); }
-.nav a.admin::before { content: "⚙ "; opacity: .7; }
 
 .userchip {
   display: flex; align-items: center; gap: var(--space-2);
@@ -436,12 +435,20 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
    <details>, so it needs no JavaScript and stays copyable and greppable while
    collapsed. */
 .disclosure { margin-bottom: var(--space-4); }
+/* Shared by every <details>-based control. The marker is suppressed because
+   these summaries are styled as buttons or quiet headings, where a stray
+   triangle reads as a rendering fault; user-select stops a click from
+   highlighting the label. */
+.disclosure > summary,
+.modal > summary { cursor: pointer; user-select: none; list-style: none; }
+.disclosure > summary::-webkit-details-marker,
+.modal > summary::-webkit-details-marker { display: none; }
+
+/* A quiet inline toggle. .modal's summary deliberately inherits none of this —
+   it carries .btn and must match every other button's type size. */
 .disclosure > summary {
-  cursor: pointer; font-size: 12.5px; font-weight: 600;
+  font-size: 12.5px; font-weight: 600;
   color: var(--text-muted); padding: var(--space-1) 0;
-  /* Clicking a summary otherwise text-selects its label, which on a
-     button-styled summary reads as a rendering fault. */
-  user-select: none;
 }
 .disclosure > summary:hover { color: var(--accent); }
 
@@ -484,19 +491,35 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .danger-item:last-child { border-bottom: none; }
 .danger-item .meta strong { display: block; }
 .danger-item .meta span { color: var(--text-muted); font-size: 12.5px; }
-/* Every action fills the column, so the buttons align regardless of label. */
+/* Every action fills the column, so the buttons align regardless of label.
+   Scoped to the column itself — inside a modal card the buttons sit on one
+   row at their natural width. */
 .danger-item .btn { width: 100%; }
+.danger-item .modal-card .btn { width: auto; }
 .danger-item form { display: flex; flex-direction: column; gap: var(--space-2); }
 .danger-item form .field { margin-bottom: 0; }
 .danger-item .disclosure { margin-bottom: 0; }
 
-/* A disclosure whose summary IS the action: the confirm field appears only
-   once the operator asks for it, so the card shows one button per action at
-   rest. The marker is suppressed because the summary is styled as a button and
-   a stray triangle inside it reads as a rendering fault. */
-.disclosure.action > summary { list-style: none; text-align: center; }
-.disclosure.action > summary::-webkit-details-marker { display: none; }
-.disclosure.action[open] > summary { margin-bottom: var(--space-2); }
+/* Modal: a <details> whose panel renders as an overlay instead of inline.
+   Deliberately NOT <dialog> — ui.js's contract is that every action still works
+   with JavaScript blocked, and a <dialog> with no open attribute is
+   display:none, which would put the typed confirmation out of reach. As a
+   <details> the panel simply appears in place; JS only adds dismissal. */
+.modal > summary { display: block; text-align: center; }
+.modal[open] > .modal-panel {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center; padding: var(--space-5);
+  background: rgba(0, 0, 0, .55);
+}
+.modal-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: var(--space-5); width: min(440px, 100%);
+  max-height: calc(100vh - var(--space-7)); overflow: auto;
+  text-align: left;
+}
+.modal-card h3 { font-size: 15px; margin: 0 0 var(--space-2); }
+.modal-card p { margin: 0 0 var(--space-4); }
 
 /* ---------- Empty state ---------- */
 

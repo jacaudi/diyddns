@@ -47,4 +47,53 @@
       }
     });
   });
+
+  // Modal dismissal. The modal is a <details>, so with this file blocked it
+  // still opens and its form still submits — only these shortcuts are lost, and
+  // the summary itself remains the way to close it again.
+  var modals = document.querySelectorAll("details.modal");
+
+  var close = function (modal) {
+    modal.removeAttribute("open");
+  };
+
+  modals.forEach(function (modal) {
+    var panel = modal.querySelector(".modal-panel");
+    if (panel) {
+      // Only a click on the backdrop itself, never one that bubbled up out of
+      // the card — otherwise typing in the confirm field could dismiss it.
+      panel.addEventListener("click", function (event) {
+        if (event.target === panel) {
+          close(modal);
+        }
+      });
+    }
+    modal.querySelectorAll("[data-modal-close]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        close(modal);
+      });
+    });
+    // Focus the confirm field on open: the operator has to type into it, and
+    // without this the focus stays on the summary behind the backdrop.
+    modal.addEventListener("toggle", function () {
+      if (modal.open) {
+        var input = modal.querySelector("input:not([type=hidden])");
+        if (input) {
+          input.focus();
+        }
+      }
+    });
+  });
+
+  if (modals.length) {
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        modals.forEach(function (modal) {
+          if (modal.open) {
+            close(modal);
+          }
+        });
+      }
+    });
+  }
 })();

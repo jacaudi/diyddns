@@ -120,17 +120,26 @@
       <span>Invalidates the current secret. The running client stops authenticating until you
         write the new secret to its credentials file and restart it.</span>
     </div>
-    <details class="disclosure action">
+    <details class="modal">
       <summary class="btn danger">Rotate secret…</summary>
-      <form method="post" action="/devices/{{.Device.ID}}/rotate-secret"
-            data-confirm="Rotate the secret for {{.Device.Label}}? The running client stops authenticating until reconfigured.">
-        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-        <div class="field">
-          <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
-          <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
+      <div class="modal-panel">
+        <div class="modal-card">
+          <h3>Rotate client secret</h3>
+          <p class="muted">The running client stops authenticating until you write the new
+            secret to its credentials file and restart it.</p>
+          <form method="post" action="/devices/{{.Device.ID}}/rotate-secret">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="rotate-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+              <input class="input" id="rotate-confirm" name="confirm_label" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn danger" type="submit">Rotate secret</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
         </div>
-        <button class="btn danger" type="submit">Rotate secret</button>
-      </form>
+      </div>
     </details>
   </div>
 
@@ -139,17 +148,26 @@
       <strong>Delete device</strong>
       <span>Permanently removes the device and its IP history. Cannot be undone.</span>
     </div>
-    <details class="disclosure action">
+    <details class="modal">
       <summary class="btn solid-danger">Delete…</summary>
-      <form method="post" action="/devices/{{.Device.ID}}/delete"
-            data-confirm="Delete {{.Device.Label}} and its history? This cannot be undone.">
-        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-        <div class="field">
-          <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
-          <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+      <div class="modal-panel">
+        <div class="modal-card">
+          <h3>Delete device</h3>
+          <p class="muted">Permanently removes the device and its IP history. This cannot be
+            undone.</p>
+          <form method="post" action="/devices/{{.Device.ID}}/delete">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="delete-confirm">Type <code>{{.Device.Label}}</code> to confirm</label>
+              <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn solid-danger" type="submit">Delete</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
         </div>
-        <button class="btn solid-danger" type="submit">Delete</button>
-      </form>
+      </div>
     </details>
   </div>
 </div>

@@ -1320,12 +1320,21 @@ func TestDeviceDetail_DestructiveConfirmsAreCollapsed(t *testing.T) {
 	}
 	body := rec.Body.String()
 
-	const open = `<details class="disclosure action">`
+	const open = `<details class="modal">`
 	if n := strings.Count(body, open); n != 2 {
 		t.Errorf("%d collapsed actions, want exactly 2 (rotate and delete)", n)
 	}
-	if strings.Contains(body, `<details class="disclosure action" open>`) {
+	if strings.Contains(body, `<details class="modal" open>`) {
 		t.Error("a destructive action renders already expanded")
+	}
+	// Built on <details>, not <dialog>: ui.js's contract is that every action
+	// still works with JavaScript blocked, and a <dialog> without an open
+	// attribute is display:none, which would put the confirm field out of reach.
+	if strings.Contains(body, "<dialog") {
+		t.Error("a <dialog> is unreachable with JS blocked; this must stay a <details>")
+	}
+	if n := strings.Count(body, `class="modal-panel"`); n != 2 {
+		t.Errorf("%d modal panels, want 2", n)
 	}
 
 	// Collect each disclosure's inner markup, then require every confirm input
