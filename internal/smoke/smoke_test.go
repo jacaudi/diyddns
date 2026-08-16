@@ -108,20 +108,24 @@ func TestSmoke(t *testing.T) {
 	deviceID := credsField(t, credsPath, "device_id")
 
 	if *skipDiscovery {
-		t.Log("-skip-discovery: stopping before check-in; enrollment path verified")
-		return
+		t.Log("-skip-discovery: skipping the client check-in and its outbound calls")
+	} else {
+		step(t, "diyddns-client run --once (discovery + check-in)")
+		out := runClient(t, clientBin, "run", "--once", "--credentials-file", credsPath)
+		reportedIP := field(t, out, `ipv4=([0-9.]+)`)
+		t.Logf("    client reported ipv4=%s", reportedIP)
+
+		step(t, "GET /api/v1/devices/{id}/history (find the reported IP)")
+		assertHistoryHasIP(t, client, baseURL, deviceID, reportedIP)
+
+		step(t, "GET /api/v1/devices/{id} (current_ipv4 + last_seen_at populated)")
+		assertDeviceCurrent(t, client, baseURL, deviceID, reportedIP)
 	}
 
-	step(t, "diyddns-client run --once (discovery + check-in)")
-	out := runClient(t, clientBin, "run", "--once", "--credentials-file", credsPath)
-	reportedIP := field(t, out, `ipv4=([0-9.]+)`)
-	t.Logf("    client reported ipv4=%s", reportedIP)
-
-	step(t, "GET /api/v1/devices/{id}/history (find the reported IP)")
-	assertHistoryHasIP(t, client, baseURL, deviceID, reportedIP)
-
-	step(t, "GET /api/v1/devices/{id} (current_ipv4 + last_seen_at populated)")
-	assertDeviceCurrent(t, client, baseURL, deviceID, reportedIP)
+	// Last, and deliberately so: this ends by disabling the device, which no
+	// later step could survive. It needs no network, so it runs in both modes.
+	step(t, "HMAC: one good check-in, four rejected mutations")
+	assertHMACRejections(t, client, baseURL, credsPath, csrf, deviceID)
 
 	t.Log("SMOKE OK")
 }

@@ -46,6 +46,7 @@ type IdP struct {
 
 	mu           sync.Mutex
 	authCode     Claims            // claims to mint for the next auth-code /token
+	seenNonce    string            // nonce from the most recent /authorize request
 	device       map[string]Claims // device_code → approved claims (absent = pending)
 	pollInterval int64
 }
@@ -115,6 +116,13 @@ func (i *IdP) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 
 func (i *IdP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	// Remember the nonce so /token can echo it, the way a real provider does.
+	// A test that drives the flow through a browser cannot pre-stage it with
+	// SetAuthCodeClaims: only the server knows the nonce it generated.
+	i.mu.Lock()
+	i.seenNonce = q.Get("nonce")
+	i.mu.Unlock()
+
 	redirect, _ := url.Parse(q.Get("redirect_uri"))
 	rq := redirect.Query()
 	rq.Set("code", "test-auth-code")
@@ -152,8 +160,13 @@ func (i *IdP) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"access_token": "at", "token_type": "Bearer", "id_token": i.sign(claims)})
 		return
 	}
-	// auth-code grant
-	writeJSON(w, map[string]any{"access_token": "at", "token_type": "Bearer", "id_token": i.sign(i.authCode)})
+	// auth-code grant. An explicit Claims.Nonce still wins, so tests that
+	// stage a deliberately wrong nonce keep asserting the mismatch path.
+	claims := i.authCode
+	if claims.Nonce == "" {
+		claims.Nonce = i.seenNonce
+	}
+	writeJSON(w, map[string]any{"access_token": "at", "token_type": "Bearer", "id_token": i.sign(claims)})
 }
 
 func (i *IdP) sign(c Claims) string {
