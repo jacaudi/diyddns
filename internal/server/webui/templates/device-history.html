@@ -16,8 +16,8 @@
         {{range .Rows}}
         <tr>
           <td data-label="When" class="muted nowrap" title="{{.ObservedAbs}}">{{.ObservedRel}}</td>
-          <td data-label="IPv4">{{if .IPv4}}<code>{{.IPv4}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
-          <td data-label="IPv6">{{if .IPv6}}<code class="muted">{{.IPv6}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+          <td data-label="IPv4">{{template "codeOrDash" .IPv4}}</td>
+          <td data-label="IPv6">{{template "mutedCodeOrDash" .IPv6}}</td>
           <td data-label="Client version" class="muted">{{if .ClientVersion}}{{.ClientVersion}}{{else}}—{{end}}</td>
         </tr>
         {{end}}

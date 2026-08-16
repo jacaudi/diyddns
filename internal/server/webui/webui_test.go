@@ -1291,6 +1291,62 @@ func TestDevices_QueryFilter_MatchesPositively(t *testing.T) {
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
 // calls store.Open, and store.Migrate mutates goose's package-level globals
 // with no synchronization, so concurrent store opens race under -race.
+// TestTemplates_AbsentValueIsSingleSourced keeps the "this value is absent"
+// representation in one place. It was hand-written at 12 call sites across five
+// templates, so changing the em dash to anything else — "Never", "not
+// reported" — meant twelve synchronised edits, and missing one leaves the UI
+// saying two different things about the same condition.
+//
+// Source-level rather than render-level on purpose: rendering proves the dash
+// still appears, not that it stopped being copy-pasted. Same approach as
+// TestAppCSS_CrampedFormSpacingIsCorrected.
+func TestTemplates_AbsentValueIsSingleSourced(t *testing.T) {
+	entries, err := templateFS.ReadDir("templates")
+	if err != nil {
+		t.Fatalf("read templates dir: %v", err)
+	}
+	const dash = `<span class="muted">—</span>`
+	for _, e := range entries {
+		if e.Name() == "partials.html" {
+			continue // the one place it is allowed to live
+		}
+		b, err := templateFS.ReadFile("templates/" + e.Name())
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if n := strings.Count(string(b), dash); n > 0 {
+			t.Errorf("%s hand-writes the absent-value dash %d time(s); call the partial instead", e.Name(), n)
+		}
+	}
+}
+
+// TestDeviceDetail_EmptyHistoryUsesTheEmptyComponent stops this page telling
+// the operator "nothing here yet" in a shape no other page uses. Every other
+// empty state on the site is .empty with a heading; this one hand-rolled a
+// muted paragraph.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceDetail_EmptyHistoryUsesTheEmptyComponent(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "emptyhist@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "no-checkins")
+	cookie := signIn(t, deps, usr)
+
+	req := httptest.NewRequest(http.MethodGet, "/devices/"+dev.ID, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `<div class="empty">`) {
+		t.Error("the no-history state does not use the .empty component")
+	}
+	if strings.Contains(body, `<p class="muted">No check-ins recorded yet.</p>`) {
+		t.Error("the hand-rolled empty state is still rendering")
+	}
+}
+
 // TestDeviceDetail_DestructiveConfirmsAreCollapsed pins the danger zone's
 // confirm fields behind a disclosure, so at rest the card shows one button per
 // action instead of three open forms competing for the same right edge.

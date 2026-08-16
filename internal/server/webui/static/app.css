@@ -297,7 +297,6 @@ a:hover { text-decoration: underline; }
   background: var(--accent-soft); color: var(--accent);
   display: grid; place-items: center; font-weight: 700; font-size: 12px;
 }
-.userchip .email { color: var(--text-muted); font-size: 13px; }
 
 .menu-toggle {
   display: none; margin-left: auto;
