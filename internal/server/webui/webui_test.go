@@ -848,6 +848,24 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	if !strings.Contains(body, "single use") {
 		t.Error("the single-use note is missing")
 	}
+	// The container path is the recommended install route, so both steps must
+	// render with the exact volume and container names the recovery copy and
+	// the README also use — a mismatch hands the operator commands that do not
+	// refer to the same objects.
+	if !strings.Contains(body, "docker run --rm -v diyddns-client:/home/nonroot/.config") {
+		t.Error("the container enroll command is missing")
+	}
+	if !strings.Contains(body, "--name diyddns-client-run") {
+		t.Error("the container run command is missing")
+	}
+	if !strings.Contains(body, "--restart unless-stopped") {
+		t.Error("the run command does not survive a reboot")
+	}
+	// testDeps pins Version:"test", which is not a published release shape, so
+	// the page must advertise :latest rather than a tag that 404s.
+	if !strings.Contains(body, "ghcr.io/jacaudi/diyddns/client:latest") {
+		t.Error("the image reference is missing or is not the dev fallback")
+	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
@@ -855,6 +873,140 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	// the device row appears only when a client redeems it.
 	if strings.Contains(body, "Device created") {
 		t.Error("the reveal claims a device was created")
+	}
+}
+
+// TestDeviceNew_DevBuildNote pins the version-dependent half of the reveal. The
+// note exists to stop an operator reading ":latest" as "newest stable"; a
+// release build must not show it, because there the pinned tag IS the release.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_DevBuildNote(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		version  string
+		wantTag  string
+		wantNote bool
+	}{
+		{"dev", "v0.0.0-dev", "ghcr.io/jacaudi/diyddns/client:latest", true},
+		{"release", "v0.1.0", "ghcr.io/jacaudi/diyddns/client:v0.1.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, st := testDeps(t)
+			// Set Info on the local copy rather than a package global: Deps is
+			// passed by value into New, and the goose race documented above
+			// makes global mutation unsafe in this package.
+			deps.Info = version.Info{Version: tc.version}
+			h, _ := New(deps)
+			usr := seedUser(t, st, "devnote-"+tc.name+"@example.com", "user")
+			cookie := signIn(t, deps, usr)
+			sess := sessionFor(t, deps, cookie)
+
+			form := url.Values{"csrf": {sess.CSRFToken}, "label": {"note-" + tc.name}}
+			req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			body := rec.Body.String()
+			if !strings.Contains(body, tc.wantTag) {
+				t.Errorf("image tag %q is missing", tc.wantTag)
+			}
+			if got := strings.Contains(body, "development build"); got != tc.wantNote {
+				t.Errorf("dev-build note present = %v, want %v", got, tc.wantNote)
+			}
+		})
+	}
+}
+
+// TestDeviceNew_RecoveryHints guards the copy that tells an operator what to do
+// when enroll fails. Three properties, each of which has been got wrong before:
+//
+//  1. The branches must not over-claim. "credentials already exist" fires before
+//     any server contact, so the code is intact. "permission denied" is emitted
+//     by TWO states — a 0700 root-owned dir fails in credentials.Load before the
+//     code is sent, while a traversable one fails after — so the message alone
+//     cannot tell the operator whether the code was spent, and the copy must
+//     send them to the device list instead of asserting it.
+//  2. The destructive commands must be SCOPED to the branches that need them.
+//     Rendered as an unconditional trailer, they are one click from destroying a
+//     live device's credentials for an operator whose error said to leave it be.
+//  3. Emphasis inside a callout must be <b>, never <strong>: .callout strong is
+//     a descendant selector setting display:block, which shatters the sentence
+//     around it. A Contains() check cannot see that, so assert the tag.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_RecoveryHints(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "recovery@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"recovery-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// All three branches, including the default arm.
+	for _, want := range []string{
+		"credentials already exist",
+		"permission denied",
+		"any other message",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("recovery copy is missing the %q branch", want)
+		}
+	}
+
+	// Property 1: permission denied must NOT assert the code was spent, and must
+	// send the operator to the device list.
+	if !strings.Contains(body, "may or may not have been spent") {
+		t.Error("the permission-denied branch over-claims: it must not assert spent-ness")
+	}
+	if !strings.Contains(body, "device list") {
+		t.Error("the permission-denied branch does not tell the operator how to check")
+	}
+
+	// Property 3: inline emphasis renders as <b>, not <strong>.
+	if !strings.Contains(body, "<b>not spent</b>") {
+		t.Error(`emphasis must be <b>; <strong> inside a callout renders display:block`)
+	}
+
+	// Both recovery commands sit inside copy pills. Asserting the pill markup
+	// rather than the bare string is the point: bare text satisfies a naive
+	// Contains check while being unusable on the page.
+	for _, cmd := range []string{
+		"docker rm -f diyddns-client-run",
+		"docker volume rm diyddns-client",
+	} {
+		if !strings.Contains(body, `data-copy="`+cmd+`"`) {
+			t.Errorf("%q does not render inside a copyValue pill", cmd)
+		}
+	}
+
+	// Container-then-volume: a volume cannot be removed while a container holds
+	// it, so the reverse order fails with "volume is in use".
+	rmIdx := strings.Index(body, "docker rm -f diyddns-client-run")
+	volIdx := strings.Index(body, "docker volume rm diyddns-client")
+	if rmIdx == -1 || volIdx == -1 || rmIdx > volIdx {
+		t.Errorf("recovery commands are out of order: rm at %d, volume rm at %d", rmIdx, volIdx)
+	}
+
+	// Property 2: the commands must appear exactly once, inside the branch that
+	// needs them — not repeated as an unconditional trailer.
+	if n := strings.Count(body, `data-copy="docker volume rm diyddns-client"`); n != 1 {
+		t.Errorf("docker volume rm renders %d times, want exactly 1 (scoped to its branch)", n)
+	}
+
+	// The corrected Next-step callout must not tell the operator that enroll
+	// alone starts reporting — that belief is what makes them skip step 2.
+	if strings.Contains(body, "Run the command on the device") {
+		t.Error("the stale Next-step callout still claims one command starts reporting")
 	}
 }
 

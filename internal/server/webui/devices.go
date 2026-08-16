@@ -136,13 +136,16 @@ func (h *handler) logAndFailMessage(w http.ResponseWriter, r *http.Request, usr 
 // step and populated on the reveal step; the template branches on it.
 type deviceNewData struct {
 	appData
-	Label          string
-	FieldErr       string
-	Code           string
-	Command        string
-	ExpiresIn      string
-	ExpiresAt      string
-	BaseURLWarning string
+	Label           string
+	FieldErr        string
+	Code            string
+	Command         string
+	ContainerEnroll string
+	ContainerRun    string
+	DevImageNote    string
+	ExpiresIn       string
+	ExpiresAt       string
+	BaseURLWarning  string
 }
 
 // clientImageRepo is the client image published by this project's CI. The
@@ -244,6 +247,19 @@ func (h *handler) handleDeviceNewCreate(w http.ResponseWriter, r *http.Request, 
 	base := baseURL(h.deps.Cfg, r)
 	data.Code = code
 	data.Command = fmt.Sprintf("diyddns-client enroll --server %s --code %s", base, code)
+	// Single-line deliberately: .copy code is white-space:nowrap, so an embedded
+	// newline would render as a space while the Copy button still copied a real
+	// newline — displayed and copied text would differ.
+	ref, note := clientImage(h.deps.Info)
+	data.ContainerEnroll = fmt.Sprintf(
+		"docker run --rm -v %s:/home/nonroot/.config %s enroll --server %s --code %s",
+		clientVolume, ref, base, code)
+	// No subcommand and no flags: CMD ["run"] is the image default, and `run`
+	// reads server_url back out of credentials.json.
+	data.ContainerRun = fmt.Sprintf(
+		"docker run -d --name %s --restart unless-stopped -v %s:/home/nonroot/.config %s",
+		clientContainer, clientVolume, ref)
+	data.DevImageNote = note
 	data.ExpiresAt = absTime(expiresAt)
 	data.ExpiresIn = relExpiry(expiresAt, time.Now())
 	data.BaseURLWarning = baseURLWarning(h.deps.Cfg, base)
