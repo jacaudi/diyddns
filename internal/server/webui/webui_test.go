@@ -956,7 +956,7 @@ func TestDeviceNew_RecoveryHints(t *testing.T) {
 	for _, want := range []string{
 		"credentials already exist",
 		"permission denied",
-		"any other message",
+		"Anything else, including that one",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("recovery copy is missing the %q branch", want)
@@ -965,7 +965,7 @@ func TestDeviceNew_RecoveryHints(t *testing.T) {
 
 	// Property 1: permission denied must NOT assert the code was spent, and must
 	// send the operator to the device list.
-	if !strings.Contains(body, "may or may not have been spent") {
+	if !strings.Contains(body, "may or may not be spent") {
 		t.Error("the permission-denied branch over-claims: it must not assert spent-ness")
 	}
 	if !strings.Contains(body, "device list") {

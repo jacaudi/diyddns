@@ -424,6 +424,16 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
 .callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
 .callout strong { display: block; margin-bottom: var(--space-1); }
+/* Body rhythm on the spacing scale. Without these the UA's 1em paragraph
+   margins apply, so gaps land off-scale and the last paragraph's margin does
+   not collapse into the callout's padding — leaving more space below the text
+   than above it. */
+.callout p { margin: var(--space-3) 0 0; }
+.callout p:last-child { margin-bottom: 0; }
+/* Each command owns its own row: .copy is inline-flex, so two adjacent pills
+   sit side by side wherever they happen to fit, which reads as unordered when
+   the copy says "in this order". */
+.callout .copy { display: flex; width: fit-content; max-width: 100%; margin-top: var(--space-2); }
 
 /* ---------- Danger zone ---------- */
 
