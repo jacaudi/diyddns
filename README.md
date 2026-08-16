@@ -61,6 +61,15 @@ in a container unless you mount it — use a volume, or pass `--credentials-file
     docker run --rm -v diyddns-client:/home/nonroot/.config \
       ghcr.io/jacaudi/diyddns/client:v0.1.0 enroll --code <code> --server <url>
 
+`<url>` must be reachable **from inside the client container**, which rules out
+the `http://localhost:8080` the server block above uses: inside the container
+`localhost` is the container itself, so enroll fails with `dial tcp
+[::1]:8080: connect: connection refused` even though that is the server's own
+`base_url`. On Docker Desktop use `http://host.docker.internal:8080`. On Linux,
+either put both containers on one user-defined network and use the server's
+container name, or run the client with
+`--add-host=host.docker.internal:host-gateway`.
+
 If enroll fails, read the message before retrying. `credentials already exist`
 means this host is already enrolled and your code is **not** spent — reuse it
 elsewhere, or, if you replaced that device, `docker rm -f diyddns-client-run &&
