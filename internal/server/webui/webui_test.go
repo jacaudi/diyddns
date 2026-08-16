@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"html"
 	"io"
 	"log/slog"
@@ -757,6 +758,74 @@ func TestAppCSS_FlexibleGridTracksCanShrinkBelowMinContent(t *testing.T) {
 			t.Errorf("bare 1fr track in %q: a track that is minmax(auto, 1fr) cannot shrink "+
 				"below its content's min-content width, so an unbreakable child (a nowrap .copy "+
 				"pill) forces document overflow at narrow viewports; write minmax(0, 1fr)", d)
+		}
+	}
+}
+
+// TestAppCSS_TypographyIsOnOneScale holds every type size to a declared scale,
+// the way --space-1..7 already holds every margin, padding and gap.
+//
+// Spacing was tokenised; typography never was, and it showed: measured live
+// across nine screens there were twelve distinct rendered font sizes, from
+// fifteen hard-coded declarations. The half-pixel values (11.5, 12.5, 13.5)
+// and the lone 0.85rem are the tell that these were picked per component
+// rather than chosen from a set — and 13.5px, 13px and 12.5px are three
+// different numbers that no reader can tell apart.
+//
+// Two of the twelve were not decisions at all. <h3> had no rule, so it
+// inherited the UA's 1.17em against a 14px parent and rendered at 16.38px, a
+// number nobody typed. The stacked-table micro-label sat at 11px, below every
+// other size in the file.
+//
+// The scale keeps values already in use (12/13/14/16/19/22/26) rather than
+// imposing a ratio, so headings the maintainer already signed off on do not
+// move: what changes is that the in-between values collapse onto their
+// neighbours. Numeric steps with no semantic alias layer, matching the
+// spacing scale's shape — that alias layer was offered and declined once
+// already, and this scale does not reopen it.
+//
+// Named --type-N and not --text-N: --text, --text-muted and --text-faint are
+// already the text COLOUR tokens, and a --text-2 sitting among them would
+// read as a third shade rather than a size.
+//
+// The single exception is .empty .icon, which sizes a decorative emoji glyph
+// rather than any text a reader parses; putting it on the type scale would
+// make the scale mean two different things.
+func TestAppCSS_TypographyIsOnOneScale(t *testing.T) {
+	raw, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	// Comments quote braces and selectors; parsing rules without stripping
+	// them first produces phantom rules with prose for a body.
+	css := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(string(raw), "")
+
+	for i := 1; i <= 7; i++ {
+		token := fmt.Sprintf("--type-%d:", i)
+		if !strings.Contains(css, token) {
+			t.Errorf(":root does not declare %s; the type scale is incomplete", token)
+		}
+	}
+
+	rules := regexp.MustCompile(`([^{}]+)\{([^{}]*)\}`).FindAllStringSubmatch(css, -1)
+	if len(rules) == 0 {
+		t.Fatal("parsed no rules out of app.css; this test has lost its subject")
+	}
+	for _, rule := range rules {
+		selector, body := strings.TrimSpace(rule[1]), rule[2]
+		if !strings.Contains(body, "font-size:") {
+			continue
+		}
+		// The decorative glyph, per the note above.
+		if strings.Contains(selector, ".empty .icon") {
+			continue
+		}
+		for _, decl := range regexp.MustCompile(`font-size:\s*([^;}]+)`).FindAllStringSubmatch(body, -1) {
+			if value := strings.TrimSpace(decl[1]); !strings.HasPrefix(value, "var(--type-") {
+				t.Errorf("%s sets font-size: %s — every type size comes from the scale, "+
+					"so that a size is chosen from a set rather than picked per component",
+					selector, value)
+			}
 		}
 	}
 }
