@@ -95,6 +95,9 @@ func (m *smtpMailer) Send(ctx context.Context, to, subject, body string) error {
 // TLS handshake as part of the same bounded window; starttls and none both
 // connect plaintext (starttls upgrades the connection later, in
 // sendEnvelope, once the client has confirmed the server offers it).
+//
+// dial also sets a deadline on the connection itself, taken from ctx, so the
+// bound survives dial's return and covers the rest of the conversation.
 func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, m.dialTimeout)
 	defer cancel()
@@ -106,6 +109,20 @@ func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error
 	conn, err := connect(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("email: dial %s: %w", addr, err)
+	}
+
+	// Bound every subsequent read and write on this connection. Neither
+	// smtp.NewClient's greeting read nor sendEnvelope's SMTP conversation
+	// consults a context, so without this a peer that accepts the connection
+	// and then stalls blocks the caller indefinitely — hanging a request
+	// handler and, with it, graceful shutdown.
+	//
+	// The deadline comes from ctx (the caller's overall budget), NOT dialCtx:
+	// dialCtx expires at defaultDialTimeout, which would cut off a legitimate
+	// slow envelope. Callers are expected to supply a deadline; both production
+	// callers do (GrantService's admin and self-service send paths).
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
 	}
 
 	if m.cfg.TLS == "implicit" {

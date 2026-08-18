@@ -416,3 +416,43 @@ func TestAdminNotifyBody_ContainsEmail(t *testing.T) {
 		t.Errorf("body = %q, want to contain email %q", body, userEmail)
 	}
 }
+
+// TestSMTPSend_StalledServerHonorsContextDeadline proves the connection
+// deadline set in dial bounds the WHOLE conversation, not just the TCP
+// connect. The fake server accepts and then says nothing at all, so
+// smtp.NewClient's greeting read is where this hangs without the deadline.
+func TestSMTPSend_StalledServerHonorsContextDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	// stall keeps the serve goroutine parked (holding the connection open and
+	// silent) until cleanup. Registered AFTER startFakeServer so t.Cleanup's
+	// LIFO order closes it FIRST — otherwise startFakeServer's own cleanup
+	// blocks forever in wg.Wait().
+	stall := make(chan struct{})
+	host, port, _ := startFakeServer(t, ln, func(_ net.Conn, _ chan<- fakeEnvelope) {
+		<-stall
+	})
+	t.Cleanup(func() { close(stall) })
+
+	m := email.NewSMTPForTest(config.EmailSection{
+		Enabled: true, Host: host, Port: port, From: "from@x.test", TLS: "none",
+	}, debugLogger(), nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 750*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = m.Send(ctx, "to@x.test", "subject", "body")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Send against a stalled server returned nil, want a deadline error")
+	}
+	// The bound must come from the context, not from defaultDialTimeout (10s).
+	if elapsed > 5*time.Second {
+		t.Errorf("Send took %v, want it bounded by the 750ms context deadline", elapsed)
+	}
+}
