@@ -26,27 +26,47 @@ import (
 // than requiring a sleep-and-hope poll.
 type fakeMailer struct {
 	enabled bool
+	// sendErr, when non-nil, is returned by every Send — the seam that makes
+	// the delivery-failure half of the Delivery matrix testable.
+	sendErr error
+	// sendDelay, when non-zero, is slept inside Send so a test can let the send
+	// context expire before Send returns.
+	sendDelay time.Duration
 	// sendCh, when non-nil, additionally receives every sentEmail so a test
 	// can block on the goroutine actually calling Send instead of racing it.
 	sendCh chan sentEmail
 
 	mu   sync.Mutex
 	sent []sentEmail
+	// lastCtxErr records ctx.Err() as observed INSIDE Send, so a test can prove
+	// the send context is not the caller's canceled request context.
+	lastCtxErr error
 }
 
 type sentEmail struct{ to, subject, body string }
 
 func (m *fakeMailer) Enabled() bool { return m.enabled }
 
-func (m *fakeMailer) Send(_ context.Context, to, subject, body string) error {
+func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
+	if m.sendDelay > 0 {
+		time.Sleep(m.sendDelay)
+	}
 	e := sentEmail{to: to, subject: subject, body: body}
 	m.mu.Lock()
 	m.sent = append(m.sent, e)
+	m.lastCtxErr = ctx.Err()
 	m.mu.Unlock()
 	if m.sendCh != nil {
 		m.sendCh <- e
 	}
-	return nil
+	return m.sendErr
+}
+
+// LastCtxErr reports ctx.Err() as seen inside the most recent Send.
+func (m *fakeMailer) LastCtxErr() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastCtxErr
 }
 
 // Sent returns a snapshot of every email recorded so far, safe to call
@@ -176,7 +196,7 @@ func TestGrantService_InviteRedeem_UserGainsPasskeyAndGrantConsumed(t *testing.T
 	u := seedUser(t, st, "alice@example.com", "user")
 	rp := testRP()
 
-	link, err := grants.IssueInvite(t.Context(), "admin-id", u.ID)
+	link, _, err := grants.IssueInvite(t.Context(), "admin-id", u)
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -226,7 +246,7 @@ func TestGrantService_IssueRecovery_NilPasskeys_ReturnsErrWebAuthnUnavailable(t 
 	grants := newTestGrantService(t, st, nil, &fakeMailer{}, NewAuditWriter(st))
 	u := seedUser(t, st, "alice@example.com", "user")
 
-	if _, err := grants.IssueRecovery(t.Context(), "admin-id", u.ID); !errors.Is(err, ErrWebAuthnUnavailable) {
+	if _, _, err := grants.IssueRecovery(t.Context(), "admin-id", u); !errors.Is(err, ErrWebAuthnUnavailable) {
 		t.Fatalf("IssueRecovery with nil passkeys: err = %v, want ErrWebAuthnUnavailable", err)
 	}
 }
@@ -240,7 +260,7 @@ func TestGrantService_RecoveryRedeem_RevokesThenRegistersFresh(t *testing.T) {
 
 	oldStored, _, _ := registerPasskey(t, passkeys, u.ID, "Old Key", rp)
 
-	link, err := grants.IssueRecovery(t.Context(), "admin-id", u.ID)
+	link, _, err := grants.IssueRecovery(t.Context(), "admin-id", u)
 	if err != nil {
 		t.Fatalf("IssueRecovery: %v", err)
 	}
@@ -406,7 +426,7 @@ func TestGrantService_InviteRedeem_DoesNotRevokeExistingPasskeys(t *testing.T) {
 	// recovery grants.
 	registerPasskey(t, passkeys, u.ID, "Existing Key", rp)
 
-	link, err := grants.IssueInvite(t.Context(), "admin-id", u.ID)
+	link, _, err := grants.IssueInvite(t.Context(), "admin-id", u)
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -496,5 +516,264 @@ func TestGrantService_RequestSelfServiceRecovery_MailerDisabled_NoEmailNoGrant(t
 	}
 	if len(page.Rows) != 0 {
 		t.Errorf("passkey.recovery_issued entries = %d, want 0 (mailer disabled, D11)", len(page.Rows))
+	}
+}
+
+func TestIssueInvite_DeliversWhenMailerEnabled(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, discardAudit{})
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	link, d, err := grants.IssueInvite(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+	if link == "" {
+		t.Fatal("IssueInvite returned an empty link")
+	}
+	if !d.Attempted || !d.Sent() || d.To != "invitee@x.com" {
+		t.Errorf("Delivery = %+v, want Attempted=true Sent=true To=invitee@x.com", d)
+	}
+	sent := mailer.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("mailer received %d messages, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0].body, link) {
+		t.Errorf("sent body does not contain the link\nbody: %s\nlink: %s", sent[0].body, link)
+	}
+}
+
+// TestIssueInvite_SendFailureStillReturnsLink is THE load-bearing assertion of
+// this change: a delivery failure must never cost the admin the link, because
+// the link on screen is the only fallback.
+func TestIssueInvite_SendFailureStillReturnsLink(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true, sendErr: errors.New("smtp exploded")}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, discardAudit{})
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	link, d, err := grants.IssueInvite(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueInvite returned an error for a SEND failure: %v — the send must never fail the call", err)
+	}
+	if link == "" {
+		t.Fatal("IssueInvite returned an empty link after a send failure")
+	}
+	if !d.Attempted || d.Sent() || d.Err == nil {
+		t.Errorf("Delivery = %+v, want Attempted=true Sent=false Err!=nil", d)
+	}
+}
+
+// TestIssueInvite_SendFailureAuditsWithActor covers design D8: the failure must
+// leave a trace naming the admin who triggered it.
+func TestIssueInvite_SendFailureAuditsWithActor(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true, sendErr: errors.New("smtp exploded")}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, NewAuditWriter(st))
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	if _, _, err := grants.IssueInvite(t.Context(), "admin-id", u); err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "email.send_failed"}, "", 10)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	// AuditPage's field is Rows, not Entries (store/audit_log.go:34-37). The
+	// same idiom is already used at grants_test.go:493.
+	if len(page.Rows) != 1 {
+		t.Fatalf("email.send_failed entries = %d, want 1", len(page.Rows))
+	}
+	if got := page.Rows[0].ActorUserID; got != "admin-id" {
+		t.Errorf("ActorUserID = %q, want admin-id", got)
+	}
+	if got := page.Rows[0].TargetID; got != u.ID {
+		t.Errorf("TargetID = %q, want %q", got, u.ID)
+	}
+}
+
+// TestIssueInvite_DisabledMailerReportsNotAttempted covers the default
+// deployment. noopMailer.Send returns nil, so a nil error alone would read as
+// "sent" — Attempted is what distinguishes them.
+func TestIssueInvite_DisabledMailerReportsNotAttempted(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: false}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, discardAudit{})
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	link, d, err := grants.IssueInvite(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+	if link == "" {
+		t.Fatal("IssueInvite returned an empty link")
+	}
+	if d.Attempted || d.Sent() {
+		t.Errorf("Delivery = %+v, want Attempted=false Sent=false", d)
+	}
+	if len(mailer.Sent()) != 0 {
+		t.Errorf("disabled mailer received %d messages, want 0", len(mailer.Sent()))
+	}
+}
+
+// TestIssueInvite_NilMailerDoesNotPanic guards a supported state: grants.go
+// already checks s.mailer == nil on the self-service path, and live
+// constructions pass nil.
+func TestIssueInvite_NilMailerDoesNotPanic(t *testing.T) {
+	st := openTestStore(t)
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), nil, discardAudit{})
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	link, d, err := grants.IssueInvite(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueInvite with a nil mailer: %v", err)
+	}
+	if link == "" {
+		t.Fatal("IssueInvite returned an empty link")
+	}
+	if d.Attempted {
+		t.Error("Delivery.Attempted = true for a nil mailer, want false")
+	}
+}
+
+// TestIssueRecovery_DeliversAdminRecoveryBody proves admin recovery uses its OWN
+// body — the self-service one tells the reader they can safely ignore the email,
+// which is false once the passkeys are revoked.
+func TestIssueRecovery_DeliversAdminRecoveryBody(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, discardAudit{})
+	u := seedUser(t, st, "victim@x.com", "user")
+
+	link, d, err := grants.IssueRecovery(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueRecovery: %v", err)
+	}
+	if !d.Sent() || d.To != "victim@x.com" {
+		t.Errorf("Delivery = %+v, want Sent=true To=victim@x.com", d)
+	}
+	sent := mailer.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("mailer received %d messages, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0].body, link) {
+		t.Error("sent body does not contain the link")
+	}
+	if strings.Contains(strings.ToLower(sent[0].body), "safely ignore") {
+		t.Errorf("admin recovery used the SELF-SERVICE body:\n%s", sent[0].body)
+	}
+}
+
+// TestIssueRecovery_IssuanceFailureSendsNothing covers design §6.1: when nothing
+// was minted, nothing may be sent. A nil PasskeyService makes IssueRecovery fail
+// its guard before minting.
+func TestIssueRecovery_IssuanceFailureSendsNothing(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true}
+	grants := newTestGrantService(t, st, nil, mailer, discardAudit{})
+	u := seedUser(t, st, "victim@x.com", "user")
+
+	link, d, err := grants.IssueRecovery(t.Context(), "admin-id", u)
+	if !errors.Is(err, ErrWebAuthnUnavailable) {
+		t.Fatalf("err = %v, want ErrWebAuthnUnavailable", err)
+	}
+	if link != "" {
+		t.Errorf("link = %q, want empty on issuance failure", link)
+	}
+	if d.Attempted {
+		t.Error("Delivery.Attempted = true after an issuance failure, want false")
+	}
+	if len(mailer.Sent()) != 0 {
+		t.Errorf("mailer received %d messages after an issuance failure, want 0", len(mailer.Sent()))
+	}
+}
+
+// TestAuditSendFailure_WritesOnAnExpiredContext pins the invariant BOTH send
+// paths depend on — deliver (admin) and doSelfServiceRecovery (self-service).
+// An expired context must still produce a row, because the context that bounds
+// a send is exactly the context that is dead when that send fails.
+func TestAuditSendFailure_WritesOnAnExpiredContext(t *testing.T) {
+	st := openTestStore(t)
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), &fakeMailer{}, NewAuditWriter(st))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // stand in for a send context that has already run out
+
+	grants.auditSendFailure(ctx, store.AuditEntry{
+		EventType: "email.send_failed", TargetType: "user", TargetID: "u-1",
+	})
+
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "email.send_failed"}, "", 10)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("email.send_failed entries = %d, want 1 — an expired context must not lose the row", len(page.Rows))
+	}
+	if got := page.Rows[0].TargetID; got != "u-1" {
+		t.Errorf("TargetID = %q, want u-1", got)
+	}
+}
+
+// TestDeliver_AuditsEvenWhenTheSendContextExpires is the regression test for a
+// defect a fast-failing mailer cannot reach: internal/email sets the connection
+// deadline FROM the send context, so a stalled peer makes Send return at exactly
+// the moment that context expires. If the audit write reused it, database/sql
+// would reject it and auditWriter.Log would swallow the rejection, losing the
+// record in the one case it matters.
+func TestDeliver_AuditsEvenWhenTheSendContextExpires(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true, sendErr: errors.New("stalled"), sendDelay: 20 * time.Millisecond}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, NewAuditWriter(st))
+	grants.deliveryTimeout = time.Millisecond // force sendCtx to expire during Send
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	d := grants.deliver(t.Context(), "admin-id", u, "subject", "body")
+	if d.Err == nil {
+		t.Fatal("Delivery.Err = nil, want the send failure")
+	}
+
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "email.send_failed"}, "", 10)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("email.send_failed entries = %d, want 1 — the audit write must not reuse the expired send context", len(page.Rows))
+	}
+}
+
+// TestDeliver_SurvivesCanceledRequestContext proves D6's context.WithoutCancel:
+// if the admin's browser aborts, the response is lost but the user must still
+// receive the link. This exercises deliver directly rather than through
+// IssueInvite, because a canceled context fails at the DB insert long before the
+// send — database/sql rejects an already-canceled context before reaching the
+// driver, so the send would never be attempted at all.
+func TestDeliver_SurvivesCanceledRequestContext(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true, sendErr: errors.New("smtp exploded")}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, NewAuditWriter(st))
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // the browser has already gone away
+
+	d := grants.deliver(ctx, "admin-id", u, "subject", "body")
+	if d.Err == nil {
+		t.Fatal("Delivery.Err = nil, want the injected send failure")
+	}
+	if err := mailer.LastCtxErr(); err != nil {
+		t.Errorf("Send saw ctx.Err() = %v, want nil — WithoutCancel should have detached it", err)
+	}
+	// The combination D8's rationale actually describes: a CANCELED request
+	// context AND a failed send. Neither the helper test nor the expiry test
+	// covers it, and it is the client-disconnect path in production.
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "email.send_failed"}, "", 10)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("email.send_failed entries = %d, want 1 — a canceled request context must not lose the row", len(page.Rows))
 	}
 }

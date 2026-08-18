@@ -239,7 +239,7 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 		Role:    role,
 	}
 
-	invited, link, err := h.deps.Admin.CreateUserInvite(r.Context(), usr.ID, email, role)
+	invited, link, _, err := h.deps.Admin.CreateUserInvite(r.Context(), usr.ID, email, role)
 	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			data.Error = msg
@@ -360,7 +360,7 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 			"Type the account's email address exactly to confirm. No passkeys were revoked.")
 		return
 	}
-	link, err := h.deps.Grants.IssueRecovery(r.Context(), usr.ID, target.ID)
+	link, _, err := h.deps.Grants.IssueRecovery(r.Context(), usr.ID, target)
 	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			h.renderAdminUserError(w, r, usr, sess, target, status, msg)

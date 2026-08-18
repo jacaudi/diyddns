@@ -90,7 +90,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 	deps, _ := testDeps(t)
 
-	usr, link, err := deps.Admin.CreateUserInvite(context.Background(), "actor-id", "invitee@example.com", "user")
+	usr, link, _, err := deps.Admin.CreateUserInvite(context.Background(), "actor-id", "invitee@example.com", "user")
 	if err != nil {
 		t.Fatalf("CreateUserInvite: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
 	}
@@ -98,7 +98,7 @@ func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 		t.Error("CreateUserInvite: empty invite link")
 	}
 
-	if link, err := deps.Grants.IssueRecovery(context.Background(), "actor-id", usr.ID); err != nil {
+	if link, _, err := deps.Grants.IssueRecovery(context.Background(), "actor-id", usr); err != nil {
 		t.Fatalf("IssueRecovery: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
 	} else if link == "" {
 		t.Error("IssueRecovery: empty recovery link")

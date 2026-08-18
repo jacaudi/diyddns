@@ -41,7 +41,7 @@ func TestAdminService_CreateUserInvite_RejectsBadRole(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")
 
-	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "n@x.com", "superuser"); !errors.Is(err, ErrInvalidRole) {
+	if _, _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "n@x.com", "superuser"); !errors.Is(err, ErrInvalidRole) {
 		t.Fatalf("err = %v, want ErrInvalidRole", err)
 	}
 }
@@ -50,7 +50,7 @@ func TestAdminService_CreateUserInvite_RejectsInvalidEmail(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")
 
-	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "not-an-email", "user"); !errors.Is(err, ErrInvalidEmail) {
+	if _, _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "not-an-email", "user"); !errors.Is(err, ErrInvalidEmail) {
 		t.Fatalf("err = %v, want ErrInvalidEmail", err)
 	}
 }
@@ -59,7 +59,7 @@ func TestAdminService_CreateUserInvite_CredentiallessUserAndRedeemableLink(t *te
 	st, svc := newAdminSvcWithPasskeys(t)
 	admin := seedUser(t, st, "admin@x.com", "admin")
 
-	u, link, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user")
+	u, link, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user")
 	if err != nil {
 		t.Fatalf("CreateUserInvite: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestAdminService_CreateUserInvite_NilPasskeys_ReturnsErrWebAuthnUnavailable
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "admin@x.com", "admin")
 
-	if _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user"); !errors.Is(err, ErrWebAuthnUnavailable) {
+	if _, _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "invitee@x.com", "user"); !errors.Is(err, ErrWebAuthnUnavailable) {
 		t.Fatalf("CreateUserInvite with nil passkeys: err = %v, want ErrWebAuthnUnavailable", err)
 	}
 }

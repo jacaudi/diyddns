@@ -187,7 +187,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
 	}, func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
 		actor := UserFrom(ctx)
-		u, link, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
+		u, link, _, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
 		if err != nil {
 			return nil, adminErr(ctx, deps, "create user", err)
 		}
@@ -221,14 +221,14 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/recovery", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
 	}, func(ctx context.Context, in *issueRecoveryInput) (*issueRecoveryOutput, error) {
 		actor := UserFrom(ctx)
-		// GrantService.IssueRecovery does not itself check that in.ID names a
-		// real user (it only issues a grant + revokes credentials for
-		// whatever id it's given) — this pre-check keeps the 404-on-bad-id
-		// behavior consistent with this file's other {id}-scoped endpoints.
-		if _, err := deps.Store.Users().GetByID(ctx, in.ID); err != nil {
+		// The lookup keeps the 404-on-bad-id behavior consistent with this
+		// file's other {id}-scoped endpoints, and supplies the store.User
+		// IssueRecovery needs to address the delivery.
+		target, err := deps.Store.Users().GetByID(ctx, in.ID)
+		if err != nil {
 			return nil, adminErr(ctx, deps, "issue recovery", err)
 		}
-		link, err := deps.Grants.IssueRecovery(ctx, actor.ID, in.ID)
+		link, _, err := deps.Grants.IssueRecovery(ctx, actor.ID, target)
 		if err != nil {
 			return nil, adminErr(ctx, deps, "issue recovery", err)
 		}
