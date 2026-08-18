@@ -506,3 +506,36 @@ func TestSMTPSend_LogsWhenDeadlineCannotBeSet(t *testing.T) {
 		t.Errorf("expected a warning that the deadline could not be set, got: %s", buf.String())
 	}
 }
+
+func TestInviteLinkBody(t *testing.T) {
+	subject, body := email.InviteLinkBody("https://d.example.com/register?token=abc")
+	if subject == "" {
+		t.Error("InviteLinkBody: empty subject")
+	}
+	if !strings.Contains(body, "https://d.example.com/register?token=abc") {
+		t.Errorf("InviteLinkBody: body does not contain the link:\n%s", body)
+	}
+}
+
+// TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt is the point of having a
+// second body at all. RecoveryLinkBody says the link "was requested" and can be
+// "safely ignored" — both false when an admin has already revoked every passkey
+// on the account, which is exactly when this body is sent.
+func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
+	subject, body := email.AdminRecoveryLinkBody("https://d.example.com/register?token=xyz")
+	if subject == "" {
+		t.Error("AdminRecoveryLinkBody: empty subject")
+	}
+	if !strings.Contains(body, "https://d.example.com/register?token=xyz") {
+		t.Errorf("AdminRecoveryLinkBody: body does not contain the link:\n%s", body)
+	}
+	lower := strings.ToLower(body)
+	for _, forbidden := range []string{"safely ignore", "did not request", "you requested"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("AdminRecoveryLinkBody must not say %q — the passkeys are already revoked:\n%s", forbidden, body)
+		}
+	}
+	if !strings.Contains(lower, "revoked") {
+		t.Errorf("AdminRecoveryLinkBody must state the passkeys were revoked:\n%s", body)
+	}
+}
