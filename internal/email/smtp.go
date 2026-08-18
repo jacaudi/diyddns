@@ -119,10 +119,20 @@ func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error
 	//
 	// The deadline comes from ctx (the caller's overall budget), NOT dialCtx:
 	// dialCtx expires at defaultDialTimeout, which would cut off a legitimate
-	// slow envelope. Callers are expected to supply a deadline; both production
-	// callers do (GrantService's admin and self-service send paths).
+	// slow envelope. Callers are expected to supply a deadline; the only
+	// production caller today is GrantService.doSelfServiceRecovery, and both
+	// of its sends — the recovery link to the user and the notification to
+	// admins — run on the one bounded context it derives for that whole flow.
+	//
+	// A SetDeadline failure is logged rather than returned: the conversation is
+	// then unbounded, which is worse than bounded but far better than refusing
+	// a delivery that would otherwise have succeeded. Logging keeps a trail, so
+	// a hang here is explainable instead of silent.
 	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
+		if err := conn.SetDeadline(dl); err != nil {
+			m.log.WarnContext(ctx, "email: could not bound the SMTP conversation",
+				"host", m.cfg.Host, "error", err)
+		}
 	}
 
 	if m.cfg.TLS == "implicit" {
