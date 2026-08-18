@@ -43,7 +43,7 @@ var adminRecoveryTmpl = template.Must(template.New("admin-recovery-link").Parse(
 		"back in. It expires shortly and can only be used once.\r\n\r\n" +
 		"{{.Link}}\r\n\r\n" +
 		"If you were not expecting this, contact your administrator. Do not\r\n" +
-		"disregard this message — your existing passkeys no longer work.\r\n",
+		"disregard this message: your existing passkeys no longer work.\r\n",
 ))
 
 // RecoveryLinkBody renders the subject and body of the email sent to a user
