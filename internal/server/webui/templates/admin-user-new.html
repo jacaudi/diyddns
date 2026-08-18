@@ -15,6 +15,7 @@
       <label>Registration link</label>
       {{template "copyValue" .Link}}
     </div>
+    {{if .DeliveryNote}}<p class="muted">{{.DeliveryNote}}</p>{{end}}
     <div class="callout info">
       <strong>Next step</strong>
       The user opens the link and registers their first passkey. Until they do, the
