@@ -103,6 +103,42 @@ func TestAdminCreateUser_RequiresCSRF(t *testing.T) {
 	}
 }
 
+// TestAdminCreateUser_ResponseCarriesDelivery proves an API client learns
+// whether the link was emailed. The harness wires an enabled fakeMailer whose
+// Send always succeeds, so this must report attempted=true and sent=true.
+func TestAdminCreateUser_ResponseCarriesDelivery(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-delivery@example.com", "admin")
+	adminCookie, adminCSRF := sessionFor(t, h, "admin-delivery@example.com")
+
+	newUser := map[string]string{"email": "invitee-delivery@example.com", "role": "user"}
+	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/users", newUser, adminCookie, adminCSRF)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+
+	var got struct {
+		Link     string `json:"link"`
+		Delivery struct {
+			Attempted bool   `json:"attempted"`
+			Sent      bool   `json:"sent"`
+			To        string `json:"to"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode response: %v, body=%s", err, body)
+	}
+	if got.Link == "" {
+		t.Fatal("response carried no link")
+	}
+	if !got.Delivery.Attempted || !got.Delivery.Sent {
+		t.Errorf("Delivery = %+v, want attempted=true sent=true", got.Delivery)
+	}
+	if got.Delivery.To != "invitee-delivery@example.com" {
+		t.Errorf("Delivery.To = %q, want invitee-delivery@example.com", got.Delivery.To)
+	}
+}
+
 // ---------- PATCH /api/v1/admin/users/{id} ----------
 
 func TestAdminUpdateUser_LastAdmin_Conflict(t *testing.T) {
@@ -205,3 +241,44 @@ func TestAdminServer_OmitsClientSecret(t *testing.T) {
 		t.Fatalf("server info leaked client_secret: %s", body)
 	}
 }
+
+// ---------- POST /api/v1/admin/users/{id}/recovery ----------
+
+// TestAdminIssueRecovery_ResponseCarriesDelivery covers the second endpoint and
+// asserts the raw transport error never reaches the wire.
+func TestAdminIssueRecovery_ResponseCarriesDelivery(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-recovery@example.com", "admin")
+	target := seedUser(t, h.st, "target-recovery@example.com", "user")
+	adminCookie, adminCSRF := sessionFor(t, h, "admin-recovery@example.com")
+
+	status, _, body := doJSON(t, http.MethodPost,
+		h.srv.URL+"/api/v1/admin/users/"+target.ID+"/recovery", nil, adminCookie, adminCSRF)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+
+	var got struct {
+		Link     string `json:"link"`
+		Delivery struct {
+			Attempted bool   `json:"attempted"`
+			Sent      bool   `json:"sent"`
+			To        string `json:"to"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode response: %v, body=%s", err, body)
+	}
+	if got.Link == "" {
+		t.Fatal("response carried no link")
+	}
+	if !got.Delivery.Sent || got.Delivery.To != "target-recovery@example.com" {
+		t.Errorf("Delivery = %+v, want sent=true To=target-recovery@example.com", got.Delivery)
+	}
+}
+
+// NOTE: there is deliberately NO "response body contains no SMTP error" assertion
+// here. The api harness fakeMailer always succeeds (devices_test.go:48), so no
+// transport error is ever in scope — such an assertion could not fail for the
+// reason it claims, and a base64url grant token could trip it by chance. The
+// no-leak guarantee is structural instead: deliveryView has no error field.
