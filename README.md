@@ -88,6 +88,39 @@ just named is listed the code was spent and you need a fresh one; if it is
 absent the code is still good, so fix what the message reports and run the
 same command again, without removing the volume.
 
+## Configuration
+
+Every setting has a `DIYDDNS_`-prefixed environment variable; see
+[`config.example.yaml`](./config.example.yaml) for the full annotated set.
+
+### Email (optional, off by default)
+
+DIYDDNS can email the registration links it issues — the passkey recovery link a
+user requests themselves, and the invite and recovery links an admin issues from
+the Users screen.
+
+It is **disabled by default**, and that is a supported way to run: with email off,
+an admin is shown each link once on screen and delivers it out of band. Air-gapped
+and SMTP-less deployments need nothing further.
+
+Turning it on also emails the link to the user. The link is still shown on screen
+either way, and the admin is told whether delivery succeeded, so a mail failure
+never costs them the link.
+
+| Key | Env var | Notes |
+|---|---|---|
+| `email.enabled` | `DIYDDNS_EMAIL_ENABLED` | `false` by default |
+| `email.host` | `DIYDDNS_EMAIL_HOST` | **required** when enabled |
+| `email.port` | `DIYDDNS_EMAIL_PORT` | **required** when enabled — 587 starttls · 465 implicit · 25 none |
+| `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH |
+| `email.password` | `DIYDDNS_EMAIL_PASSWORD` | never logged |
+| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — envelope sender |
+| `email.tls` | `DIYDDNS_EMAIL_TLS` | `starttls` (default), `implicit`, or `none` |
+
+Enabling email **requires `server.base_url`, `email.host`, `email.port` and `email.from`**; the
+server refuses to start without them. Emailed links must be absolute, and the other three have no
+usable default — `port` defaults to `0`.
+
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md)

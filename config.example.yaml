@@ -177,3 +177,24 @@ auth:
     # Allow a brand-new account to be created on first OIDC login.
     # Default true.
     allow_oidc_signup: true
+
+# Outbound account email. Used for passkey recovery links and for the invite and
+# recovery links an admin issues from the Users screen. Disabled by default:
+# when off, those links are shown once on screen for manual delivery, which is
+# the correct behaviour for an air-gapped or SMTP-less deployment.
+#
+# Enabling this REQUIRES server.base_url, because emailed links must be
+# absolute — the server refuses to start otherwise.
+email:
+  enabled: false
+  host: "" # e.g. "smtp.example.com"
+  # 587 for starttls, 465 for implicit, 25 for none.
+  port: 587
+  # Leave username empty to skip SMTP AUTH entirely.
+  username: ""
+  # Prefer DIYDDNS_EMAIL_PASSWORD; never logged.
+  password: ""
+  from: "" # e.g. "diyddns@example.com"
+  # One of: starttls (default), implicit, none. Any other value is rejected at
+  # startup.
+  tls: "starttls"
