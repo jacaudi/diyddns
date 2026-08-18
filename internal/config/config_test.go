@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"cmp"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -288,8 +289,14 @@ func TestLoad_EmailTLSValidation(t *testing.T) {
 		v.Set("database.path", ":memory:")
 		v.Set("email.enabled", true)
 		v.Set("email.tls", "tls") // old/typo value, not in the enum
-		if _, err := config.Load(v, ""); err == nil {
-			t.Fatal("expected error for email.enabled with invalid email.tls")
+		// The rest of the email config must be complete, or this subtest passes
+		// on some other validator's error and stops exercising the enum at all.
+		v.Set("server.base_url", "https://d.example.com")
+		v.Set("email.host", "smtp.example.com")
+		v.Set("email.port", 587)
+		v.Set("email.from", "diyddns@example.com")
+		if _, err := config.Load(v, ""); err == nil || !strings.Contains(err.Error(), "email.tls") {
+			t.Fatalf("want an error naming email.tls, got %v", err)
 		}
 	})
 
@@ -299,6 +306,10 @@ func TestLoad_EmailTLSValidation(t *testing.T) {
 			v.Set("database.path", ":memory:")
 			v.Set("email.enabled", true)
 			v.Set("email.tls", tls)
+			v.Set("server.base_url", "https://d.example.com")
+			v.Set("email.host", "smtp.example.com")
+			v.Set("email.port", 587)
+			v.Set("email.from", "diyddns@example.com")
 			if _, err := config.Load(v, ""); err != nil {
 				t.Errorf("Load with email.tls=%q: %v", tls, err)
 			}
@@ -438,6 +449,80 @@ func TestInsecureCookieWarning(t *testing.T) {
 			}
 			if tt.wantWarning && !strings.Contains(got, "cookie_secure") {
 				t.Errorf("warning must name the key to change; got %q", got)
+			}
+		})
+	}
+}
+
+// TestLoad_EmailEnabledRequiresCompleteConfig locks the fail-closed contract:
+// email.enabled requires every value the send path actually uses, and every
+// problem is reported in ONE error (go-standards §15.3) rather than one per
+// restart.
+func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
+	const (
+		okURL  = "https://d.example.com"
+		okHost = "smtp.example.com"
+		okPort = 587
+		okFrom = "diyddns@example.com"
+	)
+	tests := []struct {
+		name     string
+		enabled  bool
+		baseURL  string
+		host     string
+		port     int
+		from     string
+		username string
+		tls      string
+		wantErr  []string // every substring the error must name; empty means expect success
+	}{
+		// Disabled short-circuits every check, even for an otherwise empty config.
+		{name: "disabled skips every check", enabled: false},
+		{name: "enabled and complete is accepted", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom},
+
+		{name: "no base_url", enabled: true, host: okHost, port: okPort, from: okFrom, wantErr: []string{"server.base_url"}},
+		{name: "base_url is not absolute", enabled: true, baseURL: "ddns.example.com", host: okHost, port: okPort, from: okFrom, wantErr: []string{"absolute server.base_url"}},
+		{name: "no host", enabled: true, baseURL: okURL, port: okPort, from: okFrom, wantErr: []string{"email.host"}},
+		{name: "the zero port default", enabled: true, baseURL: okURL, host: okHost, from: okFrom, wantErr: []string{"email.port"}},
+		{name: "out-of-range port", enabled: true, baseURL: okURL, host: okHost, port: 70000, from: okFrom, wantErr: []string{"email.port"}},
+		{name: "no from", enabled: true, baseURL: okURL, host: okHost, port: okPort, wantErr: []string{"email.from"}},
+
+		// net/smtp refuses PLAIN auth over an unencrypted connection.
+		{name: "auth over plaintext to a remote host", enabled: true, baseURL: okURL, host: okHost, port: 25, from: okFrom,
+			username: "user", tls: "none", wantErr: []string{"email.username"}},
+		{name: "auth over plaintext to localhost is allowed", enabled: true, baseURL: okURL, host: "localhost", port: 25, from: okFrom,
+			username: "user", tls: "none"},
+
+		// The aggregation requirement: ONE Load reports ALL of them.
+		{name: "every problem is reported together", enabled: true,
+			wantErr: []string{"server.base_url", "email.host", "email.port", "email.from"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("email.enabled", tt.enabled)
+			v.Set("email.tls", cmp.Or(tt.tls, "starttls"))
+			v.Set("server.base_url", tt.baseURL)
+			v.Set("email.host", tt.host)
+			v.Set("email.port", tt.port)
+			v.Set("email.from", tt.from)
+			v.Set("email.username", tt.username)
+
+			_, err := config.Load(v, "")
+			if len(tt.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("Load: %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Load returned nil, want an error naming %v", tt.wantErr)
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error does not name %q:\n%v", want, err)
+				}
 			}
 		})
 	}
