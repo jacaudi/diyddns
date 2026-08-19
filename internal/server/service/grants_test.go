@@ -717,12 +717,20 @@ func TestAuditSendFailure_WritesOnAnExpiredContext(t *testing.T) {
 	}
 }
 
-// TestDeliver_AuditsEvenWhenTheSendContextExpires is the regression test for a
-// defect a fast-failing mailer cannot reach: internal/email sets the connection
-// deadline FROM the send context, so a stalled peer makes Send return at exactly
-// the moment that context expires. If the audit write reused it, database/sql
-// would reject it and auditWriter.Log would swallow the rejection, losing the
-// record in the one case it matters.
+// TestDeliver_AuditsEvenWhenTheSendContextExpires pins one thing: deliver must
+// not bypass auditSendFailure. It reproduces the production shape a fast-failing
+// mailer cannot — internal/email sets the connection deadline FROM the send
+// context, so a stalled peer makes Send return at exactly the moment sendCtx
+// expires — and requires a row anyway.
+//
+// It does NOT pin WHICH context deliver hands to auditSendFailure, and must not
+// be read as if it did: deliver passes the live ctx (here t.Context()), so the
+// expired sendCtx never reaches the audit path, and switching deliver to sendCtx
+// does not fail this test either because auditSendFailure's own WithoutCancel
+// rescues the write. Both routes are correct, so that mutant is equivalent. The
+// dead-context guarantees live in TestAuditSendFailure_WritesOnAnExpiredContext
+// (the helper alone) and TestDeliver_SurvivesCanceledRequestContext (a canceled
+// request context through deliver).
 func TestDeliver_AuditsEvenWhenTheSendContextExpires(t *testing.T) {
 	st := openTestStore(t)
 	mailer := &fakeMailer{enabled: true, sendErr: errors.New("stalled"), sendDelay: 20 * time.Millisecond}

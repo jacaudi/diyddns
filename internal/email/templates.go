@@ -39,8 +39,8 @@ var inviteTmpl = template.Must(template.New("invite-link").Parse(
 var adminRecoveryTmpl = template.Must(template.New("admin-recovery-link").Parse(
 	"An administrator has reset the passkeys on your DIYDDNS account.\r\n\r\n" +
 		"Every passkey on the account has already been revoked, so you cannot\r\n" +
-		"sign in until you register a new one. The link below is the only way\r\n" +
-		"back in. It expires shortly and can only be used once.\r\n\r\n" +
+		"sign in until you register a new one. Use the link below to do that;\r\n" +
+		"it expires shortly and can only be used once.\r\n\r\n" +
 		"{{.Link}}\r\n\r\n" +
 		"If you were not expecting this, contact your administrator. Do not\r\n" +
 		"disregard this message: your existing passkeys no longer work.\r\n",

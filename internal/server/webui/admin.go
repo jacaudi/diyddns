@@ -425,7 +425,7 @@ var knownEventTypes = []string{
 	"bootstrap.consumed",
 	"device.deleted", "device.disabled", "device.enabled",
 	"device.enroll.code", "device.enroll.oidc", "device.renamed", "device.secret.rotated",
-	"email.send_failed",
+	service.EventEmailSendFailed,
 	"passkey.invite_issued", "passkey.recovery_issued", "passkey.recovery_redeemed",
 	"passkey.registered", "passkey.removed", "passkey.renamed", "passkey.signcount_anomaly",
 	"session.revoked",

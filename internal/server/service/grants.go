@@ -35,10 +35,16 @@ var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, 
 // "shutdown: context deadline exceeded".
 const adminDeliveryTimeout = 12 * time.Second
 
-// auditWriteTimeout bounds an email.send_failed audit write. It is separate and
-// deliberately short: see auditSendFailure for why such a write must never
+// auditWriteTimeout bounds an EventEmailSendFailed audit write. It is separate
+// and deliberately short: see auditSendFailure for why such a write must never
 // reuse the context the failed send ran on.
 const auditWriteTimeout = 5 * time.Second
+
+// EventEmailSendFailed is the audit event code recorded when a grant or
+// notification email fails to send. Exported because internal/server/webui's
+// event-type filter needs the same value. Never change it: audit rows already
+// persisted carry this code, and a new one would orphan that history.
+const EventEmailSendFailed = "email.send_failed"
 
 // Delivery reports what happened to a grant link AFTER it was successfully
 // minted. It is ADVISORY: when the issuing call returns a nil error the link is
@@ -108,7 +114,7 @@ func (s *GrantService) deliver(ctx context.Context, actorID string, u store.User
 		s.log.ErrorContext(ctx, "grant link delivery failed", "err", err, "user_id", u.ID)
 		s.auditSendFailure(ctx, store.AuditEntry{
 			ActorUserID: actorID,
-			EventType:   "email.send_failed",
+			EventType:   EventEmailSendFailed,
 			TargetType:  "user",
 			TargetID:    u.ID,
 		})
@@ -319,7 +325,7 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 	subj, body := email.RecoveryLinkBody(link)
 	if err := s.mailer.Send(ctx, u.Email, subj, body); err != nil {
 		s.auditSendFailure(ctx, store.AuditEntry{
-			EventType: "email.send_failed", TargetType: "user", TargetID: u.ID, IP: ip,
+			EventType: EventEmailSendFailed, TargetType: "user", TargetID: u.ID, IP: ip,
 		})
 	}
 
@@ -335,7 +341,7 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 		}
 		if err := s.mailer.Send(ctx, a.Email, adminSubj, adminBody); err != nil {
 			s.auditSendFailure(ctx, store.AuditEntry{
-				EventType: "email.send_failed", TargetType: "user", TargetID: a.ID, IP: ip,
+				EventType: EventEmailSendFailed, TargetType: "user", TargetID: a.ID, IP: ip,
 			})
 		}
 	}
