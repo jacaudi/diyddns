@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/jacaudi/diyddns/compare/v0.2.0...v0.3.0) (2026-08-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **admin:** email invite and recovery links, requiring server.base_url when email is enabled
+
+### Features
+
+* **admin:** email invite and recovery links, requiring server.base_url when email is enabled ([9f9fd20](https://github.com/jacaudi/diyddns/commit/9f9fd20f173e3313210e054202c031c4726016f1)), closes [#52](https://github.com/jacaudi/diyddns/issues/52)
+
 ## [0.2.0](https://github.com/jacaudi/diyddns/compare/v0.1.0...v0.2.0) (2026-08-16)
 
 
