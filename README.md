@@ -112,14 +112,18 @@ never costs them the link.
 | `email.enabled` | `DIYDDNS_EMAIL_ENABLED` | `false` by default |
 | `email.host` | `DIYDDNS_EMAIL_HOST` | **required** when enabled |
 | `email.port` | `DIYDDNS_EMAIL_PORT` | **required** when enabled — 587 starttls · 465 implicit · 25 none |
-| `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH |
+| `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH; non-empty with `tls: none` refuses to start (see below) |
 | `email.password` | `DIYDDNS_EMAIL_PASSWORD` | never logged |
 | `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — envelope sender |
 | `email.tls` | `DIYDDNS_EMAIL_TLS` | `starttls` (default), `implicit`, or `none` |
 
 Enabling email **requires `server.base_url`, `email.host`, `email.port` and `email.from`**; the
 server refuses to start without them. Emailed links must be absolute, and the other three have no
-usable default — `port` defaults to `0`.
+usable default — `port` defaults to `0`. It also refuses to start with `email.username` set and
+`email.tls: none` against anything other than `localhost`/`127.0.0.1`/`::1` — Go's `net/smtp`
+refuses to send credentials over an unencrypted connection. Every problem is collected and
+reported in a single error, so enabling email from scratch means fixing everything in one deploy
+cycle instead of discovering the next missing key on each restart.
 
 ## Documentation
 

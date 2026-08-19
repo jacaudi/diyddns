@@ -190,11 +190,15 @@ email:
   host: "" # e.g. "smtp.example.com"
   # 587 for starttls, 465 for implicit, 25 for none.
   port: 587
-  # Leave username empty to skip SMTP AUTH entirely.
+  # Leave username empty to skip SMTP AUTH entirely. A non-empty username with
+  # tls: none is REJECTED at startup for any host other than localhost/
+  # 127.0.0.1/::1 — net/smtp refuses to send credentials over an unencrypted
+  # connection.
   username: ""
   # Prefer DIYDDNS_EMAIL_PASSWORD; never logged.
   password: ""
   from: "" # e.g. "diyddns@example.com"
   # One of: starttls (default), implicit, none. Any other value is rejected at
-  # startup.
+  # startup. NOTE: none + a non-empty username above is also rejected at
+  # startup unless host is localhost/127.0.0.1/::1 (see username, above).
   tls: "starttls"
