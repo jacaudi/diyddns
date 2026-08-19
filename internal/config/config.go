@@ -8,6 +8,7 @@ package config
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -215,19 +216,72 @@ func validateOIDC(cfg Server) error {
 	return nil
 }
 
-// validateEmail enforces the email.tls enum when email.enabled is true,
-// mirroring validateOIDC: fail-closed at startup on a config typo rather
-// than the internal/email package silently falling back to plaintext SMTP.
+// validateEmailBaseURL enforces that outbound links can actually be followed.
+// Non-empty is not enough: "ddns.example.com" is non-empty and yields
+// "ddns.example.com/register?token=…", which is not a URL.
+func validateEmailBaseURL(baseURL string) error {
+	if baseURL == "" {
+		return errors.New(`config: email.enabled requires server.base_url (outbound links must be absolute), e.g. "https://ddns.example.com"`)
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("config: email.enabled requires a parseable server.base_url: %w", err)
+	}
+	if !u.IsAbs() || u.Host == "" {
+		return fmt.Errorf(`config: email.enabled requires an absolute server.base_url with a scheme and host, got %q`, baseURL)
+	}
+	return nil
+}
+
+// isLocalhostHost mirrors net/smtp's own isLocalhost (net/smtp/auth.go), which
+// is the exact set of hosts PlainAuth will authenticate to without TLS.
+func isLocalhostHost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// validateEmail enforces that an enabled email subsystem is actually usable.
+// Every problem is collected and reported together (go-standards §15.3), so an
+// operator enabling email from scratch fixes it in one deploy cycle rather than
+// discovering the next missing key on each restart.
 func validateEmail(cfg Server) error {
 	if !cfg.Email.Enabled {
 		return nil
 	}
+	var problems []error
+
+	// Outbound mail carries registration links built as
+	// server.base_url + "/register?token=…" (service/grants.go). The web UI
+	// repairs a bare path at render time, but the service has no *http.Request
+	// to repair it from, so the link must already be absolute here.
+	if err := validateEmailBaseURL(cfg.Server.BaseURL); err != nil {
+		problems = append(problems, err)
+	}
+	if cfg.Email.Host == "" {
+		problems = append(problems, errors.New(`config: email.enabled requires email.host, e.g. "smtp.example.com"`))
+	}
+	// Defaults to 0 (keyDefaults, config.go:152), which dials host:0. Nothing in
+	// the repo supplies a default value.
+	if cfg.Email.Port < 1 || cfg.Email.Port > 65535 {
+		problems = append(problems, fmt.Errorf("config: email.enabled requires email.port in 1-65535, got %d (587 starttls, 465 implicit, 25 none)", cfg.Email.Port))
+	}
+	// An empty From sends "MAIL FROM:<>" — the null sender. Servers often accept
+	// it and reject or spam-bin the message downstream, so it looks like success.
+	if cfg.Email.From == "" {
+		problems = append(problems, errors.New(`config: email.enabled requires email.from, e.g. "diyddns@example.com"`))
+	}
 	switch cfg.Email.TLS {
 	case "starttls", "implicit", "none":
-		return nil
 	default:
-		return fmt.Errorf("config: email.tls must be one of starttls, implicit, none, got %q", cfg.Email.TLS)
+		problems = append(problems, fmt.Errorf("config: email.tls must be one of starttls, implicit, none, got %q", cfg.Email.TLS))
 	}
+	// net/smtp's PlainAuth.Start refuses to send credentials over an unencrypted
+	// connection unless the host is localhost, so this combination fails EVERY
+	// send with "unencrypted connection" — detectable here instead.
+	if cfg.Email.TLS == "none" && cfg.Email.Username != "" && !isLocalhostHost(cfg.Email.Host) {
+		problems = append(problems, errors.New("config: email.username requires email.tls to be starttls or implicit; net/smtp refuses to send credentials over an unencrypted connection"))
+	}
+
+	return errors.Join(problems...)
 }
 
 // ResolveWebAuthn derives the WebAuthn Relying Party ID and origin, falling

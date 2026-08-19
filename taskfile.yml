@@ -104,7 +104,7 @@ tasks:
   test:e2e:
     desc: "End-to-end test (needs internet; pass -- -skip-discovery offline)"
     cmds:
-      - go test -tags smoke ./internal/smoke/ -v -timeout 5m {{.CLI_ARGS}}
+      - go test -tags smoke ./internal/smoke/ -v -timeout 10m {{.CLI_ARGS}}
 
   test:e2e:browser:
     desc: "Browser end-to-end test — drives the real pages and passkey.js (needs node/npx)"

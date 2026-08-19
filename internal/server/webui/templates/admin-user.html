@@ -12,6 +12,7 @@
     </div>
     {{template "errorBanner" .LinkWarning}}
     <div class="field"><label>Registration link</label>{{template "copyValue" .Link}}</div>
+    {{if .DeliveryNote}}<p class="muted">{{.DeliveryNote}}</p>{{end}}
   </div>
 </div>
 {{end}}

@@ -26,6 +26,102 @@ const grantTTL = time.Hour
 // cannot distinguish which. Maps to HTTP 401.
 var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, or already used")
 
+// adminDeliveryTimeout bounds the whole SMTP conversation for an
+// admin-initiated send. It sits above internal/email's defaultDialTimeout
+// (10s connect floor) so a slow host fails as a dial failure rather than as a
+// conversation truncated mid-envelope, and BELOW server.go's shutdownTimeout
+// (15s, server.go:29) so a send that begins just before SIGTERM cannot consume
+// the entire graceful-shutdown budget and turn a clean stop into
+// "shutdown: context deadline exceeded".
+const adminDeliveryTimeout = 12 * time.Second
+
+// auditWriteTimeout bounds an EventEmailSendFailed audit write. It is separate
+// and deliberately short: see auditSendFailure for why such a write must never
+// reuse the context the failed send ran on.
+const auditWriteTimeout = 5 * time.Second
+
+// EventEmailSendFailed is the audit event code recorded when a grant or
+// notification email fails to send. Exported because internal/server/webui's
+// event-type filter needs the same value. Never change it: audit rows already
+// persisted carry this code, and a new one would orphan that history.
+const EventEmailSendFailed = "email.send_failed"
+
+// Delivery reports what happened to a grant link AFTER it was successfully
+// minted. It is ADVISORY: when the issuing call returns a nil error the link is
+// valid and MUST be shown to the admin, whatever Delivery says. A send failure
+// never costs the admin the link, because the on-screen link is the only
+// fallback an SMTP-less or air-gapped deployment has.
+type Delivery struct {
+	// Attempted is true only when a real transport was invoked — that is, when
+	// the mailer is both non-nil and Enabled. A nil mailer is a supported state
+	// (see doSelfServiceRecovery), and noopMailer.Send returns nil, so neither a
+	// nil error nor a nil mailer can be read as "sent" without this flag.
+	Attempted bool
+	// To is the recipient address. Set only when Attempted; empty otherwise.
+	To string
+	// Err is the transport failure, if any. It is NEVER returned as the call's
+	// error and NEVER rendered to a user-facing surface — it can carry the SMTP
+	// host:port. Log it; do not display it.
+	Err error
+}
+
+// Sent reports a successful delivery. It is derived rather than stored so an
+// inconsistent {Attempted: true, Sent: true, Err: non-nil} cannot be
+// constructed, including by an API response that serializes it.
+func (d Delivery) Sent() bool { return d.Attempted && d.Err == nil }
+
+// auditSendFailure records a failed delivery on a context guaranteed to outlive
+// the send that just failed.
+//
+// It must NEVER be handed the send's own context, and never a raw request
+// context. Both lose the row, silently:
+//
+//   - A request context may already be canceled (the admin's browser went
+//     away). auditWriter.Log uses the caller's context and SWALLOWS write
+//     errors (service/enrollment.go:54-58), so nothing surfaces.
+//   - The send's context is worse. internal/email derives the CONNECTION
+//     deadline from it, so the canonical failure — a peer that accepts and then
+//     stalls — returns at exactly the moment that context expires.
+//     database/sql rejects an expired context before reaching the driver, so
+//     the write is dropped precisely in the case this record exists to capture.
+//
+// WithoutCancel strips deadline and cancellation while keeping values, so this
+// is correct even when ctx is already dead.
+func (s *GrantService) auditSendFailure(ctx context.Context, entry store.AuditEntry) {
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	s.audit.Log(auditCtx, entry)
+}
+
+// deliver sends body to u's address and reports the outcome, never an error.
+//
+// The context deliberately drops cancellation (context.WithoutCancel) while
+// keeping values: if the admin's browser aborts mid-send, a request-derived
+// context would cancel the send AND lose the response, leaving a live grant with
+// nobody holding the link. Cutting cancellation means the mail still goes out
+// even when the page is lost. The timeout is re-applied on top so the detached
+// send stays bounded.
+func (s *GrantService) deliver(ctx context.Context, actorID string, u store.User, subject, body string) Delivery {
+	if s.mailer == nil || !s.mailer.Enabled() {
+		return Delivery{}
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.deliveryTimeout)
+	defer cancel()
+
+	d := Delivery{Attempted: true, To: u.Email}
+	if err := s.mailer.Send(sendCtx, u.Email, subject, body); err != nil {
+		d.Err = err
+		s.log.ErrorContext(ctx, "grant link delivery failed", "err", err, "user_id", u.ID)
+		s.auditSendFailure(ctx, store.AuditEntry{
+			ActorUserID: actorID,
+			EventType:   EventEmailSendFailed,
+			TargetType:  "user",
+			TargetID:    u.ID,
+		})
+	}
+	return d
+}
+
 // GrantService issues and redeems registration grants (design D10/D12/D15):
 // a single-use, hashed, expiring token that drives a passkey registration
 // ceremony for a target user carried in the token, not a session. One token
@@ -39,6 +135,16 @@ type GrantService struct {
 	baseURL  string
 	audit    AuditSink
 	log      *slog.Logger
+	// deliveryTimeout bounds an admin-initiated send (see adminDeliveryTimeout).
+	// It is a field rather than a bare const so a test can shrink it and prove
+	// the expired-context audit path, mirroring smtpMailer.dialTimeout, which
+	// exists for exactly the same reason (internal/email/smtp.go:43-47).
+	//
+	// It must always be set. A zero value makes context.WithTimeout return an
+	// already-expired context, silently failing every send. NewGrantService is
+	// the only construction path in the tree and always sets it; never build a
+	// GrantService with a bare struct literal.
+	deliveryTimeout time.Duration
 }
 
 // NewGrantService constructs a GrantService. passkeys may be nil if WebAuthn
@@ -46,7 +152,10 @@ type GrantService struct {
 // never need it (they only mint a token), but RedeemBegin/RedeemFinish do.
 // baseURL is prefixed to every minted link ("<baseURL>/register?token=...").
 func NewGrantService(st *store.Store, passkeys *PasskeyService, mailer email.Mailer, baseURL string, audit AuditSink, log *slog.Logger) *GrantService {
-	return &GrantService{st: st, passkeys: passkeys, mailer: mailer, baseURL: baseURL, audit: audit, log: log}
+	return &GrantService{
+		st: st, passkeys: passkeys, mailer: mailer, baseURL: baseURL, audit: audit, log: log,
+		deliveryTimeout: adminDeliveryTimeout,
+	}
 }
 
 // issue mints a fresh single-use grant for userID with the given reason
@@ -71,19 +180,26 @@ func (s *GrantService) issue(ctx context.Context, userID, reason string) (string
 	return s.baseURL + "/register?token=" + token, nil
 }
 
-// IssueInvite mints an "invite" grant for userID (a freshly-created,
-// credential-less user — see AdminService.CreateUserInvite, design D15).
-// There is nothing to revoke: a new user has no existing passkeys.
-func (s *GrantService) IssueInvite(ctx context.Context, actorID, userID string) (string, error) {
-	link, err := s.issue(ctx, userID, "invite")
+// IssueInvite mints an "invite" grant for u (a freshly-created,
+// credential-less user — see AdminService.CreateUserInvite, design D15) and
+// emails the link to u when the mailer is enabled. There is nothing to revoke:
+// a new user has no existing passkeys.
+//
+// The returned Delivery is advisory. A non-nil error means nothing was minted
+// and nothing was sent; a nil error means the link is valid and the caller MUST
+// present it, whatever Delivery reports. Delivery failure is never this
+// function's error, because losing the link is worse than failing to mail it.
+func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.User) (string, Delivery, error) {
+	link, err := s.issue(ctx, u.ID, "invite")
 	if err != nil {
-		return "", fmt.Errorf("service.IssueInvite: %w", err)
+		return "", Delivery{}, fmt.Errorf("service.IssueInvite: %w", err)
 	}
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: actorID, EventType: "passkey.invite_issued",
-		TargetType: "user", TargetID: userID,
+		TargetType: "user", TargetID: u.ID,
 	})
-	return link, nil
+	subject, body := email.InviteLinkBody(link)
+	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
 // mintRecoveryGrant creates a single-use "recovery" grant for userID and
@@ -106,7 +222,7 @@ func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID st
 	return link, nil
 }
 
-// IssueRecovery is the admin recovery path: it revokes all of userID's
+// IssueRecovery is the admin recovery path: it revokes all of u's
 // existing passkeys immediately (design D10 — revoke-at-issue, the
 // lost-or-stolen-device model, safe because the caller is an authenticated
 // admin taking an intentional action) and mints a "recovery" grant. The
@@ -118,18 +234,29 @@ func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID st
 // deps.Passkey != nil (server.go) — mirroring the same guard
 // RedeemBegin/RedeemFinish already apply, just earlier, before a dead link
 // is ever handed to an admin.
-func (s *GrantService) IssueRecovery(ctx context.Context, actorID, userID string) (string, error) {
+//
+// It emails the link to u when the mailer is enabled. The returned Delivery is
+// advisory: a non-nil error means nothing was minted and nothing was sent, and
+// a nil error means the link is valid and the caller MUST present it, whatever
+// Delivery reports. A send failure is never this function's error — u's
+// passkeys are already revoked by then, so the on-screen link is the only thing
+// standing between u and a permanent lockout.
+func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u store.User) (string, Delivery, error) {
 	if s.passkeys == nil {
-		return "", fmt.Errorf("service.IssueRecovery: %w", ErrWebAuthnUnavailable)
+		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", ErrWebAuthnUnavailable)
 	}
-	if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, userID); err != nil {
-		return "", fmt.Errorf("service.IssueRecovery: %w", err)
+	if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, u.ID); err != nil {
+		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
 	}
-	link, err := s.mintRecoveryGrant(ctx, actorID, userID)
+	link, err := s.mintRecoveryGrant(ctx, actorID, u.ID)
 	if err != nil {
-		return "", fmt.Errorf("service.IssueRecovery: %w", err)
+		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
 	}
-	return link, nil
+	// AdminRecoveryLinkBody, not RecoveryLinkBody: the self-service body says the
+	// link "was requested" and can be "safely ignored", and both are false here —
+	// DeleteAllByUser above has already locked the user out.
+	subject, body := email.AdminRecoveryLinkBody(link)
+	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
 // selfServiceRecoveryTimeout bounds the detached goroutine
@@ -197,7 +324,9 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 
 	subj, body := email.RecoveryLinkBody(link)
 	if err := s.mailer.Send(ctx, u.Email, subj, body); err != nil {
-		s.audit.Log(ctx, store.AuditEntry{EventType: "email.send_failed", TargetType: "user", TargetID: u.ID, IP: ip})
+		s.auditSendFailure(ctx, store.AuditEntry{
+			EventType: EventEmailSendFailed, TargetType: "user", TargetID: u.ID, IP: ip,
+		})
 	}
 
 	admins, err := s.st.Users().List(ctx)
@@ -211,7 +340,9 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 			continue
 		}
 		if err := s.mailer.Send(ctx, a.Email, adminSubj, adminBody); err != nil {
-			s.audit.Log(ctx, store.AuditEntry{EventType: "email.send_failed", TargetType: "user", TargetID: a.ID, IP: ip})
+			s.auditSendFailure(ctx, store.AuditEntry{
+				EventType: EventEmailSendFailed, TargetType: "user", TargetID: a.ID, IP: ip,
+			})
 		}
 	}
 }

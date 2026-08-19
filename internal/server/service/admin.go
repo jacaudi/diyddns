@@ -80,13 +80,19 @@ func (s *AdminService) ListUsers(ctx context.Context) ([]store.User, error) {
 // CreateUserInvite creates a credential-less local user (no password, no
 // passkey) and mints a registration-grant invite link for it (design D15).
 // The link drives GrantService's redeem flow, where the invited user
-// registers their first passkey.
-func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, role string) (store.User, string, error) {
+// registers their first passkey. The invite is also emailed to the new user
+// when the mailer is enabled.
+//
+// The returned Delivery is advisory: a nil error means the link is valid and
+// the caller MUST present it, whatever Delivery reports. A delivery failure is
+// never this function's error, because the on-screen link is the only fallback
+// a deployment without SMTP has.
+func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, role string) (store.User, string, Delivery, error) {
 	if !validRole(role) {
-		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidRole)
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidRole)
 	}
 	if _, err := mail.ParseAddress(email); err != nil {
-		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidEmail)
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidEmail)
 	}
 	// s.grants itself may be non-nil while its passkeys dependency is (design
 	// server.go leaves PasskeyService nil when hide_local_login_ui tolerates
@@ -94,20 +100,20 @@ func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, rol
 	// invite link (404s at redeem, register routes gated off
 	// deps.Passkey != nil) slip through, so this checks both.
 	if s.grants == nil || s.grants.passkeys == nil {
-		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", ErrWebAuthnUnavailable)
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", ErrWebAuthnUnavailable)
 	}
 
 	u, err := s.st.Users().Create(ctx, store.User{Email: email, Role: role})
 	if err != nil {
-		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", err) // ErrConflict flows up
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", err) // ErrConflict flows up
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: "user.created", TargetType: "user", TargetID: u.ID})
 
-	link, err := s.grants.IssueInvite(ctx, actorID, u.ID)
+	link, d, err := s.grants.IssueInvite(ctx, actorID, u)
 	if err != nil {
-		return store.User{}, "", fmt.Errorf("service.CreateUserInvite: %w", err)
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", err)
 	}
-	return u, link, nil
+	return u, link, d, nil
 }
 
 // UpdateUser applies a partial update (role / disabled) with lockout

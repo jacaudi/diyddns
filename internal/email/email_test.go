@@ -416,3 +416,126 @@ func TestAdminNotifyBody_ContainsEmail(t *testing.T) {
 		t.Errorf("body = %q, want to contain email %q", body, userEmail)
 	}
 }
+
+// TestSMTPSend_StalledServerHonorsContextDeadline proves the connection
+// deadline set in dial bounds the WHOLE conversation, not just the TCP
+// connect. The fake server accepts and then says nothing at all, so
+// smtp.NewClient's greeting read is where this hangs without the deadline.
+func TestSMTPSend_StalledServerHonorsContextDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	// stall keeps the serve goroutine parked (holding the connection open and
+	// silent) until cleanup. Registered AFTER startFakeServer so t.Cleanup's
+	// LIFO order closes it FIRST — otherwise startFakeServer's own cleanup
+	// blocks forever in wg.Wait().
+	stall := make(chan struct{})
+	host, port, _ := startFakeServer(t, ln, func(_ net.Conn, _ chan<- fakeEnvelope) {
+		<-stall
+	})
+	t.Cleanup(func() { close(stall) })
+
+	m := email.NewSMTPForTest(config.EmailSection{
+		Enabled: true, Host: host, Port: port, From: "from@x.test", TLS: "none",
+	}, debugLogger(), nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 750*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = m.Send(ctx, "to@x.test", "subject", "body")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Send against a stalled server returned nil, want a deadline error")
+	}
+	// The bound must come from the context, not from defaultDialTimeout (10s).
+	if elapsed > 5*time.Second {
+		t.Errorf("Send took %v, want it bounded by the 750ms context deadline", elapsed)
+	}
+}
+
+// deadlineErrConn is a net.Conn whose SetDeadline always fails, standing in
+// for the only way dial's SetDeadline can realistically error: a descriptor
+// already broken underneath us. Everything else delegates to the embedded
+// conn, so the SMTP conversation itself still works.
+type deadlineErrConn struct {
+	net.Conn
+}
+
+func (deadlineErrConn) SetDeadline(time.Time) error {
+	return errors.New("setdeadline: fake failure")
+}
+
+// TestSMTPSend_LogsWhenDeadlineCannotBeSet asserts that a failed SetDeadline
+// leaves a log trail instead of vanishing. Discarding the error would mean
+// the conversation is silently unbounded — the exact hang this package's
+// deadline exists to prevent — with nothing in the logs to explain it. The
+// send itself must still succeed: an unbounded connection is worse than a
+// bounded one, but far better than a refused delivery.
+func TestSMTPSend_LogsWhenDeadlineCannotBeSet(t *testing.T) {
+	host, port, envelopes := startFakeSMTP(t)
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cfg := config.EmailSection{
+		Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none",
+	}
+	m := email.NewSMTPForTestWithDial(cfg, log, 10*time.Second,
+		func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return deadlineErrConn{Conn: conn}, nil
+		})
+
+	// The warn branch is only reachable when the caller supplies a deadline.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	if err := m.Send(ctx, "user@example.com", "recovery", "link: https://example.com/r/x"); err != nil {
+		t.Fatalf("Send: %v, want nil — a failed SetDeadline must not fail the send", err)
+	}
+	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com", "recovery", "link: https://example.com/r/x")
+
+	if !strings.Contains(buf.String(), "could not bound the SMTP conversation") {
+		t.Errorf("expected a warning that the deadline could not be set, got: %s", buf.String())
+	}
+}
+
+func TestInviteLinkBody(t *testing.T) {
+	subject, body := email.InviteLinkBody("https://d.example.com/register?token=abc")
+	if subject == "" {
+		t.Error("InviteLinkBody: empty subject")
+	}
+	if !strings.Contains(body, "https://d.example.com/register?token=abc") {
+		t.Errorf("InviteLinkBody: body does not contain the link:\n%s", body)
+	}
+}
+
+// TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt is the point of having a
+// second body at all. RecoveryLinkBody says the link "was requested" and can be
+// "safely ignored" — both false when an admin has already revoked every passkey
+// on the account, which is exactly when this body is sent.
+func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
+	subject, body := email.AdminRecoveryLinkBody("https://d.example.com/register?token=xyz")
+	if subject == "" {
+		t.Error("AdminRecoveryLinkBody: empty subject")
+	}
+	if !strings.Contains(body, "https://d.example.com/register?token=xyz") {
+		t.Errorf("AdminRecoveryLinkBody: body does not contain the link:\n%s", body)
+	}
+	lower := strings.ToLower(body)
+	for _, forbidden := range []string{"safely ignore", "did not request", "you requested"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("AdminRecoveryLinkBody must not say %q — the passkeys are already revoked:\n%s", forbidden, body)
+		}
+	}
+	if !strings.Contains(lower, "revoked") {
+		t.Errorf("AdminRecoveryLinkBody must state the passkeys were revoked:\n%s", body)
+	}
+}

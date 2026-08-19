@@ -95,6 +95,9 @@ func (m *smtpMailer) Send(ctx context.Context, to, subject, body string) error {
 // TLS handshake as part of the same bounded window; starttls and none both
 // connect plaintext (starttls upgrades the connection later, in
 // sendEnvelope, once the client has confirmed the server offers it).
+//
+// dial also sets a deadline on the connection itself, taken from ctx, so the
+// bound survives dial's return and covers the rest of the conversation.
 func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, m.dialTimeout)
 	defer cancel()
@@ -106,6 +109,30 @@ func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error
 	conn, err := connect(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("email: dial %s: %w", addr, err)
+	}
+
+	// Bound every subsequent read and write on this connection. Neither
+	// smtp.NewClient's greeting read nor sendEnvelope's SMTP conversation
+	// consults a context, so without this a peer that accepts the connection
+	// and then stalls blocks the caller indefinitely — hanging a request
+	// handler and, with it, graceful shutdown.
+	//
+	// The deadline comes from ctx (the caller's overall budget), NOT dialCtx:
+	// dialCtx expires at defaultDialTimeout, which would cut off a legitimate
+	// slow envelope. Callers are expected to supply a deadline; the only
+	// production caller today is GrantService.doSelfServiceRecovery, and both
+	// of its sends — the recovery link to the user and the notification to
+	// admins — run on the one bounded context it derives for that whole flow.
+	//
+	// A SetDeadline failure is logged rather than returned: the conversation is
+	// then unbounded, which is worse than bounded but far better than refusing
+	// a delivery that would otherwise have succeeded. Logging keeps a trail, so
+	// a hang here is explainable instead of silent.
+	if dl, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(dl); err != nil {
+			m.log.WarnContext(ctx, "email: could not bound the SMTP conversation",
+				"host", m.cfg.Host, "error", err)
+		}
 	}
 
 	if m.cfg.TLS == "implicit" {

@@ -43,14 +43,30 @@ type createUserInput struct {
 	}
 }
 
+// deliveryView reports whether a minted grant link was emailed, so an API client
+// learns the same thing the web UI shows. The raw transport error is deliberately
+// absent: it can carry the SMTP host:port and belongs in the server log, not in a
+// response body.
+type deliveryView struct {
+	Attempted bool   `json:"attempted"`
+	Sent      bool   `json:"sent"`
+	To        string `json:"to,omitempty"`
+}
+
+func newDeliveryView(d service.Delivery) deliveryView {
+	return deliveryView{Attempted: d.Attempted, Sent: d.Sent(), To: d.To}
+}
+
 // createUserResponse carries the newly-created (credential-less) user plus
 // the one-time invite link the admin shows the user out of band — the user
 // registers their first passkey by redeeming it (design D15). Local password
 // creation is gone: an admin-created account has no credential until the
-// invite is redeemed.
+// invite is redeemed. Delivery reports whether that link was also emailed; the
+// link is valid and MUST be shown whatever Delivery says.
 type createUserResponse struct {
-	User adminUserView `json:"user"`
-	Link string        `json:"link"`
+	User     adminUserView `json:"user"`
+	Link     string        `json:"link"`
+	Delivery deliveryView  `json:"delivery"`
 }
 type createUserOutput struct{ Body createUserResponse }
 
@@ -79,12 +95,14 @@ type issueRecoveryInput struct {
 }
 
 // issueRecoveryResponse is the one-time registration-grant link an admin
-// shows the user out of band (design §7's admin-recovery path) — the same
-// shape a future admin-invite response will carry (I1, folded into
-// create-user in a later task), kept local to this op since no second
-// consumer exists yet.
+// shows the user out of band (design §7's admin-recovery path), plus whether
+// that link was also emailed. It stays a distinct type from
+// createUserResponse: the two ops carry different payloads (this one has no
+// user) and their shapes are free to diverge, so the only knowledge they
+// share is deliveryView.
 type issueRecoveryResponse struct {
-	Link string `json:"link"`
+	Link     string       `json:"link"`
+	Delivery deliveryView `json:"delivery"`
 }
 type issueRecoveryOutput struct{ Body issueRecoveryResponse }
 
@@ -187,11 +205,13 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
 	}, func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
 		actor := UserFrom(ctx)
-		u, link, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
+		u, link, delivery, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
 		if err != nil {
 			return nil, adminErr(ctx, deps, "create user", err)
 		}
-		return &createUserOutput{Body: createUserResponse{User: newAdminUserView(u), Link: link}}, nil
+		return &createUserOutput{Body: createUserResponse{
+			User: newAdminUserView(u), Link: link, Delivery: newDeliveryView(delivery),
+		}}, nil
 	})
 
 	huma.Register(a, huma.Operation{
@@ -221,18 +241,20 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/recovery", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
 	}, func(ctx context.Context, in *issueRecoveryInput) (*issueRecoveryOutput, error) {
 		actor := UserFrom(ctx)
-		// GrantService.IssueRecovery does not itself check that in.ID names a
-		// real user (it only issues a grant + revokes credentials for
-		// whatever id it's given) — this pre-check keeps the 404-on-bad-id
-		// behavior consistent with this file's other {id}-scoped endpoints.
-		if _, err := deps.Store.Users().GetByID(ctx, in.ID); err != nil {
-			return nil, adminErr(ctx, deps, "issue recovery", err)
-		}
-		link, err := deps.Grants.IssueRecovery(ctx, actor.ID, in.ID)
+		// The lookup keeps the 404-on-bad-id behavior consistent with this
+		// file's other {id}-scoped endpoints, and supplies the store.User
+		// IssueRecovery needs to address the delivery.
+		target, err := deps.Store.Users().GetByID(ctx, in.ID)
 		if err != nil {
 			return nil, adminErr(ctx, deps, "issue recovery", err)
 		}
-		return &issueRecoveryOutput{Body: issueRecoveryResponse{Link: link}}, nil
+		link, delivery, err := deps.Grants.IssueRecovery(ctx, actor.ID, target)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "issue recovery", err)
+		}
+		return &issueRecoveryOutput{Body: issueRecoveryResponse{
+			Link: link, Delivery: newDeliveryView(delivery),
+		}}, nil
 	})
 
 	huma.Register(a, huma.Operation{

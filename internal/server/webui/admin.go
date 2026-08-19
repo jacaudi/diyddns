@@ -181,27 +181,44 @@ func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	}
 }
 
-// adminUserNewData is admin-user-new.html's template data. Link is populated
-// only on the reveal.
+// adminUserNewData is admin-user-new.html's template data. Link and
+// DeliveryNote are populated only on the reveal.
 type adminUserNewData struct {
 	appData
-	Email       string
-	Role        string
-	Error       string
-	Link        string
-	LinkWarning string
-	InvitedUser string
+	Email        string
+	Role         string
+	Error        string
+	Link         string
+	DeliveryNote string
+	LinkWarning  string
+	InvitedUser  string
 }
 
-// adminUserData is admin-user.html's template data. Link is populated only on
-// the recovery reveal.
+// adminUserData is admin-user.html's template data. Link and DeliveryNote are
+// populated only on the recovery reveal.
 type adminUserData struct {
 	appData
-	Target      store.User
-	IsSelf      bool
-	Error       string
-	Link        string
-	LinkWarning string
+	Target       store.User
+	IsSelf       bool
+	Error        string
+	Link         string
+	DeliveryNote string
+	LinkWarning  string
+}
+
+// deliveryNote turns a service.Delivery into the sentence shown beneath the
+// link. It returns a rendered STRING rather than letting the template hold the
+// Delivery value: {{.Delivery.Err}} would render the wrapped SMTP error, which
+// carries host:port. The raw error is logged by the service, never displayed.
+func deliveryNote(d service.Delivery) string {
+	switch {
+	case !d.Attempted:
+		return "Email is not configured — send this link manually."
+	case d.Sent():
+		return "Emailed to " + d.To + ". Send it manually as well if it does not arrive."
+	default:
+		return "Email delivery failed — send this link manually."
+	}
 }
 
 // grantLink makes a GrantService link presentable.
@@ -239,7 +256,7 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 		Role:    role,
 	}
 
-	invited, link, err := h.deps.Admin.CreateUserInvite(r.Context(), usr.ID, email, role)
+	invited, link, delivery, err := h.deps.Admin.CreateUserInvite(r.Context(), usr.ID, email, role)
 	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			data.Error = msg
@@ -258,6 +275,7 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 	}
 
 	data.Link, data.LinkWarning = h.grantLink(r, link)
+	data.DeliveryNote = deliveryNote(delivery)
 	data.InvitedUser = invited.Email
 	h.render(w, r, "admin-user-new", data)
 }
@@ -360,7 +378,7 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 			"Type the account's email address exactly to confirm. No passkeys were revoked.")
 		return
 	}
-	link, err := h.deps.Grants.IssueRecovery(r.Context(), usr.ID, target.ID)
+	link, delivery, err := h.deps.Grants.IssueRecovery(r.Context(), usr.ID, target)
 	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			h.renderAdminUserError(w, r, usr, sess, target, status, msg)
@@ -382,6 +400,7 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 		IsSelf:  target.ID == usr.ID,
 	}
 	data.Link, data.LinkWarning = h.grantLink(r, link)
+	data.DeliveryNote = deliveryNote(delivery)
 	h.render(w, r, "admin-user", data)
 }
 
@@ -406,7 +425,7 @@ var knownEventTypes = []string{
 	"bootstrap.consumed",
 	"device.deleted", "device.disabled", "device.enabled",
 	"device.enroll.code", "device.enroll.oidc", "device.renamed", "device.secret.rotated",
-	"email.send_failed",
+	service.EventEmailSendFailed,
 	"passkey.invite_issued", "passkey.recovery_issued", "passkey.recovery_redeemed",
 	"passkey.registered", "passkey.removed", "passkey.renamed", "passkey.signcount_anomaly",
 	"session.revoked",

@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+	emailpkg "github.com/jacaudi/diyddns/internal/email" // aliased: revive's import-shadowing rule runs on _test.go, and seedSessionCookie/seedUser take an `email` parameter
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -90,7 +92,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 	deps, _ := testDeps(t)
 
-	usr, link, err := deps.Admin.CreateUserInvite(context.Background(), "actor-id", "invitee@example.com", "user")
+	usr, link, _, err := deps.Admin.CreateUserInvite(context.Background(), "actor-id", "invitee@example.com", "user")
 	if err != nil {
 		t.Fatalf("CreateUserInvite: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
 	}
@@ -98,7 +100,7 @@ func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 		t.Error("CreateUserInvite: empty invite link")
 	}
 
-	if link, err := deps.Grants.IssueRecovery(context.Background(), "actor-id", usr.ID); err != nil {
+	if link, _, err := deps.Grants.IssueRecovery(context.Background(), "actor-id", usr); err != nil {
 		t.Fatalf("IssueRecovery: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
 	} else if link == "" {
 		t.Error("IssueRecovery: empty recovery link")
@@ -3218,5 +3220,117 @@ func TestAdminServer_ShowsInfoAndNoSecrets(t *testing.T) {
 	// The settings form is deliberately absent.
 	if strings.Contains(body, "Save settings") {
 		t.Error("a settings form rendered; this page is read-only")
+	}
+}
+
+func TestDeliveryNote(t *testing.T) {
+	tests := []struct {
+		name     string
+		d        service.Delivery
+		contains string
+	}{
+		{name: "email off", d: service.Delivery{}, contains: "Email is not configured"},
+		{name: "sent", d: service.Delivery{Attempted: true, To: "a@b.com"}, contains: "Emailed to a@b.com"},
+		{name: "failed", d: service.Delivery{Attempted: true, To: "a@b.com", Err: errors.New("smtp exploded")}, contains: "Email delivery failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deliveryNote(tt.d)
+			if !strings.Contains(got, tt.contains) {
+				t.Errorf("deliveryNote(%+v) = %q, want it to contain %q", tt.d, got, tt.contains)
+			}
+			if strings.Contains(got, "smtp exploded") {
+				t.Errorf("deliveryNote leaked the raw SMTP error: %q", got)
+			}
+		})
+	}
+}
+
+// stubMailer is a minimal email.Mailer whose Enabled and Send outcomes the test
+// chooses, so the three delivery states can be rendered. GrantService captures
+// its mailer at construction, so swapping it means rebuilding the service —
+// see renderInvitePage.
+type stubMailer struct {
+	enabled bool
+	err     error
+}
+
+func (m stubMailer) Enabled() bool                                      { return m.enabled }
+func (m stubMailer) Send(context.Context, string, string, string) error { return m.err }
+
+// renderInvitePage POSTs the invite form with mailer wired into GrantService and
+// returns the response status and body. The deps rebuild mirrors
+// TestAdminUserInvite_RelativeLinkGetsPrefixed (webui_test.go:2636-2673), which
+// is the only way to swap the mailer.
+func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
+	t.Helper()
+	deps, st := testDeps(t)
+	audit := service.NewAuditWriter(st)
+	passkeys, err := service.NewPasskeyService(st, deps.Sessions, bytes.Repeat([]byte{0x24}, 32),
+		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit)
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "email": {"newbie@example.com"}, "role": {"user"}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = "ddns.example.com"
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// TestAdminUserInvite_RendersDeliveryNote proves the note reaches the PAGE in all
+// three states, not merely that deliveryNote returns a string. A mismatched
+// template field name would otherwise ship silently.
+func TestAdminUserInvite_RendersDeliveryNote(t *testing.T) {
+	tests := []struct {
+		name   string
+		mailer emailpkg.Mailer
+		want   string
+	}{
+		{name: "email off", mailer: nil, want: "Email is not configured"},
+		{name: "sent", mailer: stubMailer{enabled: true}, want: "Emailed to newbie@example.com"},
+		{name: "failed", mailer: stubMailer{enabled: true, err: errors.New("smtp exploded")}, want: "Email delivery failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, body := renderInvitePage(t, tt.mailer)
+			if code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", code, body)
+			}
+			if !strings.Contains(body, tt.want) {
+				t.Errorf("invite page does not render %q:\n%s", tt.want, body)
+			}
+		})
+	}
+}
+
+// TestAdminUserInvite_SendFailureStillShowsLink is the on-screen half of the
+// central guarantee: when delivery fails the admin must still be handed the
+// link, because it is the only fallback. It also proves the raw SMTP error
+// never reaches the page.
+func TestAdminUserInvite_SendFailureStillShowsLink(t *testing.T) {
+	code, body := renderInvitePage(t, stubMailer{enabled: true, err: errors.New("smtp exploded")})
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", code, body)
+	}
+	if !strings.Contains(body, "/register?token=") {
+		t.Errorf("delivery failed and the link was NOT shown — the admin has no fallback:\n%s", body)
+	}
+	if !strings.Contains(body, "Email delivery failed") {
+		t.Errorf("the admin was not told delivery failed:\n%s", body)
+	}
+	if strings.Contains(body, "smtp exploded") {
+		t.Errorf("the raw SMTP error leaked to the page:\n%s", body)
 	}
 }
