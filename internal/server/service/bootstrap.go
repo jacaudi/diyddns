@@ -167,10 +167,17 @@ func (s *BootstrapService) sealClaim(cs claimSession) (string, error) {
 func (s *BootstrapService) openClaim(sealed string) (claimSession, error) {
 	raw, err := auth.OpenWithAAD(s.sealKey, sealed, bootstrapClaimAAD)
 	if err != nil {
+		// See verifyRegistration: the cause is logged, never returned. This is
+		// the line that would have named #78's real failure immediately --
+		// "ciphertext too short (sealed len=0)" says the client sent no cookie.
+		s.log.LogAttrs(context.Background(), slog.LevelInfo, "bootstrap claim cookie could not be opened",
+			slog.String("error", err.Error()))
 		return claimSession{}, ErrPasskeyVerification
 	}
 	var cs claimSession
 	if err := json.Unmarshal(raw, &cs); err != nil {
+		s.log.LogAttrs(context.Background(), slog.LevelInfo, "bootstrap claim cookie could not be decoded",
+			slog.String("error", err.Error()))
 		return claimSession{}, ErrPasskeyVerification
 	}
 	return cs, nil

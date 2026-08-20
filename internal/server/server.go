@@ -111,7 +111,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", rpErr)
 		}
 	} else {
-		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit)
+		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit, log)
 		if err != nil {
 			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", err)
 		}

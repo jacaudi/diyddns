@@ -92,7 +92,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	// bootstrap claim) below — mirrors production's single
 	// cfg.Auth.HMAC.SecretKey reused across auth.SealWithAAD call sites
 	// (e.g. oidc.go's flow cookie), domain-separated by AAD, not by key.
-	passkeySvc, err := service.NewPasskeyService(st, sessions, key, cfg.WebAuthn, cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, discardAgentAudit{})
+	passkeySvc, err := service.NewPasskeyService(st, sessions, key, cfg.WebAuthn, cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, discardAgentAudit{}, log)
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}

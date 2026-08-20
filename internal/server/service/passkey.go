@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -85,6 +86,11 @@ type PasskeyService struct {
 	sealKey  []byte
 	wa       *webauthn.WebAuthn
 	audit    AuditSink
+	// log records WHY a ceremony failed. The error returned to callers stays
+	// uniform (ErrPasskeyVerification) so nothing can distinguish which check
+	// failed; the cause goes here and nowhere else. Diagnosing #78 required
+	// patching the binary precisely because this did not exist.
+	log *slog.Logger
 
 	usedMu sync.Mutex
 	used   map[string]time.Time // challenge -> expiry, for single-use enforcement
@@ -95,7 +101,7 @@ type PasskeyService struct {
 // server.base_url when auth.webauthn.rp_id/rp_origin are left blank); cfg
 // supplies the display name shown to authenticators and the ceremony
 // timeout. sealKey must be 32 bytes (see auth.SealWithAAD).
-func NewPasskeyService(st *store.Store, sessions *auth.SessionManager, sealKey []byte, cfg config.WebAuthnCfg, rpID, rpOrigin string, audit AuditSink) (*PasskeyService, error) {
+func NewPasskeyService(st *store.Store, sessions *auth.SessionManager, sealKey []byte, cfg config.WebAuthnCfg, rpID, rpOrigin string, audit AuditSink, log *slog.Logger) (*PasskeyService, error) {
 	// Enforce: true makes go-webauthn populate SessionData.Expires (used as
 	// the used-challenge-map TTL below) and reject a Finish* call past it
 	// server-side, in addition to the used-challenge check. A zero
@@ -118,7 +124,7 @@ func NewPasskeyService(st *store.Store, sessions *auth.SessionManager, sealKey [
 		return nil, fmt.Errorf("service.NewPasskeyService: %w", err)
 	}
 	return &PasskeyService{
-		st: st, sessions: sessions, sealKey: sealKey, wa: wa, audit: audit,
+		st: st, sessions: sessions, sealKey: sealKey, wa: wa, audit: audit, log: log,
 		used: make(map[string]time.Time),
 	}, nil
 }
@@ -392,6 +398,17 @@ func (s *PasskeyService) verifyRegistration(email string, handle []byte, sess we
 	}
 	cred, err := s.wa.FinishRegistration(wu, sess, r)
 	if err != nil {
+		// Info, not Error: /register/finish is anonymous-reachable, so Error
+		// would make log volume attacker-driveable. This matches the three
+		// existing sites with the same shape (uniform sentinel returned,
+		// specific reason logged): service/oidc.go:38, api/oidc.go:156,
+		// api/enroll_oidc.go:154.
+		//
+		// The cause is written here and NOWHERE else. Do not wrap it with %w and
+		// do not add a second return value: api/passkey.go:183 passes only the
+		// fixed constant to huma.Error401Unauthorized, and that must stay true.
+		s.log.LogAttrs(r.Context(), slog.LevelInfo, "passkey registration verification failed",
+			slog.String("error", err.Error()))
 		return nil, ErrPasskeyVerification
 	}
 	return cred, nil
