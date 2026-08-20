@@ -8,6 +8,10 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
+
+	// Aliased: LoginOrLink has a parameter named `email`, and revive's
+	// import-shadowing rule fails on an unaliased import of the same name.
+	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -61,8 +65,9 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 	}
 
 	// 2. Verified-email auto-link.
-	if email == "" {
-		return store.User{}, s.reject(ctx, "no email claim") // cannot link or sign up without an email
+	email, err = s.normalizeClaim(ctx, email)
+	if err != nil {
+		return store.User{}, err
 	}
 	if emailVerified && s.cfg.AutoLinkByEmail {
 		existing, err := s.st.Users().GetByEmail(ctx, email)
@@ -117,4 +122,35 @@ func (s *OIDCService) BrowserLogin(ctx context.Context, issuer, subject, email s
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "user.login.oidc", IP: ip})
 	return sess, nil
+}
+
+// normalizeClaim answers one question — is this email claim usable at all? — and
+// returns the canonical address if so. Both failures take the uniform
+// ErrOIDCRejected via s.reject, which logs the specific reason at oidc.go:38 like
+// every other rejection on this path.
+//
+// It is called from ONE place, deliberately: below path 1 and above BOTH the
+// GetByEmail lookup and the Create.
+//
+// Not at the top of LoginOrLink: path 1 returns at line 57 without ever reading
+// `email`, so a guard there would lock out an existing, ALREADY LINKED user whose
+// IdP emits a non-ASCII claim — on a path that stores nothing.
+//
+// Not at the Create alone either: if signup stored addr.Address while the lookup
+// still used the raw claim, a display-name-form claim would miss its own row,
+// fall through to signup, hit store.ErrConflict and be rejected — a lockout
+// manufactured by the very change meant to prevent one. Paths 2 and 3 must agree,
+// so they share one normalized value.
+//
+// Extracted rather than inlined because LoginOrLink is at gocyclo 15, the
+// configured ceiling; this keeps the branch count identical.
+func (s *OIDCService) normalizeClaim(ctx context.Context, email string) (string, error) {
+	if email == "" {
+		return "", s.reject(ctx, "no email claim") // cannot link or sign up without an email
+	}
+	normalized, err := emailpkg.NormalizeAddress(email)
+	if err != nil {
+		return "", s.reject(ctx, "email claim is not a valid 7-bit ASCII address")
+	}
+	return normalized, nil
 }
