@@ -5,6 +5,24 @@ run:
   timeout: 5m
   tests: true
   allow-parallel-runners: true
+  # Without this, no //go:build smoke or //go:build browser file is ever linted
+  # (issue #79) — an entire package's worth of test code sat outside the gate.
+  #
+  # BOTH tags must be listed TOGETHER, in one build configuration. golangci-lint
+  # v2.12.2 does not run a per-tag matrix, and that is load-bearing here:
+  # helpers_test.go is `//go:build smoke || browser` but its helpers are called
+  # only from the smoke-tagged files, so linting `browser` ALONE reports them as
+  # unused. Do not "improve" this into one run per tag. (Observed for v2.12.2 on
+  # 2026-08-19; not a documented upstream guarantee, so re-measure before
+  # changing it.)
+  #
+  # Formatters need no tags — `golangci-lint fmt` has no --build-tags flag and
+  # is syntactic. Verified: a deliberate misformat in a smoke-tagged file is
+  # caught by `golangci-lint fmt --diff` with no tags set. #79 is a
+  # linters-only gap; do not touch fmt:check.
+  build-tags:
+    - smoke
+    - browser
 
 linters:
   default: none
