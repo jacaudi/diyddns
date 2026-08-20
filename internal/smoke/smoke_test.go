@@ -24,7 +24,6 @@ package smoke
 import (
 	"flag"
 	"net/http"
-	"net/http/cookiejar"
 	"path/filepath"
 	"testing"
 	"time"
@@ -64,12 +63,9 @@ func TestSmoke(t *testing.T) {
 	token := scrapeToken(t, srv)
 
 	// A cookie jar is mandatory, not a convenience: the WebAuthn ceremony
-	// carries its sealed challenge between begin and finish in a cookie.
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookiejar: %v", err)
-	}
-	client := &http.Client{Jar: jar, Timeout: 30 * time.Second}
+	// carries its sealed challenge between begin and finish in a cookie, and
+	// that cookie is Secure under the shipped defaults — see newBrowserJar.
+	client := &http.Client{Jar: newBrowserJar(t), Timeout: 30 * time.Second}
 
 	// The relying party must match what the server derived from
 	// server.base_url, or every assertion fails origin validation.

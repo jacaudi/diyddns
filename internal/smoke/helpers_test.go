@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -326,4 +327,59 @@ func mergeField(t *testing.T, obj, key, val string) string {
 	}
 	inner := strings.TrimSuffix(strings.TrimPrefix(string(kv), "{"), "}")
 	return fmt.Sprintf("%s,%s}", strings.TrimSuffix(trimmed, "}"), inner)
+}
+
+// --- cookies ---------------------------------------------------------------
+
+// browserJar wraps a cookie jar so a plain-HTTP localhost origin counts as a
+// secure context, which is what every browser does and what this harness must
+// stand in for.
+//
+// Go's own net/http/cookiejar only adopted that rule in 1.26 (entry.secureMatch:
+// "Localhost is considered a secure origin regardless of protocol, matching
+// browser behavior"). Under the repo's pinned GOTOOLCHAIN=go1.25.13 the jar
+// STORES a Secure cookie set over http://localhost and then never sends it, so
+// the WebAuthn ceremony's sealed challenge cookie never reaches
+// /register/finish and every claim collapses to a uniform 401 (issue #78).
+//
+// Wrapping the jar rather than setting cookie_secure=false keeps the suite
+// running against the shipped config.example.yaml defaults, and makes it
+// toolchain-independent by construction.
+type browserJar struct{ inner http.CookieJar }
+
+func (j browserJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.inner.SetCookies(secureContextURL(u), cookies)
+}
+
+func (j browserJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.inner.Cookies(secureContextURL(u))
+}
+
+// secureContextURL returns u with its scheme rewritten to https when u is a
+// plain-HTTP localhost origin, and u unchanged otherwise. Only the scheme
+// changes, so the jar's host, path and domain matching are untouched.
+//
+// There is deliberately no loopback-IP branch: browserBaseURL always builds
+// "http://localhost:PORT", so no URL in this harness ever carries the bound
+// 127.0.0.1 address. Add one only when a caller actually needs it.
+func secureContextURL(u *url.URL) *url.URL {
+	if u.Scheme != "http" || u.Hostname() != "localhost" {
+		return u
+	}
+	secure := *u
+	secure.Scheme = "https"
+	return &secure
+}
+
+// newBrowserJar returns a cookie jar with browser-parity secure-context
+// handling for localhost. Every harness HTTP client must use it: the WebAuthn
+// ceremony carries its sealed challenge between begin and finish in a Secure
+// cookie.
+func newBrowserJar(t *testing.T) http.CookieJar {
+	t.Helper()
+	inner, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar: %v", err)
+	}
+	return browserJar{inner: inner}
 }
