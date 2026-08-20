@@ -210,8 +210,15 @@ type adminUserData struct {
 // link. It returns a rendered STRING rather than letting the template hold the
 // Delivery value: {{.Delivery.Err}} would render the wrapped SMTP error, which
 // carries host:port. The raw error is logged by the service, never displayed.
+//
+// The Suppressed case comes FIRST. Both it and "no mailer configured" have
+// Attempted == false, and reporting a deliberate suppression as an
+// unconfigured mail server tells an operator with working SMTP something
+// false about their own configuration.
 func deliveryNote(d service.Delivery) string {
 	switch {
+	case d.Suppressed == service.SuppressUserDisabled:
+		return "This account is disabled, so no email was sent — send this link manually."
 	case !d.Attempted:
 		return "Email is not configured — send this link manually."
 	case d.Sent():

@@ -282,3 +282,47 @@ func TestAdminIssueRecovery_ResponseCarriesDelivery(t *testing.T) {
 // transport error is ever in scope — such an assertion could not fail for the
 // reason it claims, and a base64url grant token could trip it by chance. The
 // no-leak guarantee is structural instead: deliveryView has no error field.
+
+// TestAdminIssueRecovery_DisabledTargetReportsSuppressed proves the JSON
+// surface reports the suppression even though the harness mailer is fully
+// enabled (devices_test.go's fakeMailer.Enabled() returns true) — that is
+// what proves "disabled" is reported instead of "no mailer configured".
+func TestAdminIssueRecovery_DisabledTargetReportsSuppressed(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-recovery2@example.com", "admin")
+	target := seedUser(t, h.st, "target-recovery2@example.com", "user")
+	adminCookie, adminCSRF := sessionFor(t, h, "admin-recovery2@example.com")
+
+	target.Disabled = true
+	if err := h.st.Users().Update(t.Context(), target); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	status, _, body := doJSON(t, http.MethodPost,
+		h.srv.URL+"/api/v1/admin/users/"+target.ID+"/recovery", nil, adminCookie, adminCSRF)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+
+	var got struct {
+		Link     string `json:"link"`
+		Delivery struct {
+			Attempted  bool   `json:"attempted"`
+			Sent       bool   `json:"sent"`
+			To         string `json:"to"`
+			Suppressed string `json:"suppressed"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode response: %v, body=%s", err, body)
+	}
+	if got.Link == "" {
+		t.Fatal("response carried no link")
+	}
+	if got.Delivery.Attempted || got.Delivery.Sent {
+		t.Errorf("Delivery = %+v, want attempted=false sent=false", got.Delivery)
+	}
+	if got.Delivery.Suppressed != "user_disabled" {
+		t.Errorf("Delivery.Suppressed = %q, want %q", got.Delivery.Suppressed, "user_disabled")
+	}
+}

@@ -3232,6 +3232,9 @@ func TestDeliveryNote(t *testing.T) {
 		{name: "email off", d: service.Delivery{}, contains: "Email is not configured"},
 		{name: "sent", d: service.Delivery{Attempted: true, To: "a@b.com"}, contains: "Emailed to a@b.com"},
 		{name: "failed", d: service.Delivery{Attempted: true, To: "a@b.com", Err: errors.New("smtp exploded")}, contains: "Email delivery failed"},
+		{name: "suppressed because the account is disabled",
+			d:        service.Delivery{Suppressed: service.SuppressUserDisabled},
+			contains: "This account is disabled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3243,6 +3246,20 @@ func TestDeliveryNote(t *testing.T) {
 				t.Errorf("deliveryNote leaked the raw SMTP error: %q", got)
 			}
 		})
+	}
+}
+
+// TestDeliveryNote_SuppressedDoesNotClaimEmailIsUnconfigured is the specific
+// defect this change exists to prevent: an operator with fully working SMTP
+// being told "Email is not configured". #52 ruled that operator-facing copy
+// must not lie; the same standard applies here.
+func TestDeliveryNote_SuppressedDoesNotClaimEmailIsUnconfigured(t *testing.T) {
+	got := deliveryNote(service.Delivery{Suppressed: service.SuppressUserDisabled})
+	if strings.Contains(got, "Email is not configured") {
+		t.Errorf("deliveryNote claims email is unconfigured for a suppressed send: %q", got)
+	}
+	if !strings.Contains(got, "send this link manually") {
+		t.Errorf("deliveryNote does not tell the admin what to do: %q", got)
 	}
 }
 
