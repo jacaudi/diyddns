@@ -46,6 +46,24 @@ const auditWriteTimeout = 5 * time.Second
 // persisted carry this code, and a new one would orphan that history.
 const EventEmailSendFailed = "email.send_failed"
 
+// SuppressReason explains why a delivery was deliberately not attempted, as
+// opposed to attempted and failed. Its ZERO VALUE is today's behaviour, which
+// is what lets every existing Delivery construction site and every existing
+// test stay correct without edits.
+type SuppressReason string
+
+const (
+	// SuppressNone is the zero value: nothing suppressed the send. A
+	// Delivery{Attempted: false, Suppressed: SuppressNone} still means what it
+	// always meant — no mailer is configured.
+	SuppressNone SuppressReason = ""
+	// SuppressUserDisabled means the target account is disabled, so the link was
+	// minted and must still be shown, but no email was sent. Login is refused
+	// for a disabled account anyway (service/passkey.go, auth/session.go), so
+	// mailing one invites the user into a flow that cannot succeed.
+	SuppressUserDisabled SuppressReason = "user_disabled"
+)
+
 // Delivery reports what happened to a grant link AFTER it was successfully
 // minted. It is ADVISORY: when the issuing call returns a nil error the link is
 // valid and MUST be shown to the admin, whatever Delivery says. A send failure
@@ -63,6 +81,13 @@ type Delivery struct {
 	// error and NEVER rendered to a user-facing surface — it can carry the SMTP
 	// host:port. Log it; do not display it.
 	Err error
+	// Suppressed explains why nothing was sent, when the reason is a deliberate
+	// policy decision rather than "no mailer configured". One place knows why,
+	// and BOTH admin surfaces read it — deriving it per handler is how the
+	// original defect (a UI asserting something false) arose.
+	//
+	// Zero value = SuppressNone = today's behaviour.
+	Suppressed SuppressReason
 }
 
 // Sent reports a successful delivery. It is derived rather than stored so an
@@ -266,6 +291,22 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	link, err := s.mintRecoveryGrant(ctx, actorID, u.ID)
 	if err != nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
+	}
+	// #82: a disabled account cannot sign in (service/passkey.go:240,
+	// auth/session.go:86), so emailing it a registration link invites the user
+	// into a flow that cannot succeed. Mint and reveal exactly as before, but
+	// send nothing.
+	//
+	// Checked BEFORE deliver, so "disabled" wins over "no mailer configured":
+	// re-enabling the account is the action the admin can actually take, and it
+	// is true whatever SMTP is doing. deliver would otherwise return a bare
+	// Delivery{} and the reason would be lost.
+	//
+	// The revoke above is unchanged and that is accepted: today the same
+	// DeleteAllByUser happens AND a useless email goes out. Revocation is not
+	// part of what #82 changes.
+	if u.Disabled {
+		return link, Delivery{Suppressed: SuppressUserDisabled}, nil
 	}
 	// AdminRecoveryLinkBody, not RecoveryLinkBody: the self-service body says the
 	// link "was requested" and can be "safely ignored", and both are false here —
