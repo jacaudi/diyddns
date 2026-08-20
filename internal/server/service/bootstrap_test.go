@@ -98,6 +98,18 @@ func TestBootstrapService_Startup_TokenPath_SetsHashAndEmitsToken(t *testing.T) 
 	}
 }
 
+func TestBeginClaim_RejectsNonASCIIEmail(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	if _, _, err := svc.BeginClaim(t.Context(), token, "josé@example.test"); !errors.Is(err, ErrBootstrapInvalidEmail) {
+		t.Fatalf("err = %v, want ErrBootstrapInvalidEmail", err)
+	}
+}
+
 func TestBootstrapService_Startup_TokenPath_PendingTokenNotReemitted(t *testing.T) {
 	st := openTestStore(t)
 	var calls int

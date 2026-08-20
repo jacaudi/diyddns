@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/mail"
 	"slices"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/jacaudi/diyddns/internal/auth"
+	// Aliased: this file has a parameter named `email`, and revive's
+	// import-shadowing rule (enabled repo-wide, and NOT excluded for any file)
+	// fails on an unaliased import of the same name.
+	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -204,9 +207,15 @@ func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) 
 	if ok, _ := s.AdminExists(ctx); ok {
 		return "", nil, ErrBootstrapClosed
 	}
-	if _, err := mail.ParseAddress(email); err != nil {
+	// Normalize as well as validate — see AdminService.CreateUserInvite. The
+	// normalized value also flows into beginRegistrationFor below, so the
+	// WebAuthn user/display name an authenticator shows becomes "bob@x" rather
+	// than "Bob <bob@x>". That is an improvement, and it is a behaviour change.
+	normalized, err := emailpkg.NormalizeAddress(email)
+	if err != nil {
 		return "", nil, fmt.Errorf("service.BeginClaim: %w", ErrBootstrapInvalidEmail)
 	}
+	email = normalized
 
 	bs, err := s.st.Bootstrap().Get(ctx)
 	if err != nil || bs.TokenHash == "" {
