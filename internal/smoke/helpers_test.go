@@ -256,7 +256,7 @@ func field(t *testing.T, s, pattern string) string {
 
 // --- HTTP -----------------------------------------------------------------
 
-func postJSON(t *testing.T, c *http.Client, url string, body any, csrf string) (int, []byte) {
+func postJSON(t *testing.T, c *http.Client, rawURL string, body any, csrf string) (int, []byte) {
 	t.Helper()
 	var raw []byte
 	if body != nil {
@@ -265,12 +265,12 @@ func postJSON(t *testing.T, c *http.Client, url string, body any, csrf string) (
 			t.Fatalf("marshal body: %v", err)
 		}
 	}
-	return postRaw(t, c, url, string(raw), csrf)
+	return postRaw(t, c, rawURL, string(raw), csrf)
 }
 
-func postRaw(t *testing.T, c *http.Client, url, body, csrf string) (int, []byte) {
+func postRaw(t *testing.T, c *http.Client, rawURL, body, csrf string) (int, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -280,26 +280,26 @@ func postRaw(t *testing.T, c *http.Client, url, body, csrf string) (int, []byte)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
+		t.Fatalf("POST %s: %v", rawURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read %s: %v", url, err)
+		t.Fatalf("read %s: %v", rawURL, err)
 	}
 	return resp.StatusCode, out
 }
 
-func get(t *testing.T, c *http.Client, url string) (int, []byte) {
+func get(t *testing.T, c *http.Client, rawURL string) (int, []byte) {
 	t.Helper()
-	resp, err := c.Get(url)
+	resp, err := c.Get(rawURL)
 	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
+		t.Fatalf("GET %s: %v", rawURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read %s: %v", url, err)
+		t.Fatalf("read %s: %v", rawURL, err)
 	}
 	return resp.StatusCode, out
 }
