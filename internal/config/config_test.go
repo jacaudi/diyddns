@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/email"
 )
 
 // loadWithDB is a test helper that sets the required database.path and calls
@@ -487,6 +488,15 @@ func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
 		{name: "out-of-range port", enabled: true, baseURL: okURL, host: okHost, port: 70000, from: okFrom, wantErr: []string{"email.port"}},
 		{name: "no from", enabled: true, baseURL: okURL, host: okHost, port: okPort, wantErr: []string{"email.from"}},
 
+		// #80 routes 4 and 5: a non-ASCII address or base URL would be written
+		// raw onto a wire that declares 7bit.
+		{name: "non-ascii from", enabled: true, baseURL: okURL, host: okHost, port: okPort,
+			from: "nöreply@example.com", wantErr: []string{"email.from"}},
+		{name: "display-name from", enabled: true, baseURL: okURL, host: okHost, port: okPort,
+			from: "DIYDDNS <noreply@example.com>", wantErr: []string{"email.from"}},
+		{name: "non-ascii base_url", enabled: true, baseURL: "https://exämple.test", host: okHost,
+			port: okPort, from: okFrom, wantErr: []string{"server.base_url"}},
+
 		// net/smtp refuses PLAIN auth over an unencrypted connection.
 		{name: "auth over plaintext to a remote host", enabled: true, baseURL: okURL, host: okHost, port: 25, from: okFrom,
 			username: "user", tls: "none", wantErr: []string{"email.username"}},
@@ -523,6 +533,90 @@ func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error does not name %q:\n%v", want, err)
 				}
+			}
+		})
+	}
+}
+
+// TestLoad_NonASCIIBaseURLIsAcceptedWhenEmailIsOff pins the deliberate
+// asymmetry in #80's route-5 check: validateEmailBaseURL is reached only from
+// validateEmail, which returns early when email is disabled. server.base_url is
+// also read by ResolveWebAuthn and InsecureCookieWarning, and rejecting an IDN
+// base URL for a deployment that sends no mail is a far larger behaviour change
+// than #80 justifies. If this test ever starts failing, that is a scope
+// decision, not a bug fix.
+func TestLoad_NonASCIIBaseURLIsAcceptedWhenEmailIsOff(t *testing.T) {
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	v.Set("email.enabled", false)
+	v.Set("server.base_url", "https://exämple.test")
+
+	if _, err := config.Load(v, ""); err != nil {
+		t.Fatalf("Load with email disabled: %v, want nil", err)
+	}
+}
+
+// TestFromValidationMatchesTheEmailPackage pins the ONE deliberate duplication
+// in this change. internal/config cannot import internal/email without
+// inverting the dependency, so it carries its own isASCII and its own
+// validateFromAddress. If the two sides ever disagree, an email.from accepted at
+// startup is rejected at every send and the deployment boots clean while mailing
+// NOTHING — the permanently-unmailable state #80 exists to remove, scaled from
+// one account to every message.
+//
+// It must pin BOTH halves. An earlier draft pinned only the 7-bit half and
+// therefore passed while exactly that divergence shipped.
+//
+// config.isASCII and config.validateFromAddress are unexported and this is an
+// external test package, so the config side is exercised through Load, which is
+// the only caller that matters.
+func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
+	tests := []struct {
+		name    string
+		from    string
+		wantErr bool
+	}{
+		{name: "ascii", from: "diyddns@example.com"},
+		{name: "accented", from: "nöreply@example.com", wantErr: true},
+		{name: "cjk", from: "日本@example.com", wantErr: true},
+		{name: "em dash", from: "a—b@example.com", wantErr: true},
+
+		// The canonical half. These are pure ASCII, so an isASCII-only startup
+		// check accepts them — and then internal/email's checkAddress rejects
+		// every single send, so the deployment boots clean and mails nothing.
+		// Measured on the wire: net/smtp emits
+		// `MAIL FROM:<DIYDDNS <noreply@example.com>>` and
+		// `MAIL FROM:<noreply@example.com >` for these, verbatim.
+		{name: "display name", from: "DIYDDNS <noreply@example.com>", wantErr: true},
+		{name: "trailing space", from: "noreply@example.com ", wantErr: true},
+		{name: "quoted local part", from: `"john doe"@example.com`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("email.enabled", true)
+			v.Set("email.tls", "starttls")
+			v.Set("server.base_url", "https://d.example.com")
+			v.Set("email.host", "smtp.example.com")
+			v.Set("email.port", 587)
+			v.Set("email.from", tt.from)
+
+			_, err := config.Load(v, "")
+			gotRejected := err != nil && strings.Contains(err.Error(), "email.from")
+			if gotRejected != tt.wantErr {
+				t.Fatalf("config rejected %q = %v, want %v (err=%v)", tt.from, gotRejected, tt.wantErr, err)
+			}
+			// The email package must agree, decision for decision. This is the
+			// check that actually matters: NormalizeAddress is what the send
+			// path applies, so if config accepts something it rejects, that
+			// deployment boots clean and sends nothing.
+			normalized, normErr := email.NormalizeAddress(tt.from)
+			emailRejects := normErr != nil || normalized != tt.from
+			if emailRejects != tt.wantErr {
+				t.Errorf("internal/email %s %q but config %s it — the two sides have diverged",
+					map[bool]string{true: "rejects", false: "accepts"}[emailRejects], tt.from,
+					map[bool]string{true: "rejected", false: "accepted"}[gotRejected])
 			}
 		})
 	}

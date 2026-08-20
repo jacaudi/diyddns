@@ -14,6 +14,7 @@ import (
 	"github.com/descope/virtualwebauthn"
 
 	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -1109,5 +1110,40 @@ func TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase(t *testin
 	pollForLog(t, &buf, "delivery budget exhausted before notifying admins", 5*time.Second)
 	if got := buf.String(); strings.Contains(got, "list admins failed") {
 		t.Errorf("an exhausted budget must not be reported as a store failure; got:\n%s", got)
+	}
+}
+
+// TestIssueInvite_NonASCIIBaseURLFailsTheSendLoudly closes route 5 end to end.
+// GrantService.baseURL comes from cfg.Server.BaseURL and is prefixed onto every
+// minted link, which is then interpolated into the body — so a non-ASCII
+// base_url puts raw UTF-8 in the BODY while from and to are both ASCII. That is
+// the vector a from/to-only check passes.
+//
+// The #52 invariant is unchanged and is asserted here: err == nil, so the link
+// is valid and MUST still be shown. Only the delivery fails.
+func TestIssueInvite_NonASCIIBaseURLFailsTheSendLoudly(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	// A REAL mailer, so the send path's own checkSendable runs. No fake listener
+	// is needed and none exists in this package: checkSendable fires BEFORE dial,
+	// so the deliberately unreachable 127.0.0.1:1 is never touched.
+	mailer := email.New(config.EmailSection{
+		Enabled: true, Host: "127.0.0.1", Port: 1, From: "noreply@example.test", TLS: "none",
+	}, discardLogger())
+	grants := NewGrantService(st, passkeys, mailer, "https://exämple.test", NewAuditWriter(st), discardLogger())
+	u := seedUser(t, st, "invitee@example.test", "user")
+
+	link, delivery, err := grants.IssueInvite(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v, want nil — a delivery failure must never cost the admin the link", err)
+	}
+	if link == "" {
+		t.Fatal("link is empty; the #52 invariant is that err == nil means the link is valid and must be shown")
+	}
+	if delivery.Err == nil {
+		t.Fatal("Delivery.Err = nil; a non-ASCII base_url must fail the send, not be reported as delivered")
+	}
+	if !errors.Is(delivery.Err, email.ErrNotASCII) {
+		t.Errorf("Delivery.Err = %v, want it to wrap ErrNotASCII", delivery.Err)
 	}
 }
