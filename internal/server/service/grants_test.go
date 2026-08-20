@@ -32,6 +32,14 @@ type fakeMailer struct {
 	// sendDelay, when non-zero, is slept inside Send so a test can let the send
 	// context expire before Send returns.
 	sendDelay time.Duration
+	// delayFromCall, when > 1, applies sendDelay only from the Nth Send onward
+	// (1-based), so a test can let an EARLY send complete inside the budget and a
+	// LATER one exhaust it. That is the only way to reach the admin-notify
+	// auditSendFailure site: an exhausted budget kills Users().List first.
+	// Zero and one both mean "every call", so existing literals are unaffected.
+	delayFromCall int
+	// calls counts Send invocations, guarded by mu, for delayFromCall.
+	calls int
 	// sendCh, when non-nil, additionally receives every sentEmail so a test
 	// can block on the goroutine actually calling Send instead of racing it.
 	sendCh chan sentEmail
@@ -48,7 +56,11 @@ type sentEmail struct{ to, subject, body string }
 func (m *fakeMailer) Enabled() bool { return m.enabled }
 
 func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
-	if m.sendDelay > 0 {
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	m.mu.Unlock()
+	if m.sendDelay > 0 && n >= max(m.delayFromCall, 1) {
 		time.Sleep(m.sendDelay)
 	}
 	e := sentEmail{to: to, subject: subject, body: body}
@@ -784,4 +796,118 @@ func TestDeliver_SurvivesCanceledRequestContext(t *testing.T) {
 	if len(page.Rows) != 1 {
 		t.Fatalf("email.send_failed entries = %d, want 1 — a canceled request context must not lose the row", len(page.Rows))
 	}
+}
+
+// pollForAuditRows waits until eventType has at least want rows, or fails.
+//
+// The self-service flow runs in a DETACHED goroutine, so the audit write lands
+// after the test's own call has returned. Polling is what makes that
+// deterministic; a fixed sleep would be flaky in exactly the direction that
+// hides a regression.
+func pollForAuditRows(t *testing.T, st *store.Store, eventType string, want int, timeout time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var got int
+	for time.Now().Before(deadline) {
+		page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: eventType}, "", 10)
+		if err != nil {
+			t.Fatalf("ListPaginated: %v", err)
+		}
+		if got = len(page.Rows); got >= want {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s rows = %d after %v, want >= %d", eventType, got, timeout, want)
+	return got
+}
+
+// selfServiceTestTimeout is the shrunk budget the #81 tests run on. It is a
+// MEASUREMENT, not a guess: the pre-send work (GetByEmail,
+// CountWebAuthnCredentials, mintRecoveryGrant) was measured at 0.72-1.52ms under
+// -race on go1.25.13, so this is ~165x the worst observation. Too small a value
+// makes the flow stop BEFORE the send, which would pass for the wrong reason and
+// pin nothing.
+const selfServiceTestTimeout = 250 * time.Millisecond
+
+// TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend
+// pins grants.go's FIRST doSelfServiceRecovery auditSendFailure call -- the one
+// for the user's own recovery link.
+//
+// It must run on a context.WithoutCancel-derived context, so the
+// email.send_failed row survives the very failure it exists to record:
+// internal/email derives the CONNECTION deadline from that context, so a stalled
+// peer returns at exactly the moment it expires, and database/sql rejects an
+// expired context before reaching the driver.
+//
+// Mutation-verified at ac4d56c: replacing BOTH doSelfServiceRecovery sites with
+// s.audit.Log(ctx, ...) left the whole suite GREEN. deliver's third site is
+// already pinned by TestDeliver_SurvivesCanceledRequestContext.
+//
+// The send must actually be REACHED. Asserting only that the flow ended would
+// let a test that stopped early pass for the wrong reason.
+func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{
+		enabled: true,
+		sendErr: errors.New("peer stalled"),
+		// Longer than the shrunk budget, so the send exhausts it and the
+		// auditSendFailure call runs on an already-dead context.
+		sendDelay: selfServiceTestTimeout + 100*time.Millisecond,
+		sendCh:    make(chan sentEmail, 4),
+	}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+	grants.selfServiceTimeout = selfServiceTestTimeout
+
+	u := seedUser(t, st, "alice@example.test", "user")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+
+	// The send was reached -- without this the test could pass by stopping early.
+	if sent := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout); sent.to != u.Email {
+		t.Fatalf("sent to %q, want %q", sent.to, u.Email)
+	}
+
+	pollForAuditRows(t, st, EventEmailSendFailed, 1, 5*time.Second)
+}
+
+// TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNotify
+// pins the SECOND site -- the admin-notify loop -- which the test above can
+// never reach.
+//
+// Why a second test is unavoidable: when the budget is exhausted at the user
+// send, Users().List(ctx) at grants.go:332 fails on the dead context and the
+// function returns at :335, so the admin loop never executes. Here the user send
+// is INSTANT (delayFromCall: 2) and succeeds inside the budget, List runs on a
+// live context, and only the admin send stalls past the deadline.
+func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNotify(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{
+		enabled:       true,
+		sendErr:       errors.New("peer stalled"),
+		sendDelay:     selfServiceTestTimeout + 100*time.Millisecond,
+		delayFromCall: 2, // send 1 (the user) is instant; send 2 (the admin) stalls
+		sendCh:        make(chan sentEmail, 4),
+	}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+	grants.selfServiceTimeout = selfServiceTestTimeout
+
+	u := seedUser(t, st, "alice@example.test", "user")
+	seedUser(t, st, "admin@example.test", "admin")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout) // the user send
+	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout) // the admin send -- proves the loop was REACHED
+
+	// Two rows: one per failed send. With the admin site reverted to
+	// s.audit.Log(ctx, ...) only the first survives.
+	pollForAuditRows(t, st, EventEmailSendFailed, 2, 5*time.Second)
 }

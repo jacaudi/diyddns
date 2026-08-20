@@ -145,6 +145,16 @@ type GrantService struct {
 	// the only construction path in the tree and always sets it; never build a
 	// GrantService with a bare struct literal.
 	deliveryTimeout time.Duration
+	// selfServiceTimeout bounds doSelfServiceRecovery's detached goroutine (see
+	// selfServiceRecoveryTimeout). It is a field for exactly the reason
+	// deliveryTimeout is: so a test can shrink it and prove the audit write
+	// survives a context the send has already exhausted (#81).
+	//
+	// It must always be set. A zero value makes context.WithTimeout return an
+	// already-expired context, so the goroutine would do nothing at all.
+	// NewGrantService is the only construction path in the tree and always sets
+	// it; never build a GrantService with a bare struct literal.
+	selfServiceTimeout time.Duration
 }
 
 // NewGrantService constructs a GrantService. passkeys may be nil if WebAuthn
@@ -154,7 +164,8 @@ type GrantService struct {
 func NewGrantService(st *store.Store, passkeys *PasskeyService, mailer email.Mailer, baseURL string, audit AuditSink, log *slog.Logger) *GrantService {
 	return &GrantService{
 		st: st, passkeys: passkeys, mailer: mailer, baseURL: baseURL, audit: audit, log: log,
-		deliveryTimeout: adminDeliveryTimeout,
+		deliveryTimeout:    adminDeliveryTimeout,
+		selfServiceTimeout: selfServiceRecoveryTimeout,
 	}
 }
 
@@ -301,7 +312,7 @@ func (s *GrantService) RequestSelfServiceRecovery(_ context.Context, targetEmail
 // body — see that method's doc comment for why it must never run on the
 // caller's path.
 func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
-	ctx, cancel := context.WithTimeout(context.Background(), selfServiceRecoveryTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.selfServiceTimeout)
 	defer cancel()
 
 	if s.mailer == nil || !s.mailer.Enabled() {
