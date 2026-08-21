@@ -766,6 +766,112 @@ func TestDeliver_AuditsEvenWhenTheSendContextExpires(t *testing.T) {
 	}
 }
 
+// TestIssueRecovery_DisabledTargetIsNotEmailed is #82. Login is refused anyway
+// (service/passkey.go, auth/session.go), so emailing a disabled user invites
+// them into a flow that cannot succeed.
+//
+// The #52 invariant is preserved and asserted here: err == nil means the link is
+// valid and MUST be shown, whatever Delivery says. The admin keeps the
+// out-of-band path, so recover-then-re-enable still works as one flow.
+func TestIssueRecovery_DisabledTargetIsNotEmailed(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
+	grants := newTestGrantService(t, st, passkeys, mailer, discardAudit{})
+
+	u := seedUser(t, st, "disabled@example.test", "user")
+	u.Disabled = true
+	if err := st.Users().Update(t.Context(), u); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	link, delivery, err := grants.IssueRecovery(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueRecovery: %v, want nil — the link must still be minted and shown", err)
+	}
+	if link == "" {
+		t.Fatal("link is empty; #52's invariant is that err == nil means a valid link")
+	}
+	if delivery.Attempted {
+		t.Error("Delivery.Attempted = true; no transport may be invoked for a disabled target")
+	}
+	if delivery.Sent() {
+		t.Error("Delivery.Sent() = true for a suppressed send")
+	}
+	if delivery.Suppressed != SuppressUserDisabled {
+		t.Errorf("Delivery.Suppressed = %q, want %q", delivery.Suppressed, SuppressUserDisabled)
+	}
+	if got := mailer.Sent(); len(got) != 0 {
+		t.Errorf("mailer recorded %d sends, want 0: %+v", len(got), got)
+	}
+}
+
+// TestIssueRecovery_EnabledTargetIsUnchanged keeps the guard honest: the change
+// must not be satisfiable by suppressing every send.
+func TestIssueRecovery_EnabledTargetIsUnchanged(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
+	grants := newTestGrantService(t, st, passkeys, mailer, discardAudit{})
+	u := seedUser(t, st, "active@example.test", "user")
+
+	_, delivery, err := grants.IssueRecovery(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueRecovery: %v", err)
+	}
+	if !delivery.Sent() {
+		t.Fatalf("Delivery.Sent() = false for an enabled target: %+v", delivery)
+	}
+	if delivery.Suppressed != SuppressNone {
+		t.Errorf("Delivery.Suppressed = %q, want the zero value", delivery.Suppressed)
+	}
+}
+
+// TestIssueRecovery_DisabledWinsOverNoMailer pins P2's precedence. A disabled
+// target with no mailer configured reports user_disabled, not the
+// email-not-configured state: it is the fact the admin can act on (re-enable the
+// account), it is true regardless of SMTP, and it keeps the suppression
+// contained inside IssueRecovery.
+func TestIssueRecovery_DisabledWinsOverNoMailer(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	grants := newTestGrantService(t, st, passkeys, nil, discardAudit{})
+
+	u := seedUser(t, st, "disabled@example.test", "user")
+	u.Disabled = true
+	if err := st.Users().Update(t.Context(), u); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	_, delivery, err := grants.IssueRecovery(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueRecovery: %v", err)
+	}
+	if delivery.Suppressed != SuppressUserDisabled {
+		t.Errorf("Delivery.Suppressed = %q, want %q even with no mailer", delivery.Suppressed, SuppressUserDisabled)
+	}
+}
+
+// TestIssueInvite_NeverSuppresses pins P3: #82 is scoped to IssueRecovery, but
+// the field lands on the shared Delivery type. AdminService.CreateUserInvite
+// creates store.User{Email, Role} with Disabled false, so an invited user is
+// never disabled at issue. Pinned so a future change cannot drift it silently.
+func TestIssueInvite_NeverSuppresses(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
+	grants := newTestGrantService(t, st, passkeys, mailer, discardAudit{})
+	u := seedUser(t, st, "invitee@example.test", "user")
+
+	_, delivery, err := grants.IssueInvite(t.Context(), "admin-id", u)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+	if delivery.Suppressed != SuppressNone {
+		t.Errorf("Delivery.Suppressed = %q, want the zero value — IssueInvite is out of #82's scope", delivery.Suppressed)
+	}
+}
+
 // TestDeliver_SurvivesCanceledRequestContext proves D6's context.WithoutCancel:
 // if the admin's browser aborts, the response is lost but the user must still
 // receive the link. This exercises deliver directly rather than through

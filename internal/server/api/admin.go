@@ -51,10 +51,20 @@ type deliveryView struct {
 	Attempted bool   `json:"attempted"`
 	Sent      bool   `json:"sent"`
 	To        string `json:"to,omitempty"`
+	// Suppressed names a deliberate decision not to send, as opposed to "no
+	// mailer configured" — both of which have attempted == false. Absent from
+	// the JSON in the common case (omitempty on the zero value), so existing
+	// clients see no change.
+	Suppressed string `json:"suppressed,omitempty"`
 }
 
 func newDeliveryView(d service.Delivery) deliveryView {
-	return deliveryView{Attempted: d.Attempted, Sent: d.Sent(), To: d.To}
+	return deliveryView{
+		Attempted:  d.Attempted,
+		Sent:       d.Sent(),
+		To:         d.To,
+		Suppressed: string(d.Suppressed),
+	}
 }
 
 // createUserResponse carries the newly-created (credential-less) user plus
