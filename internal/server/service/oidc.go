@@ -126,15 +126,16 @@ func (s *OIDCService) BrowserLogin(ctx context.Context, issuer, subject, email s
 
 // normalizeClaim answers one question — is this email claim usable at all? — and
 // returns the canonical address if so. Both failures take the uniform
-// ErrOIDCRejected via s.reject, which logs the specific reason at oidc.go:38 like
+// ErrOIDCRejected via s.reject, which logs the specific reason at oidc.go:42 like
 // every other rejection on this path.
 //
 // It is called from ONE place, deliberately: below path 1 and above BOTH the
 // GetByEmail lookup and the Create.
 //
-// Not at the top of LoginOrLink: path 1 returns at line 57 without ever reading
-// `email`, so a guard there would lock out an existing, ALREADY LINKED user whose
-// IdP emits a non-ASCII claim — on a path that stores nothing.
+// Not at the top of LoginOrLink: path 1's `if err == nil {` (line 57) returns at
+// line 61 without ever reading `email`, so a guard there would lock out an
+// existing, ALREADY LINKED user whose IdP emits a non-ASCII claim — on a path
+// that stores nothing.
 //
 // Not at the Create alone either: if signup stored addr.Address while the lookup
 // still used the raw claim, a display-name-form claim would miss its own row,

@@ -177,7 +177,7 @@ func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) 
 	case errors.Is(err, service.ErrBootstrapToken):
 		return huma.Error401Unauthorized("invalid bootstrap token")
 	case errors.Is(err, service.ErrBootstrapInvalidEmail):
-		return huma.Error422UnprocessableEntity("invalid email address")
+		return huma.Error422UnprocessableEntity("email address must be a plain 7-bit ASCII address in user@host form, with no display name and no surrounding whitespace")
 	case errors.Is(err, service.ErrGrantInvalid):
 		return huma.Error401Unauthorized("registration link invalid, expired, or already used")
 	case errors.Is(err, service.ErrPasskeyVerification):

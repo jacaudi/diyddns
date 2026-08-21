@@ -336,7 +336,7 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 	case errors.Is(err, service.ErrInvalidRole):
 		return huma.Error422UnprocessableEntity("role must be 'admin' or 'user'")
 	case errors.Is(err, service.ErrInvalidEmail):
-		return huma.Error422UnprocessableEntity("invalid email address")
+		return huma.Error422UnprocessableEntity("email address must be a plain 7-bit ASCII address in user@host form, with no display name and no surrounding whitespace")
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
 		return huma.Error503ServiceUnavailable("passkey authentication is not configured")
 	default:

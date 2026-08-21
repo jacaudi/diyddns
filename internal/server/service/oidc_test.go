@@ -109,6 +109,29 @@ func TestOIDCLoginOrLink(t *testing.T) {
 		}
 	})
 
+	// DELIBERATE, maintainer-decided consequence of the guard above (design
+	// §5.7 said "do not reject login for such a user"; the maintainer chose to
+	// accept this narrower regression instead of adding a raw-claim lookup
+	// fallback). A user whose STORED row is non-ASCII (created before the
+	// boundary validations existed) and who has NOT YET linked an OIDC
+	// identity can no longer auto-link via path 2: normalizeClaim rejects the
+	// matching non-ASCII claim before GetByEmail ever runs. Before this guard
+	// existed, this exact case auto-linked and the user could sign in; now it
+	// is ErrOIDCRejected, and there is no admin-facing way to fix the stored
+	// address (applyRole only writes role) — not self-service recoverable.
+	// If this test ever starts failing, that is a scope decision (adding the
+	// lookup fallback, or a migration), not a bug fix.
+	t.Run("existing UNLINKED user with a non-ascii stored email is rejected, not auto-linked", func(t *testing.T) {
+		st := openTestStore(t)
+		_, err := st.Users().Create(t.Context(), store.User{Email: "josé@example.test", Role: "user"})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-nonascii-unlinked", "josé@example.test", true); !errors.Is(err, ErrOIDCRejected) {
+			t.Fatalf("want ErrOIDCRejected (deliberate — see comment above), got %v", err)
+		}
+	})
+
 	t.Run("non-ascii claim is rejected at signup", func(t *testing.T) {
 		st := openTestStore(t)
 		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-new", "josé@example.test", true); !errors.Is(err, ErrOIDCRejected) {

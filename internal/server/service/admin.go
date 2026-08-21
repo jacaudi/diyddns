@@ -21,7 +21,9 @@ var (
 	ErrSelfLockout = errors.New("service: cannot disable or delete your own account")
 	// ErrInvalidRole is returned for a role outside {admin, user}.
 	ErrInvalidRole = errors.New("service: invalid role")
-	// ErrInvalidEmail is returned when an email address fails RFC parsing.
+	// ErrInvalidEmail is returned when an email address fails RFC parsing, is
+	// not 7-bit ASCII, or is not already in bare canonical addr-spec form (a
+	// display name or surrounding whitespace).
 	ErrInvalidEmail = errors.New("service: invalid email address")
 )
 

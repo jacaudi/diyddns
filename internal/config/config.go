@@ -272,7 +272,7 @@ func isASCII(s string) bool {
 // internal/email's send-path check accepts, and nothing more.
 //
 // That is why it is not merely an isASCII call. cfg.Email.From reaches
-// c.Mail(m.cfg.From) (smtp.go:171) as well as the From: header, and net/smtp
+// c.Mail(m.cfg.From) (internal/email/smtp.go:187) as well as the From: header, and net/smtp
 // passes it through verbatim — measured, a display-name value produces the
 // malformed envelope `MAIL FROM:<DIYDDNS <noreply@example.com>>`, and a
 // trailing space produces `MAIL FROM:<noreply@example.com >`. net/smtp accepts

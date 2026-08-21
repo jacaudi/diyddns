@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"strings"
 	"unicode"
 )
 
@@ -45,6 +46,19 @@ var ErrAddressUnsupported = errors.New("email: address form is not supported by 
 // the charset check alone does not catch it. Rows created before the boundary
 // validations existed can carry it.
 var ErrAddressNotCanonical = errors.New("email: address is not in canonical addr-spec form")
+
+// ErrHeaderInjection reports a header VALUE that carries a CR or LF. IsASCII
+// alone does not catch this — CR (0x0D) and LF (0x0A) are both 7-bit ASCII,
+// and are pinned as such by design (IsASCII's "control characters are still
+// ascii" test case), because a message BODY legitimately contains \n line
+// breaks. A header field does not: buildMessage writes
+// "Subject: %s\r\n" with no fold, so an embedded CR/LF in subject would
+// terminate that header early and let the rest of the value inject
+// additional headers or a premature blank-line body boundary. checkSendable
+// applies this to the Subject only — never to From/To (already constrained
+// to a canonical addr-spec by checkAddress, which cannot contain CR/LF) or to
+// the body (which legitimately contains \n).
+var ErrHeaderInjection = errors.New("email: header value contains a CR or LF")
 
 // IsASCII reports whether s is entirely 7-bit ASCII.
 //
@@ -103,10 +117,15 @@ func checkAddress(field, addr string) error {
 	return nil
 }
 
-// checkSendable rejects any buildMessage argument the transport cannot carry.
-// It covers ALL FOUR arguments, not just the addresses: AdminNotifyBody
-// interpolates a user-controlled email address into the BODY, so a check on
-// from/to alone passes the highest-severity vector (design §5.5).
+// checkSendable rejects the buildMessage arguments known to break the
+// transport. It covers ALL FOUR arguments, not just the addresses:
+// AdminNotifyBody interpolates a user-controlled email address into the BODY,
+// so a check on from/to alone passes the highest-severity vector (design
+// §5.5). It does NOT guarantee the transport can carry everything it admits —
+// IsASCII deliberately allows CR/LF (see its "control characters are still
+// ascii" test case), and the body is not CR/LF-checked at all because a
+// legitimate body contains \n line breaks; only the subject is header-folded
+// onto a single line, so only the subject is checked here.
 //
 // The offending VALUE is deliberately not included in the subject/body errors —
 // a body can carry a live one-time registration link. The field name is enough
@@ -120,6 +139,9 @@ func checkSendable(from, to, subject, body string) error {
 	}
 	if !IsASCII(subject) {
 		return fmt.Errorf("%w: Subject header", ErrNotASCII)
+	}
+	if strings.ContainsAny(subject, "\r\n") {
+		return fmt.Errorf("%w: Subject header", ErrHeaderInjection)
 	}
 	if !IsASCII(body) {
 		return fmt.Errorf("%w: message body", ErrNotASCII)

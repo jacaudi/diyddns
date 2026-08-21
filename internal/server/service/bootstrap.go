@@ -30,7 +30,8 @@ var ErrBootstrapClosed = errors.New("service: bootstrap closed")
 var ErrBootstrapToken = errors.New("service: invalid bootstrap token")
 
 // ErrBootstrapInvalidEmail is returned by BeginClaim when the supplied admin
-// email fails RFC parsing. Maps to HTTP 422 (a client-fixable input error,
+// email fails RFC parsing, is not 7-bit ASCII, or is not already in bare
+// canonical addr-spec form. Maps to HTTP 422 (a client-fixable input error,
 // not a token/closed condition) — kept a distinct exported sentinel so the
 // API layer can report it as 422 rather than collapsing it into a logged
 // 500, mirroring AdminService.ErrInvalidEmail.

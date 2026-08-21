@@ -577,6 +577,15 @@ func TestSmtpMailer_Send_RejectsUnmailable(t *testing.T) {
 		{name: "quoted local part in to (cannot be canonicalized)", from: "noreply@example.com",
 			to: `"john doe"@example.com`, subject: "your recovery link", body: "click here",
 			wantErr: email.ErrAddressUnsupported},
+		// CR/LF is 7-bit ASCII, so IsASCII alone would admit it; buildMessage
+		// writes "Subject: %s\r\n" unfolded, so an embedded CR/LF terminates
+		// the header early and lets the rest of the value inject additional
+		// headers or a premature blank line. There is no live vector today
+		// (subjects come from four fixed templates), but the guard exists so
+		// the first dynamic subject anyone adds inherits it.
+		{name: "CR/LF in subject (header injection)", from: "noreply@example.com", to: "user@example.test",
+			subject: "your recovery link\r\nBcc: attacker@evil.test", body: "click here",
+			wantErr: email.ErrHeaderInjection},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
