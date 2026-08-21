@@ -164,19 +164,22 @@ func (s *BootstrapService) sealClaim(cs claimSession) (string, error) {
 // openClaim reverses sealClaim. Every failure — bad key, malformed payload,
 // failed AEAD authentication — collapses to ErrPasskeyVerification, matching
 // PasskeyService.openSession's uniform-failure contract.
-func (s *BootstrapService) openClaim(sealed string) (claimSession, error) {
+func (s *BootstrapService) openClaim(ctx context.Context, sealed string) (claimSession, error) {
 	raw, err := auth.OpenWithAAD(s.sealKey, sealed, bootstrapClaimAAD)
 	if err != nil {
-		// See verifyRegistration: the cause is logged, never returned. This is
-		// the line that would have named #78's real failure immediately --
-		// "ciphertext too short (sealed len=0)" says the client sent no cookie.
-		s.log.LogAttrs(context.Background(), slog.LevelInfo, "bootstrap claim cookie could not be opened",
-			slog.String("error", err.Error()))
+		// See verifyRegistration: the cause is logged, never returned.
+		// auth.OpenWithAAD reports the bare "ciphertext too short" for BOTH an
+		// absent cookie and a truncated one -- the message alone does not
+		// distinguish them. sealed_len does: 0 means the client sent no
+		// cookie at all, >0 but still too-short means a truncated one. This
+		// is the line that would have named #78's real failure immediately.
+		s.log.LogAttrs(ctx, slog.LevelInfo, "bootstrap claim cookie could not be opened",
+			slog.String("error", err.Error()), slog.Int("sealed_len", len(sealed)))
 		return claimSession{}, ErrPasskeyVerification
 	}
 	var cs claimSession
 	if err := json.Unmarshal(raw, &cs); err != nil {
-		s.log.LogAttrs(context.Background(), slog.LevelInfo, "bootstrap claim cookie could not be decoded",
+		s.log.LogAttrs(ctx, slog.LevelInfo, "bootstrap claim cookie could not be decoded",
 			slog.String("error", err.Error()))
 		return claimSession{}, ErrPasskeyVerification
 	}
@@ -249,7 +252,7 @@ func (s *BootstrapService) FinishClaim(ctx context.Context, sealedCookie string,
 		return store.User{}, ErrBootstrapClosed
 	}
 
-	cs, err := s.openClaim(sealedCookie)
+	cs, err := s.openClaim(ctx, sealedCookie)
 	if err != nil {
 		return store.User{}, err
 	}

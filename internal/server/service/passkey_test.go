@@ -433,8 +433,18 @@ func TestVerifyRegistration_LogsTheCauseButDoesNotReturnIt(t *testing.T) {
 	if err != ErrPasskeyVerification { //nolint:errorlint // intentional: proving err is NOT wrapped, so errors.Is would defeat the point
 		t.Errorf("err must be the bare sentinel, not wrapped: %v", err)
 	}
-	if got := buf.String(); !strings.Contains(got, "passkey registration verification failed") {
+	got := buf.String()
+	if !strings.Contains(got, "passkey registration verification failed") {
 		t.Errorf("log does not record the cause; got:\n%s", got)
+	}
+	// The message alone proves nothing: a handler that logs the message with
+	// no error attribute at all would satisfy the Contains check above and
+	// still leak zero diagnostic information. Pin the cause itself -- the
+	// go-webauthn error text attached as the "error" attribute -- so a
+	// mutant that drops slog.String("error", ...) while keeping the message
+	// is caught here.
+	if !strings.Contains(got, `error="Parse error for Registration"`) {
+		t.Errorf("log does not record the cause as an error attribute; got:\n%s", got)
 	}
 }
 

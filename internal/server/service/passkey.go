@@ -405,7 +405,7 @@ func (s *PasskeyService) verifyRegistration(email string, handle []byte, sess we
 		// api/enroll_oidc.go:154.
 		//
 		// The cause is written here and NOWHERE else. Do not wrap it with %w and
-		// do not add a second return value: api/passkey.go:183 passes only the
+		// do not add a second return value: api/passkey.go:184 passes only the
 		// fixed constant to huma.Error401Unauthorized, and that must stay true.
 		s.log.LogAttrs(r.Context(), slog.LevelInfo, "passkey registration verification failed",
 			slog.String("error", err.Error()))
