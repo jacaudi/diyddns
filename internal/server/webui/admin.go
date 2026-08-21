@@ -167,7 +167,7 @@ func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	case errors.Is(err, service.ErrInvalidRole):
 		return "Role must be either admin or user.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrInvalidEmail):
-		return "That is not a valid email address.", http.StatusUnprocessableEntity, true
+		return "Email addresses must be plain 7-bit ASCII in user@host form, with no display name and no surrounding whitespace.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, store.ErrConflict):
 		return "A user with that email address already exists.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrWebAuthnUnavailable):

@@ -539,3 +539,89 @@ func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
 		t.Errorf("AdminRecoveryLinkBody must state the passkeys were revoked:\n%s", body)
 	}
 }
+
+// TestSmtpMailer_Send_RejectsUnmailable proves that nothing unmailable reaches
+// the wire and that Send stops REPORTING SUCCESS when it would have.
+//
+// Before this, every case returned nil: the message went out declaring 7bit
+// while carrying raw UTF-8 (or a malformed RCPT TO), and the caller was told it
+// had been delivered.
+//
+// The body case is the important one. from and to are both ASCII there, and the
+// non-ASCII text is in the BODY -- exactly what AdminNotifyBody(u.Email)
+// produces, and exactly what a from/to-only check would pass. That path is
+// pre-auth and attacker-driveable: api/passkey.go -> RequestSelfServiceRecovery
+// -> doSelfServiceRecovery.
+//
+// The display-name case is the other one a naive charset check misses: it is
+// pure ASCII, and it is what a row stored before B1.3 looks like.
+func TestSmtpMailer_Send_RejectsUnmailable(t *testing.T) {
+	tests := []struct {
+		name          string
+		from, to      string
+		subject, body string
+		wantErr       error
+	}{
+		{name: "non-ascii to (routes 1-3)", from: "noreply@example.com", to: "josé@example.test",
+			subject: "your recovery link", body: "click here", wantErr: email.ErrNotASCII},
+		{name: "non-ascii from (route 4)", from: "nöreply@example.com", to: "user@example.test",
+			subject: "your recovery link", body: "click here", wantErr: email.ErrNotASCII},
+		{name: "non-ascii subject", from: "noreply@example.com", to: "user@example.test",
+			subject: "Résumé reset", body: "click here", wantErr: email.ErrNotASCII},
+		{name: "non-ascii body with ascii from and to", from: "noreply@example.com", to: "user@example.test",
+			subject: "your recovery link", body: "An administrator reset josé@example.test",
+			wantErr: email.ErrNotASCII},
+		{name: "ascii but un-normalized to (a row stored before B1.3)", from: "noreply@example.com",
+			to: "Bob <bob@example.test>", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressNotCanonical},
+		{name: "quoted local part in to (cannot be canonicalized)", from: "noreply@example.com",
+			to: `"john doe"@example.com`, subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnsupported},
+		// CR/LF is 7-bit ASCII, so IsASCII alone would admit it; buildMessage
+		// writes "Subject: %s\r\n" unfolded, so an embedded CR/LF terminates
+		// the header early and lets the rest of the value inject additional
+		// headers or a premature blank line. There is no live vector today
+		// (subjects come from four fixed templates), but the guard exists so
+		// the first dynamic subject anyone adds inherits it.
+		{name: "CR/LF in subject (header injection)", from: "noreply@example.com", to: "user@example.test",
+			subject: "your recovery link\r\nBcc: attacker@evil.test", body: "click here",
+			wantErr: email.ErrHeaderInjection},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, port, envelopes := startFakeSMTP(t)
+			cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: tt.from, TLS: "none"}
+			m := email.New(cfg, debugLogger())
+
+			err := m.Send(t.Context(), tt.to, tt.subject, tt.body)
+			if err == nil {
+				t.Fatal("Send returned nil; nothing unmailable may be reported as delivered")
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Send err = %v, want it to wrap %v", err, tt.wantErr)
+			}
+			// Nothing may reach the wire: the check runs before dial, so the
+			// listener never sees a conversation at all.
+			select {
+			case env := <-envelopes:
+				t.Fatalf("an envelope reached the wire: %+v", env)
+			case <-time.After(200 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// TestSmtpMailer_Send_MailableStillSends is the companion that keeps the guard
+// honest: a fully valid message must still go out unchanged, so the rejections
+// above cannot be satisfied by breaking Send outright.
+func TestSmtpMailer_Send_MailableStillSends(t *testing.T) {
+	host, port, envelopes := startFakeSMTP(t)
+	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none"}
+	m := email.New(cfg, debugLogger())
+
+	if err := m.Send(t.Context(), "user@example.com", "your recovery link", "click here: https://x.test/r/abc"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com",
+		"your recovery link", "click here: https://x.test/r/abc")
+}

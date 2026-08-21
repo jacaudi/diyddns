@@ -87,6 +87,93 @@ func TestOIDCLoginOrLink(t *testing.T) {
 			t.Fatalf("want ErrOIDCRejected for disabled user, got %v", err)
 		}
 	})
+
+	// Path 1 must be untouched. An already-linked user whose IdP emits a
+	// non-ASCII claim must still log in: that path never reads the email
+	// argument, and rejecting there would be a lockout manufactured by an
+	// address-formatting rule.
+	t.Run("existing linked user with a non-ascii stored email still logs in", func(t *testing.T) {
+		st := openTestStore(t)
+		u, err := st.Users().Create(t.Context(), store.User{
+			Email: "josé@example.test", Role: "user", OIDCProvider: iss, OIDCSubject: "s-nonascii",
+		})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-nonascii", "josé@example.test", true)
+		if err != nil {
+			t.Fatalf("path-1 login must not be broken by the new guard: %v", err)
+		}
+		if got.ID != u.ID {
+			t.Fatalf("logged in as %s, want %s", got.ID, u.ID)
+		}
+	})
+
+	// DELIBERATE, maintainer-decided consequence of the guard above (design
+	// §5.7 said "do not reject login for such a user"; the maintainer chose to
+	// accept this narrower regression instead of adding a raw-claim lookup
+	// fallback). A user whose STORED row is non-ASCII (created before the
+	// boundary validations existed) and who has NOT YET linked an OIDC
+	// identity can no longer auto-link via path 2: normalizeClaim rejects the
+	// matching non-ASCII claim before GetByEmail ever runs. Before this guard
+	// existed, this exact case auto-linked and the user could sign in; now it
+	// is ErrOIDCRejected, and there is no admin-facing way to fix the stored
+	// address (applyRole only writes role) — not self-service recoverable.
+	// If this test ever starts failing, that is a scope decision (adding the
+	// lookup fallback, or a migration), not a bug fix.
+	t.Run("existing UNLINKED user with a non-ascii stored email is rejected, not auto-linked", func(t *testing.T) {
+		st := openTestStore(t)
+		_, err := st.Users().Create(t.Context(), store.User{Email: "josé@example.test", Role: "user"})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-nonascii-unlinked", "josé@example.test", true); !errors.Is(err, ErrOIDCRejected) {
+			t.Fatalf("want ErrOIDCRejected (deliberate — see comment above), got %v", err)
+		}
+	})
+
+	t.Run("non-ascii claim is rejected at signup", func(t *testing.T) {
+		st := openTestStore(t)
+		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-new", "josé@example.test", true); !errors.Is(err, ErrOIDCRejected) {
+			t.Fatalf("want ErrOIDCRejected, got %v", err)
+		}
+		users, err := st.Users().List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(users) != 0 {
+			t.Errorf("users = %d, want 0 — a rejected signup must create nothing", len(users))
+		}
+	})
+
+	// The lockout the fix itself would cause if the lookup were not normalized
+	// alongside the create: a display-name-form claim must find its own row via
+	// GetByEmail and LINK, not fall through to signup and hit ErrConflict.
+	t.Run("display-name form claim links the existing normalized row", func(t *testing.T) {
+		st := openTestStore(t)
+		u, err := st.Users().Create(t.Context(), store.User{Email: "bob@example.test", Role: "user"})
+		if err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-display", "Bob <bob@example.test>", true)
+		if err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		if got.ID != u.ID || got.OIDCSubject != "s-display" {
+			t.Fatalf("expected a link onto %s, got %+v", u.ID, got)
+		}
+	})
+
+	t.Run("signup stores the normalized address", func(t *testing.T) {
+		st := openTestStore(t)
+		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-norm", "Carol <carol@example.test>", true)
+		if err != nil {
+			t.Fatalf("signup: %v", err)
+		}
+		if got.Email != "carol@example.test" {
+			t.Errorf("stored email = %q, want %q", got.Email, "carol@example.test")
+		}
+	})
 }
 
 func TestOIDCBrowserLogin_CreatesSession(t *testing.T) {

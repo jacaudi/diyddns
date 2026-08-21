@@ -55,6 +55,42 @@ func TestAdminService_CreateUserInvite_RejectsInvalidEmail(t *testing.T) {
 	}
 }
 
+func TestAdminService_CreateUserInvite_RejectsNonASCIIEmail(t *testing.T) {
+	for _, addr := range []string{"josé@example.test", "user@exämple.test", "日本@example.test"} {
+		t.Run(addr, func(t *testing.T) {
+			st, svc := newAdminSvcWithPasskeys(t)
+			admin := seedUser(t, st, "admin@example.test", "admin")
+			if _, _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, addr, "user"); !errors.Is(err, ErrInvalidEmail) {
+				t.Fatalf("err = %v, want ErrInvalidEmail", err)
+			}
+			users, err := st.Users().List(t.Context())
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(users) != 1 {
+				t.Errorf("users = %d, want 1 (only the seeded admin) — a rejected invite must create nothing", len(users))
+			}
+		})
+	}
+}
+
+// TestAdminService_CreateUserInvite_NormalizesTheAddress pins design §5.6: the previous code
+// wrote `if _, err := mail.ParseAddress(email)` and stored the RAW string, so
+// "Bob <bob@example.test>" went out as RCPT TO:<Bob <bob@example.test>> with
+// Send returning nil. It is pure ASCII, so the charset guard does not catch it.
+func TestAdminService_CreateUserInvite_NormalizesTheAddress(t *testing.T) {
+	st, svc := newAdminSvcWithPasskeys(t)
+	admin := seedUser(t, st, "admin@example.test", "admin")
+
+	u, _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, "Bob <bob@example.test>", "user")
+	if err != nil {
+		t.Fatalf("CreateUserInvite: %v", err)
+	}
+	if u.Email != "bob@example.test" {
+		t.Errorf("stored email = %q, want %q", u.Email, "bob@example.test")
+	}
+}
+
 func TestAdminService_CreateUserInvite_CredentiallessUserAndRedeemableLink(t *testing.T) {
 	st, svc := newAdminSvcWithPasskeys(t)
 	admin := seedUser(t, st, "admin@x.com", "admin")

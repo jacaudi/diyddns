@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/mail"
 
+	// Aliased: this file has a parameter named `email`, and revive's
+	// import-shadowing rule (enabled repo-wide, and NOT excluded for any file)
+	// fails on an unaliased import of the same name.
+	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -18,7 +21,9 @@ var (
 	ErrSelfLockout = errors.New("service: cannot disable or delete your own account")
 	// ErrInvalidRole is returned for a role outside {admin, user}.
 	ErrInvalidRole = errors.New("service: invalid role")
-	// ErrInvalidEmail is returned when an email address fails RFC parsing.
+	// ErrInvalidEmail is returned when an email address fails RFC parsing, is
+	// not 7-bit ASCII, or is not already in bare canonical addr-spec form (a
+	// display name or surrounding whitespace).
 	ErrInvalidEmail = errors.New("service: invalid email address")
 )
 
@@ -91,9 +96,15 @@ func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, rol
 	if !validRole(role) {
 		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidRole)
 	}
-	if _, err := mail.ParseAddress(email); err != nil {
+	// Normalize as well as validate. mail.ParseAddress accepts
+	// "Bob <bob@example.test>", and discarding the parse result stored that raw
+	// string, which then went out as RCPT TO:<Bob <bob@example.test>>. It is
+	// pure ASCII, so the charset half of this check does not catch it.
+	normalized, err := emailpkg.NormalizeAddress(email)
+	if err != nil {
 		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", ErrInvalidEmail)
 	}
+	email = normalized
 	// s.grants itself may be non-nil while its passkeys dependency is (design
 	// server.go leaves PasskeyService nil when hide_local_login_ui tolerates
 	// an unresolved RP) — checking only s.grants == nil would let a dead

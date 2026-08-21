@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/viper"
 )
@@ -230,6 +232,15 @@ func validateEmailBaseURL(baseURL string) error {
 	if !u.IsAbs() || u.Host == "" {
 		return fmt.Errorf(`config: email.enabled requires an absolute server.base_url with a scheme and host, got %q`, baseURL)
 	}
+	// Route 5 (#80): baseURL is prefixed onto every minted link and
+	// interpolated into the message BODY, on a wire that declares 7bit. Checked
+	// here rather than in Load, so it applies only when email is enabled --
+	// server.base_url is also read by ResolveWebAuthn and
+	// InsecureCookieWarning, and rejecting an IDN base URL for a deployment
+	// that sends no mail is out of scope.
+	if !isASCII(baseURL) {
+		return fmt.Errorf(`config: email.enabled requires a 7-bit ASCII server.base_url (outbound messages declare 7bit and cannot carry it), got %q`, baseURL)
+	}
 	return nil
 }
 
@@ -237,6 +248,58 @@ func validateEmailBaseURL(baseURL string) error {
 // is the exact set of hosts PlainAuth will authenticate to without TLS.
 func isLocalhostHost(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// isASCII reports whether s is entirely 7-bit ASCII.
+//
+// This deliberately duplicates email.IsASCII. internal/config CANNOT import
+// internal/email — internal/email imports internal/config, and reversing that
+// would invert the dependency. Extracting a shared leaf package for two callers
+// is more structure than they justify; promote it if a third appears. The two
+// copies must stay in lockstep: if they diverge, a value accepted at startup
+// could be rejected at send time, which is the permanently-unmailable state
+// #80 exists to remove.
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
+}
+
+// validateFromAddress enforces route 4 (#80). It MUST accept exactly what
+// internal/email's send-path check accepts, and nothing more.
+//
+// That is why it is not merely an isASCII call. cfg.Email.From reaches
+// c.Mail(m.cfg.From) (internal/email/smtp.go:187) as well as the From: header, and net/smtp
+// passes it through verbatim — measured, a display-name value produces the
+// malformed envelope `MAIL FROM:<DIYDDNS <noreply@example.com>>`, and a
+// trailing space produces `MAIL FROM:<noreply@example.com >`. net/smtp accepts
+// both without complaint; a real MTA does not. So a display-name email.from is
+// ALREADY broken today, just later and less legibly.
+//
+// If this check and internal/email's diverge, a From accepted at startup is
+// rejected at send and the deployment sends NOTHING while booting clean — the
+// permanently-unmailable state #80 exists to remove, moved from one account to
+// every message.
+//
+// FOLLOW-UP, deliberately out of scope: supporting a display name properly
+// means passing addr.Address to c.Mail while writing the full form into the
+// From: header. That is a feature; #80 is a boundary-rejection workstream. File
+// it, do not build it here.
+func validateFromAddress(from string) error {
+	addr, err := mail.ParseAddress(from)
+	if err != nil {
+		return fmt.Errorf("config: email.from is not a valid address: %w", err)
+	}
+	if !isASCII(addr.Address) {
+		return fmt.Errorf(`config: email.from must be 7-bit ASCII (outbound messages declare 7bit and cannot carry it), got %q`, from)
+	}
+	if addr.Address != from {
+		return fmt.Errorf(`config: email.from must be a bare address with no display name or surrounding whitespace, e.g. %q rather than %q — net/smtp passes it to MAIL FROM verbatim`, addr.Address, from)
+	}
+	return nil
 }
 
 // validateEmail enforces that an enabled email subsystem is actually usable.
@@ -268,6 +331,8 @@ func validateEmail(cfg Server) error {
 	// it and reject or spam-bin the message downstream, so it looks like success.
 	if cfg.Email.From == "" {
 		problems = append(problems, errors.New(`config: email.enabled requires email.from, e.g. "diyddns@example.com"`))
+	} else if err := validateFromAddress(cfg.Email.From); err != nil {
+		problems = append(problems, err)
 	}
 	switch cfg.Email.TLS {
 	case "starttls", "implicit", "none":

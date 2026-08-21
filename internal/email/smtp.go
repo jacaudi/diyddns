@@ -73,6 +73,22 @@ func (m *smtpMailer) Send(ctx context.Context, to, subject, body string) error {
 		return fmt.Errorf("email: context canceled before send: %w", err)
 	}
 
+	// The backstop, checked BEFORE dial so it costs no network I/O. The
+	// boundary validations (service/admin.go, service/bootstrap.go,
+	// service/oidc.go, config.validateEmail) are the primary defence; this
+	// catches anything already stored before those existed, and any route not
+	// yet enumerated.
+	//
+	// Failing here is deliberate and is the whole handling a bad stored address
+	// gets: callers treat a Send error as a delivery failure, so the operator
+	// gets an audit row (email.send_failed) and a visible failure, while the
+	// user keeps every non-email capability. No migration, no startup scan, no
+	// login rejection.
+	if err := checkSendable(m.cfg.From, to, subject, body); err != nil {
+		m.log.ErrorContext(ctx, "email.send failed", "host", m.cfg.Host, "to", to, "error", err)
+		return err
+	}
+
 	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
 	c, err := m.dial(ctx, addr)
 	if err != nil {
@@ -119,10 +135,10 @@ func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error
 	//
 	// The deadline comes from ctx (the caller's overall budget), NOT dialCtx:
 	// dialCtx expires at defaultDialTimeout, which would cut off a legitimate
-	// slow envelope. Callers are expected to supply a deadline; the only
-	// production caller today is GrantService.doSelfServiceRecovery, and both
-	// of its sends — the recovery link to the user and the notification to
-	// admins — run on the one bounded context it derives for that whole flow.
+	// slow envelope. Callers are expected to supply a deadline. The production
+	// callers are GrantService.deliver (both admin paths — invite and
+	// admin-issued recovery) and GrantService.doSelfServiceRecovery, and each
+	// runs its sends on one bounded context it derives for that whole flow.
 	//
 	// A SetDeadline failure is logged rather than returned: the conversation is
 	// then unbounded, which is worse than bounded but far better than refusing

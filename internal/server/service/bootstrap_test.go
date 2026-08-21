@@ -98,6 +98,49 @@ func TestBootstrapService_Startup_TokenPath_SetsHashAndEmitsToken(t *testing.T) 
 	}
 }
 
+func TestBeginClaim_RejectsNonASCIIEmail(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	if _, _, err := svc.BeginClaim(t.Context(), token, "josé@example.test"); !errors.Is(err, ErrBootstrapInvalidEmail) {
+		t.Fatalf("err = %v, want ErrBootstrapInvalidEmail", err)
+	}
+}
+
+// TestBootstrapService_FinishClaim_NormalizesTheAddress pins route 2's other
+// half of design §5.6/#80: BeginClaim's `if _, err := mail.ParseAddress(...)`
+// pattern was fixed to `normalized, err := ...; email = normalized`, but
+// nothing pinned it — deleting `email = normalized` and demoting
+// `normalized, err :=` to `_, err :=` left the whole suite green. Route 2
+// creates the FIRST admin: an unguarded regression here stores
+// "Bob <bob@x>" as the sole admin's address, and every admin mail to that
+// account fails forever, on the one account no other admin can repair.
+//
+// Uses newTestBootstrapServiceWithPasskeys, NOT newTestBootstrapService: the
+// latter passes nil passkeys, so BeginClaim would return
+// ErrWebAuthnUnavailable before ever reaching the email check, and this test
+// would pass for the wrong reason.
+func TestBootstrapService_FinishClaim_NormalizesTheAddress(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	rp := testRP()
+
+	u, err := driveClaim(t, svc, token, "Bob <bob@example.test>", "My Key", rp)
+	if err != nil {
+		t.Fatalf("driveClaim: %v", err)
+	}
+	if u.Email != "bob@example.test" {
+		t.Errorf("stored email = %q, want %q", u.Email, "bob@example.test")
+	}
+}
+
 func TestBootstrapService_Startup_TokenPath_PendingTokenNotReemitted(t *testing.T) {
 	st := openTestStore(t)
 	var calls int
