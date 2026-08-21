@@ -342,6 +342,24 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 
 	admins, err := s.st.Users().List(ctx)
 	if err != nil {
+		// Distinguish an exhausted budget from a genuine store failure. The
+		// canonical case is a stalled SMTP peer consuming the whole budget at
+		// the user's send above, after which this call fails on an already-dead
+		// context — and the old message pointed a debugger at a database that
+		// was perfectly healthy.
+		//
+		// errors.Is / ctx.Err(), never `err == context.DeadlineExceeded`:
+		// errorlint runs with comparison: true and rejects that form.
+		//
+		// Re-basing this tail on a fresh context so a slow first recipient
+		// cannot starve the admin notifications is #83b, deferred to its own
+		// design. This line stays useful afterwards: other causes of a dead
+		// context remain.
+		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			s.log.Error("self-service recovery: delivery budget exhausted before notifying admins; admins were NOT notified",
+				"err", err, "budget", s.selfServiceTimeout)
+			return
+		}
 		s.log.Error("self-service recovery: list admins failed", "err", err)
 		return
 	}

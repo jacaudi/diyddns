@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -910,4 +912,71 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNoti
 	// Two rows: one per failed send. With the admin site reverted to
 	// s.audit.Log(ctx, ...) only the first survives.
 	pollForAuditRows(t, st, EventEmailSendFailed, 2, 5*time.Second)
+}
+
+// syncBuffer is a bytes.Buffer safe for a slog handler on the detached
+// goroutine to write while the test reads it. The race detector flags an
+// unsynchronised bytes.Buffer here.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// pollForLog waits until buf contains want, or fails. The line is written by
+// the detached goroutine after the send returns, so polling is what makes this
+// deterministic.
+func pollForLog(t *testing.T, buf *syncBuffer, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("log never contained %q within %v; got:\n%s", want, timeout, buf.String())
+}
+
+// TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase is #83a.
+// A stalled peer consumes the whole budget at the user's send, so
+// Users().List(ctx) then fails on an already-dead context and the old line
+// pointed a future debugger at a database that is perfectly healthy.
+func TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	mailer := &fakeMailer{
+		enabled:   true,
+		sendErr:   errors.New("peer stalled"),
+		sendDelay: selfServiceTestTimeout + 100*time.Millisecond,
+		sendCh:    make(chan sentEmail, 4),
+	}
+	grants := NewGrantService(st, passkeys, mailer, "https://ddns.example.com", NewAuditWriter(st), log)
+	grants.selfServiceTimeout = selfServiceTestTimeout
+
+	u := seedUser(t, st, "alice@example.test", "user")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+
+	pollForLog(t, &buf, "delivery budget exhausted before notifying admins", 5*time.Second)
+	if got := buf.String(); strings.Contains(got, "list admins failed") {
+		t.Errorf("an exhausted budget must not be reported as a store failure; got:\n%s", got)
+	}
 }
