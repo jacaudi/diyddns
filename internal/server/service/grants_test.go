@@ -806,7 +806,7 @@ func TestDeliver_SurvivesCanceledRequestContext(t *testing.T) {
 // after the test's own call has returned. Polling is what makes that
 // deterministic; a fixed sleep would be flaky in exactly the direction that
 // hides a regression.
-func pollForAuditRows(t *testing.T, st *store.Store, eventType string, want int, timeout time.Duration) int {
+func pollForAuditRows(t *testing.T, st *store.Store, eventType string, want int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var got int
@@ -816,21 +816,27 @@ func pollForAuditRows(t *testing.T, st *store.Store, eventType string, want int,
 			t.Fatalf("ListPaginated: %v", err)
 		}
 		if got = len(page.Rows); got >= want {
-			return got
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("%s rows = %d after %v, want >= %d", eventType, got, timeout, want)
-	return got
 }
 
 // selfServiceTestTimeout is the shrunk budget the #81 tests run on. It is a
-// MEASUREMENT, not a guess: the pre-send work (GetByEmail,
-// CountWebAuthnCredentials, mintRecoveryGrant) was measured at 0.72-1.52ms under
-// -race on go1.25.13, so this is ~165x the worst observation. Too small a value
-// makes the flow stop BEFORE the send, which would pass for the wrong reason and
-// pin nothing.
+// MEASUREMENT, not a guess: on this branch, the pre-send work (GetByEmail,
+// CountWebAuthnCredentials, mintRecoveryGrant) was measured at 0.888-1.155ms
+// under -race on go1.25.13 (see the #81 commit body), so this is ~216x the
+// worst observation. Too small a value makes the flow stop BEFORE the send,
+// which would pass for the wrong reason and pin nothing.
 const selfServiceTestTimeout = 250 * time.Millisecond
+
+// selfServiceTestStall is how long fakeMailer sleeps in the #81/#83a tests
+// that need Send to outlast selfServiceTestTimeout. The margin (100ms) is the
+// shared knowledge across all three call sites: too small and a slow CI
+// runner could let Send return before the budget actually expires, which
+// would pass for the wrong reason and pin nothing.
+const selfServiceTestStall = selfServiceTestTimeout + 100*time.Millisecond
 
 // TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend
 // pins grants.go's FIRST doSelfServiceRecovery auditSendFailure call -- the one
@@ -856,7 +862,7 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend(
 		sendErr: errors.New("peer stalled"),
 		// Longer than the shrunk budget, so the send exhausts it and the
 		// auditSendFailure call runs on an already-dead context.
-		sendDelay: selfServiceTestTimeout + 100*time.Millisecond,
+		sendDelay: selfServiceTestStall,
 		sendCh:    make(chan sentEmail, 4),
 	}
 	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
@@ -872,6 +878,13 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend(
 	// The send was reached -- without this the test could pass by stopping early.
 	if sent := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout); sent.to != u.Email {
 		t.Fatalf("sent to %q, want %q", sent.to, u.Email)
+	}
+
+	// Pin the invariant directly: the same ctx Send just saw is the ctx
+	// auditSendFailure is about to be handed, so it must already be dead here
+	// -- not merely inferred from the row surviving downstream.
+	if err := mailer.LastCtxErr(); err == nil {
+		t.Fatal("Send saw ctx.Err() = nil, want a deadline error -- the budget must already be exhausted at the audit site")
 	}
 
 	pollForAuditRows(t, st, EventEmailSendFailed, 1, 5*time.Second)
@@ -892,7 +905,7 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNoti
 	mailer := &fakeMailer{
 		enabled:       true,
 		sendErr:       errors.New("peer stalled"),
-		sendDelay:     selfServiceTestTimeout + 100*time.Millisecond,
+		sendDelay:     selfServiceTestStall,
 		delayFromCall: 2, // send 1 (the user) is instant; send 2 (the admin) stalls
 		sendCh:        make(chan sentEmail, 4),
 	}
@@ -900,14 +913,26 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNoti
 	grants.selfServiceTimeout = selfServiceTestTimeout
 
 	u := seedUser(t, st, "alice@example.test", "user")
-	seedUser(t, st, "admin@example.test", "admin")
+	admin := seedUser(t, st, "admin@example.test", "admin")
 	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
 
 	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
 	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout) // the user send
-	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout) // the admin send -- proves the loop was REACHED
+	// The admin send -- proves the loop was REACHED and actually reached an
+	// admin, not merely that a second send of any kind occurred (a mutant that
+	// re-mails the user here would pass without this assertion).
+	if sent := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout); sent.to != admin.Email {
+		t.Fatalf("admin send went to %q, want %q", sent.to, admin.Email)
+	}
+
+	// Pin the invariant directly: the same ctx Send just saw is the ctx
+	// auditSendFailure is about to be handed, so it must already be dead here
+	// -- not merely inferred from two rows surviving downstream.
+	if err := mailer.LastCtxErr(); err == nil {
+		t.Fatal("Send saw ctx.Err() = nil, want a deadline error -- the budget must already be exhausted at the audit site")
+	}
 
 	// Two rows: one per failed send. With the admin site reverted to
 	// s.audit.Log(ctx, ...) only the first survives.
@@ -961,7 +986,7 @@ func TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase(t *testin
 	mailer := &fakeMailer{
 		enabled:   true,
 		sendErr:   errors.New("peer stalled"),
-		sendDelay: selfServiceTestTimeout + 100*time.Millisecond,
+		sendDelay: selfServiceTestStall,
 		sendCh:    make(chan sentEmail, 4),
 	}
 	grants := NewGrantService(st, passkeys, mailer, "https://ddns.example.com", NewAuditWriter(st), log)

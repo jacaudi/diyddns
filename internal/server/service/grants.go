@@ -151,9 +151,13 @@ type GrantService struct {
 	// survives a context the send has already exhausted (#81).
 	//
 	// It must always be set. A zero value makes context.WithTimeout return an
-	// already-expired context, so the goroutine would do nothing at all.
-	// NewGrantService is the only construction path in the tree and always sets
-	// it; never build a GrantService with a bare struct literal.
+	// already-expired context, so the goroutine would do nothing at all --
+	// and unlike a zero deliveryTimeout (which still surfaces through
+	// Delivery.Err to the admin UI), this failure mode has no diagnostic:
+	// no log line, no audit row, no send. Self-service recovery would stop
+	// working with zero observable signal. NewGrantService is the only
+	// construction path in the tree and always sets it; never build a
+	// GrantService with a bare struct literal.
 	selfServiceTimeout time.Duration
 }
 
