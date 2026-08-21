@@ -3351,3 +3351,58 @@ func TestAdminUserInvite_SendFailureStillShowsLink(t *testing.T) {
 		t.Errorf("the raw SMTP error leaked to the page:\n%s", body)
 	}
 }
+
+// TestAdminUserRecovery_DisabledTargetRendersSuppressedNote is the web UI's
+// counterpart to the API's TestAdminIssueRecovery_DisabledTargetReportsSuppressed
+// (internal/server/api/admin_test.go): it drives the real
+// handleAdminUserRecovery route — the production path for this feature — rather
+// than calling deliveryNote directly, matching the standard
+// TestAdminUserInvite_RendersDeliveryNote sets for the invite page ("proves the
+// note reaches the PAGE ... not merely that deliveryNote returns a string").
+//
+// The mailer is enabled (stubMailer{enabled: true}), mirroring the API test's
+// use of a fully-working mailer: that is what proves "disabled" wins over
+// "sent", not merely over "no mailer configured" (testDeps wires a nil mailer
+// by default, which would leave that ambiguous).
+func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
+	deps, st := testDeps(t)
+	audit := service.NewAuditWriter(st)
+	passkeys, err := service.NewPasskeyService(st, deps.Sessions, bytes.Repeat([]byte{0x24}, 32),
+		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit, deps.Log)
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin-disabled-recovery@example.com", "admin")
+	target := seedUser(t, st, "disabled-target@example.com", "user")
+	target.Disabled = true
+	if err := st.Users().Update(t.Context(), target); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "confirm_email": {target.Email}}
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/"+target.ID+"/recovery", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "This account is disabled") {
+		t.Errorf("recovery page does not show the suppressed note:\n%s", body)
+	}
+	if strings.Contains(body, "Email is not configured") {
+		t.Errorf("recovery page falsely claims email is unconfigured for a disabled target:\n%s", body)
+	}
+	if !strings.Contains(body, "/register?token=") {
+		t.Errorf("recovery link was NOT shown for a disabled target — it is the only way back in:\n%s", body)
+	}
+}

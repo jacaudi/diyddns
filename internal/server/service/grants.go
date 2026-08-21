@@ -86,6 +86,12 @@ type Delivery struct {
 	// and BOTH admin surfaces read it — deriving it per handler is how the
 	// original defect (a UI asserting something false) arose.
 	//
+	// Only meaningful when Attempted is false: a Delivery with Attempted true
+	// and Suppressed non-zero is a contradiction (something was both sent and
+	// suppressed) that no constructor in this package produces, but the type
+	// does not itself forbid it — callers reading Suppressed must check
+	// Attempted first, exactly as deliveryNote (webui/admin.go) does.
+	//
 	// Zero value = SuppressNone = today's behaviour.
 	Suppressed SuppressReason
 }
@@ -275,12 +281,18 @@ func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID st
 // RedeemBegin/RedeemFinish already apply, just earlier, before a dead link
 // is ever handed to an admin.
 //
-// It emails the link to u when the mailer is enabled. The returned Delivery is
-// advisory: a non-nil error means nothing was minted and nothing was sent, and
-// a nil error means the link is valid and the caller MUST present it, whatever
-// Delivery reports. A send failure is never this function's error — u's
-// passkeys are already revoked by then, so the on-screen link is the only thing
-// standing between u and a permanent lockout.
+// It emails the link to u when the mailer is enabled AND u is not disabled;
+// a disabled u still gets the link minted and returned, just not mailed (#82
+// below). The returned Delivery is advisory: a non-nil error means nothing
+// was minted and nothing was sent, and a nil error means the link is valid
+// and the caller MUST present it, whatever Delivery reports. A send failure
+// is never this function's error — u's passkeys are already revoked by then,
+// so the on-screen link is the only thing standing between u and a permanent
+// lockout.
+//
+// The self-service path (doSelfServiceRecovery) has no equivalent Disabled
+// check and still emails a recovery link to a disabled account; that gap is
+// out of scope for #82 and is not fixed here.
 func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u store.User) (string, Delivery, error) {
 	if s.passkeys == nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", ErrWebAuthnUnavailable)
