@@ -1,13 +1,16 @@
 package service
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +33,7 @@ func testRP() virtualwebauthn.RelyingParty {
 func newTestPasskeyService(t *testing.T, st *store.Store, audit AuditSink) *PasskeyService {
 	t.Helper()
 	cfg := config.WebAuthnCfg{RPDisplayName: "Test", Timeout: 2 * time.Minute}
-	svc, err := NewPasskeyService(st, newTestSessionManager(st), testKey32(), cfg, "localhost", "http://localhost:8080", audit)
+	svc, err := NewPasskeyService(st, newTestSessionManager(st), testKey32(), cfg, "localhost", "http://localhost:8080", audit, discardLogger())
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
@@ -395,4 +398,72 @@ func TestPasskeyService_Remove_LastCredentialGuard(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVerifyRegistration_LogsTheCauseButDoesNotReturnIt pins both halves of the
+// #78 fix: the returned error stays the uniform ErrPasskeyVerification (a
+// security property — callers must not learn which check failed), while the
+// underlying go-webauthn cause is written to the server log, so the next person
+// diagnosing a 401 does not have to patch the binary.
+func TestVerifyRegistration_LogsTheCauseButDoesNotReturnIt(t *testing.T) {
+	st := openTestStore(t)
+	var buf lockedBuffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	cfg := config.WebAuthnCfg{RPDisplayName: "DIYDDNS"}
+	svc, err := NewPasskeyService(st, newTestSessionManager(st), testKey32(), cfg,
+		"localhost", "http://localhost:8080", discardAudit{}, log)
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+
+	// An empty JSON body cannot parse as an attestation response, so
+	// FinishRegistration fails with a real, specific go-webauthn error.
+	// jsonRequest is this file's own existing helper (passkey_test.go:42).
+	r := jsonRequest("{}")
+	_, err = svc.verifyRegistration("user@example.test", []byte("handle"), webauthn.SessionData{}, r)
+
+	if !errors.Is(err, ErrPasskeyVerification) {
+		t.Fatalf("err = %v, want ErrPasskeyVerification", err)
+	}
+	// The sentinel must be returned BARE. errors.Is unwraps, so it alone
+	// cannot see a cause that has been %w-wrapped into the returned error --
+	// which is precisely the leak this test exists to prevent. Compare
+	// identity as well.
+	if err != ErrPasskeyVerification { //nolint:errorlint // intentional: proving err is NOT wrapped, so errors.Is would defeat the point
+		t.Errorf("err must be the bare sentinel, not wrapped: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "passkey registration verification failed") {
+		t.Errorf("log does not record the cause; got:\n%s", got)
+	}
+	// The message alone proves nothing: a handler that logs the message with
+	// no error attribute at all would satisfy the Contains check above and
+	// still leak zero diagnostic information. Pin the cause itself -- the
+	// go-webauthn error text attached as the "error" attribute -- so a
+	// mutant that drops slog.String("error", ...) while keeping the message
+	// is caught here.
+	if !strings.Contains(got, `error="Parse error for Registration"`) {
+		t.Errorf("log does not record the cause as an error attribute; got:\n%s", got)
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe for a slog handler to write while the
+// test reads it. slog handlers may be called from other goroutines, and the
+// race detector flags an unsynchronised bytes.Buffer.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

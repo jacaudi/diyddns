@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -256,7 +257,7 @@ func field(t *testing.T, s, pattern string) string {
 
 // --- HTTP -----------------------------------------------------------------
 
-func postJSON(t *testing.T, c *http.Client, url string, body any, csrf string) (int, []byte) {
+func postJSON(t *testing.T, c *http.Client, rawURL string, body any, csrf string) (int, []byte) {
 	t.Helper()
 	var raw []byte
 	if body != nil {
@@ -265,12 +266,12 @@ func postJSON(t *testing.T, c *http.Client, url string, body any, csrf string) (
 			t.Fatalf("marshal body: %v", err)
 		}
 	}
-	return postRaw(t, c, url, string(raw), csrf)
+	return postRaw(t, c, rawURL, string(raw), csrf)
 }
 
-func postRaw(t *testing.T, c *http.Client, url, body, csrf string) (int, []byte) {
+func postRaw(t *testing.T, c *http.Client, rawURL, body, csrf string) (int, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -280,26 +281,26 @@ func postRaw(t *testing.T, c *http.Client, url, body, csrf string) (int, []byte)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
+		t.Fatalf("POST %s: %v", rawURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read %s: %v", url, err)
+		t.Fatalf("read %s: %v", rawURL, err)
 	}
 	return resp.StatusCode, out
 }
 
-func get(t *testing.T, c *http.Client, url string) (int, []byte) {
+func get(t *testing.T, c *http.Client, rawURL string) (int, []byte) {
 	t.Helper()
-	resp, err := c.Get(url)
+	resp, err := c.Get(rawURL)
 	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
+		t.Fatalf("GET %s: %v", rawURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read %s: %v", url, err)
+		t.Fatalf("read %s: %v", rawURL, err)
 	}
 	return resp.StatusCode, out
 }
@@ -326,4 +327,59 @@ func mergeField(t *testing.T, obj, key, val string) string {
 	}
 	inner := strings.TrimSuffix(strings.TrimPrefix(string(kv), "{"), "}")
 	return fmt.Sprintf("%s,%s}", strings.TrimSuffix(trimmed, "}"), inner)
+}
+
+// --- cookies ---------------------------------------------------------------
+
+// browserJar wraps a cookie jar so a plain-HTTP localhost origin counts as a
+// secure context, which is what every browser does and what this harness must
+// stand in for.
+//
+// Go's own net/http/cookiejar only adopted that rule in 1.26 (entry.secureMatch:
+// "Localhost is considered a secure origin regardless of protocol, matching
+// browser behavior"). Under the repo's pinned GOTOOLCHAIN=go1.25.13 the jar
+// STORES a Secure cookie set over http://localhost and then never sends it, so
+// the WebAuthn ceremony's sealed challenge cookie never reaches
+// /register/finish and every claim collapses to a uniform 401 (issue #78).
+//
+// Wrapping the jar rather than setting cookie_secure=false keeps the suite
+// running against the shipped config.example.yaml defaults, and makes it
+// toolchain-independent by construction.
+type browserJar struct{ inner http.CookieJar }
+
+func (j browserJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.inner.SetCookies(secureContextURL(u), cookies)
+}
+
+func (j browserJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.inner.Cookies(secureContextURL(u))
+}
+
+// secureContextURL returns u with its scheme rewritten to https when u is a
+// plain-HTTP localhost origin, and u unchanged otherwise. Only the scheme
+// changes, so the jar's host, path and domain matching are untouched.
+//
+// There is deliberately no loopback-IP branch: browserBaseURL always builds
+// "http://localhost:PORT", so no URL in this harness ever carries the bound
+// 127.0.0.1 address. Add one only when a caller actually needs it.
+func secureContextURL(u *url.URL) *url.URL {
+	if u.Scheme != "http" || u.Hostname() != "localhost" {
+		return u
+	}
+	secure := *u
+	secure.Scheme = "https"
+	return &secure
+}
+
+// newBrowserJar returns a cookie jar with browser-parity secure-context
+// handling for localhost. Every harness HTTP client must use it: the WebAuthn
+// ceremony carries its sealed challenge between begin and finish in a Secure
+// cookie.
+func newBrowserJar(t *testing.T) http.CookieJar {
+	t.Helper()
+	inner, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar: %v", err)
+	}
+	return browserJar{inner: inner}
 }

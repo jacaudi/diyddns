@@ -92,6 +92,16 @@ auth:
     # SILENTLY DISCARD the session cookie and every login will appear to
     # fail. If you are testing off-box over plain HTTP, set this to false;
     # otherwise put TLS in front and leave it true.
+    #
+    # The same rule governs the WebAuthn ceremony cookies
+    # (internal/server/api/passkey.go, passkeyChallengeCookie), and it has one
+    # more consequence for NON-BROWSER clients: a scripted HTTP client talking
+    # plain HTTP to a cookie_secure: true deployment must implement the
+    # localhost secure-context exemption itself, or it will store these cookies
+    # and never send them — and the ceremony then fails with an opaque 401.
+    # Go's own net/http/cookiejar only gained that exemption in Go 1.26. If you
+    # script against this server over plain HTTP, either wrap your cookie jar or
+    # set this to false for that environment.
     cookie_secure: true
 
     # Default "lax". NOTE: currently inert — sessionCookie hardcodes

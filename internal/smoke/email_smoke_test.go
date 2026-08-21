@@ -4,7 +4,6 @@ package smoke
 
 import (
 	"net/http"
-	"net/http/cookiejar"
 	"strconv"
 	"strings"
 	"testing"
@@ -44,12 +43,9 @@ func TestAdminInviteIsEmailed(t *testing.T) {
 	token := scrapeToken(t, srv)
 
 	// The cookie jar is mandatory: the WebAuthn ceremony carries its sealed
-	// challenge between begin and finish in a cookie.
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookiejar: %v", err)
-	}
-	client := &http.Client{Jar: jar, Timeout: 30 * time.Second}
+	// challenge between begin and finish in a cookie, and that cookie is Secure
+	// under the shipped defaults — see newBrowserJar.
+	client := &http.Client{Jar: newBrowserJar(t), Timeout: 30 * time.Second}
 
 	rp := virtualwebauthn.RelyingParty{Name: "DIYDDNS", ID: rpIDFor(t, addr), Origin: baseURL}
 	attOpts := beginClaim(t, client, baseURL, token)

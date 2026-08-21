@@ -17,6 +17,18 @@ tasks:
       - task: lint
       - task: vuln
       - task: test
+      # The leading colon is load-bearing: test:e2e lives in the ROOT
+      # taskfile.yml while this file is an include, and a reference back to the
+      # root requires it. Without the colon Task fails hard with
+      # 'Task "go:test:e2e" does not exist'.
+      #
+      # The vars: form is also load-bearing. `- task: :test:e2e` on its own runs
+      # and keeps the toolchain pin, but SILENTLY DROPS the flag, so CI would
+      # make real outbound calls to public IP-discovery providers on every run.
+      # Measured on Task 3.51.1: vars: => CLI_ARGS=[-skip-discovery]; bare =>
+      # CLI_ARGS=[].
+      - task: :test:e2e
+        vars: {CLI_ARGS: "-skip-discovery"}
 
   lint:
     desc: golangci-lint

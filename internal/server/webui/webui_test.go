@@ -62,7 +62,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	key := bytes.Repeat([]byte{0x24}, 32)
 
 	audit := service.NewAuditWriter(st)
-	passkeys, err := service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, "localhost", "http://localhost", audit)
+	passkeys, err := service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, "localhost", "http://localhost", audit, log)
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
@@ -2642,7 +2642,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 	// services that depend on it with an empty base.
 	audit := service.NewAuditWriter(st)
 	passkeys, err := service.NewPasskeyService(st, deps.Sessions, bytes.Repeat([]byte{0x24}, 32),
-		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit)
+		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit, deps.Log)
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
@@ -3267,7 +3267,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 	deps, st := testDeps(t)
 	audit := service.NewAuditWriter(st)
 	passkeys, err := service.NewPasskeyService(st, deps.Sessions, bytes.Repeat([]byte{0x24}, 32),
-		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit)
+		deps.Cfg.Auth.WebAuthn, "localhost", "http://localhost", audit, deps.Log)
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
