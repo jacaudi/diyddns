@@ -145,6 +145,20 @@ type GrantService struct {
 	// the only construction path in the tree and always sets it; never build a
 	// GrantService with a bare struct literal.
 	deliveryTimeout time.Duration
+	// selfServiceTimeout bounds doSelfServiceRecovery's detached goroutine (see
+	// selfServiceRecoveryTimeout). It is a field for exactly the reason
+	// deliveryTimeout is: so a test can shrink it and prove the audit write
+	// survives a context the send has already exhausted (#81).
+	//
+	// It must always be set. A zero value makes context.WithTimeout return an
+	// already-expired context, so the goroutine would do nothing at all --
+	// and unlike a zero deliveryTimeout (which still surfaces through
+	// Delivery.Err to the admin UI), this failure mode has no diagnostic:
+	// no log line, no audit row, no send. Self-service recovery would stop
+	// working with zero observable signal. NewGrantService is the only
+	// construction path in the tree and always sets it; never build a
+	// GrantService with a bare struct literal.
+	selfServiceTimeout time.Duration
 }
 
 // NewGrantService constructs a GrantService. passkeys may be nil if WebAuthn
@@ -154,7 +168,8 @@ type GrantService struct {
 func NewGrantService(st *store.Store, passkeys *PasskeyService, mailer email.Mailer, baseURL string, audit AuditSink, log *slog.Logger) *GrantService {
 	return &GrantService{
 		st: st, passkeys: passkeys, mailer: mailer, baseURL: baseURL, audit: audit, log: log,
-		deliveryTimeout: adminDeliveryTimeout,
+		deliveryTimeout:    adminDeliveryTimeout,
+		selfServiceTimeout: selfServiceRecoveryTimeout,
 	}
 }
 
@@ -301,7 +316,7 @@ func (s *GrantService) RequestSelfServiceRecovery(_ context.Context, targetEmail
 // body — see that method's doc comment for why it must never run on the
 // caller's path.
 func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
-	ctx, cancel := context.WithTimeout(context.Background(), selfServiceRecoveryTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.selfServiceTimeout)
 	defer cancel()
 
 	if s.mailer == nil || !s.mailer.Enabled() {
@@ -331,6 +346,24 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 
 	admins, err := s.st.Users().List(ctx)
 	if err != nil {
+		// Distinguish an exhausted budget from a genuine store failure. The
+		// canonical case is a stalled SMTP peer consuming the whole budget at
+		// the user's send above, after which this call fails on an already-dead
+		// context — and the old message pointed a debugger at a database that
+		// was perfectly healthy.
+		//
+		// errors.Is / ctx.Err(), never `err == context.DeadlineExceeded`:
+		// errorlint runs with comparison: true and rejects that form.
+		//
+		// Re-basing this tail on a fresh context so a slow first recipient
+		// cannot starve the admin notifications is #83b, deferred to its own
+		// design. This line stays useful afterwards: other causes of a dead
+		// context remain.
+		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			s.log.Error("self-service recovery: delivery budget exhausted before notifying admins; admins were NOT notified",
+				"err", err, "budget", s.selfServiceTimeout)
+			return
+		}
 		s.log.Error("self-service recovery: list admins failed", "err", err)
 		return
 	}
