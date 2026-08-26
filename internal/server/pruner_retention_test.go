@@ -1,14 +1,43 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
+
+// capturingLog returns a logger that writes to an in-memory buffer instead of
+// discarding output, so a test can assert on the exact lines emitted.
+// pruner_test.go's discardLog() throws output away, which is the right
+// default everywhere except here.
+func capturingLog() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
+}
+
+// openFileTestStore is openTestStore's file-backed counterpart. Use it only
+// where a test deliberately cancels a context mid-query — see
+// TestPrune_AuditSurvivesCancelMidSweep for why ":memory:" cannot survive
+// that.
+func openFileTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 // seedRetentionDevice creates a user and a device, then appends one ip_history
 // row per entry of observedAt IN SLICE ORDER, so a caller controls the
@@ -450,5 +479,128 @@ func TestPrune_NoAuditEventWhenNothingDeleted(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("retention.prune events = %d, want 0", count)
+	}
+}
+
+// TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings (S2) pins the
+// cancellation-noise hazard: pruneIPHistory used to have no ctx.Err() check,
+// so a cancelled context relied entirely on each device's DB call failing —
+// one "prune ip_history failed" WARN line per remaining device. Reviewer
+// measured 194 lines for 200 devices in production; those bury the S1 audit
+// line that actually matters.
+//
+// Cancelling ctx BEFORE the sweep starts does not reproduce the bug: ListAll
+// itself would refuse the already-cancelled ctx and log one unrelated "list
+// devices failed" line without ever entering the per-device loop. The bug
+// only shows up when cancellation lands mid-sweep — after ListAll has already
+// returned devices — so this test starts the sweep in a goroutine over many
+// devices (forcing the sweep to take measurable wall-clock time) and cancels
+// shortly after, the same real-time-cancellation pattern already used by
+// TestRunPruner_StopsOnContextCancel above. It is not perfectly deterministic
+// (a sufficiently loaded CI box could complete the sweep before the cancel
+// fires), but numDevices and pruneBatchSize=1 are sized so that is very
+// unlikely: every device needs multiple round trips, so a full sweep takes far
+// longer than the 2ms delay before cancel() below.
+func TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings(t *testing.T) {
+	st := openTestStore(t)
+	const numDevices = 100
+	for i := range numDevices {
+		seedRetentionDevice(t, st, fmt.Sprintf("cancel-%03d", i), []int64{100, 200, 300})
+	}
+
+	old := pruneBatchSize
+	pruneBatchSize = 1
+	t.Cleanup(func() { pruneBatchSize = old })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	log, buf := capturingLog()
+
+	done := make(chan struct{})
+	go func() {
+		pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, log)
+		close(done)
+	}()
+
+	time.Sleep(2 * time.Millisecond) // let the sweep get underway before cutting it off
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pruneRetention did not return within 5s of ctx cancellation")
+	}
+
+	n := strings.Count(buf.String(), "prune ip_history failed")
+	if n > 1 {
+		t.Errorf("\"prune ip_history failed\" logged %d times for %d devices, want at most 1 (ctx.Err() must short-circuit the remaining devices); log:\n%s", n, numDevices, buf.String())
+	}
+}
+
+// TestPrune_AuditSurvivesCancelMidSweep (S1) reproduces the shutdown hazard:
+// a SIGTERM lands mid-sweep, deletions have already autocommitted, and the
+// retention.prune audit Append — described in prune()'s own comment as "the
+// only durable record that deletion happened" — inherited the pruner's
+// cancellable ctx, so it was the FIRST thing to fail. Reviewer reproduction:
+// 100 rows deleted, 0 audit rows written, "context canceled".
+//
+// Same real-time-cancellation pattern as
+// TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings just above: enough
+// devices/rows that the sweep takes measurable wall-clock time, cancelled
+// shortly after it starts. A context already cancelled BEFORE the sweep began
+// would never reach this code path at all (nothing would be deleted, so the
+// ipRows+auditRows>0 guard in prune() would skip the Append entirely) — the
+// defect only shows up when cancellation lands after some deletion has
+// already committed, which is exactly what "mid-sweep" means.
+//
+// Uses a temp-file-backed store, NOT openTestStore's ":memory:" DSN. Measured
+// cause: when a cancelled ctx makes a query fail, database/sql sometimes
+// discards that pooled connection as bad and opens a replacement on the next
+// call. For ":memory:" with no shared-cache DSN, the replacement connection is
+// a brand-new, empty database — the whole schema silently vanishes mid-test
+// ("no such table: ip_history"), which is a property of the :memory: test
+// fixture, not of the fix. A file on disk survives a connection swap.
+func TestPrune_AuditSurvivesCancelMidSweep(t *testing.T) {
+	st := openFileTestStore(t)
+	const numDevices = 100
+	for i := range numDevices {
+		seedRetentionDevice(t, st, fmt.Sprintf("audit-%03d", i), []int64{100, 200, 300})
+	}
+
+	old := pruneBatchSize
+	pruneBatchSize = 1
+	t.Cleanup(func() { pruneBatchSize = old })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	log, buf := capturingLog()
+
+	done := make(chan struct{})
+	go func() {
+		prune(ctx, st, config.RetentionSection{IPHistoryDays: 1}, log)
+		close(done)
+	}()
+
+	time.Sleep(2 * time.Millisecond) // let the sweep delete something before cutting it off
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prune did not return within 5s of ctx cancellation")
+	}
+
+	remaining := 0
+	for i := range numDevices {
+		remaining += ipHistoryCount(t, st, fmt.Sprintf("audit-%03d", i))
+	}
+	if remaining == numDevices*3 {
+		t.Skip("watcher never observed a committed batch before cancel() fired — cannot exercise mid-sweep cancellation this run")
+	}
+
+	auditRows := auditLogCount(t, st)
+	if auditRows != 1 {
+		t.Errorf("audit_log rows with event_type=retention.prune = %d, want exactly 1 (a shutdown mid-sweep must not cost the audit record); log:\n%s", auditRows, buf.String())
+	}
+	if strings.Contains(buf.String(), "append retention.prune audit event failed") {
+		t.Errorf("audit Append failed despite deletions having committed; log:\n%s", buf.String())
 	}
 }

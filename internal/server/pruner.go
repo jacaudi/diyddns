@@ -81,7 +81,15 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 		// failure: every other audit writer goes through service.AuditSink,
 		// which discards Append errors by design, but prune() has no AuditSink
 		// and this row is the only durable record that deletion happened.
-		if _, err := st.AuditLog().Append(ctx, store.AuditEntry{EventType: "retention.prune"}); err != nil {
+		//
+		// The ctx passed to Append is deliberately detached from cancellation
+		// (context.WithoutCancel): the deletions above have already
+		// autocommitted by the time we get here, so a shutdown landing right
+		// now would otherwise make the audit record — the one thing meant to
+		// survive as proof — the first casualty of the same signal that did
+		// nothing to the data itself. Do not "simplify" this back to ctx.
+		auditCtx := context.WithoutCancel(ctx)
+		if _, err := st.AuditLog().Append(auditCtx, store.AuditEntry{EventType: "retention.prune"}); err != nil {
 			log.LogAttrs(ctx, slog.LevelWarn, "append retention.prune audit event failed", slog.Any("error", err))
 		}
 	}
@@ -139,6 +147,14 @@ func pruneIPHistory(ctx context.Context, st *store.Store, ret config.RetentionSe
 	}
 	var deleted int
 	for _, dev := range devices {
+		// A cancelled ctx would otherwise only surface once each remaining
+		// device's DB call fails — one Warn line apiece (194 lines for 200
+		// devices, measured). Stop starting new devices as soon as the sweep
+		// is cancelled; the device already in flight (if any) still gets to
+		// report its own failure below.
+		if ctx.Err() != nil {
+			break
+		}
 		for {
 			n, err := st.IPHistory().Prune(ctx, dev.ID, olderThan, ret.IPHistoryPerDeviceMax, pruneBatchSize)
 			if err != nil {
