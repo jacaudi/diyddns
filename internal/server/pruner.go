@@ -57,11 +57,16 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 	if err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "prune oidc_device_flows failed", slog.Any("error", err))
 	}
+	recovery, err := st.AccountRecovery().PruneExpired(ctx, now)
+	if err != nil {
+		log.LogAttrs(ctx, slog.LevelWarn, "prune account_recovery_tokens failed", slog.Any("error", err))
+	}
 
 	log.LogAttrs(ctx, slog.LevelDebug, "pruned expired records",
 		slog.Int("replay_nonces", nonces),
 		slog.Int("sessions", sessions),
 		slog.Int("enrollment_codes", codes),
 		slog.Int("oidc_device_flows", flows),
+		slog.Int("account_recovery", recovery),
 	)
 }

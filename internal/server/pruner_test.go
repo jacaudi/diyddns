@@ -135,3 +135,34 @@ func TestNew_WiresRetentionIntoTheServer(t *testing.T) {
 		t.Errorf("Server.retention = %+v, want %+v — retention never reaches runPruner", srv.retention, cfg.Retention)
 	}
 }
+
+// TestPrune_SweepsExpiredAccountRecoveryTokens confirms step 5 runs even with
+// retention fully disabled — it is expiry hygiene, not operator policy.
+func TestPrune_SweepsExpiredAccountRecoveryTokens(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+
+	u, err := st.Users().Create(ctx, store.User{Email: "ar-prune@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("Users().Create: %v", err)
+	}
+	past := store.NowUnix() - 3600
+	// AccountRecoveryRepo.Create returns only an error, not the token.
+	if err := st.AccountRecovery().Create(ctx, store.RecoveryToken{
+		UserID: u.ID, TokenHash: "expired-recovery", ExpiresAt: past,
+	}); err != nil {
+		t.Fatalf("AccountRecovery().Create: %v", err)
+	}
+
+	prune(ctx, st, config.RetentionSection{}, discardLog())
+
+	var n int
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM account_recovery_tokens WHERE token_hash = ?`, "expired-recovery",
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expired recovery token survived prune(), count = %d, want 0", n)
+	}
+}
