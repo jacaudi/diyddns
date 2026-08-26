@@ -75,6 +75,18 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		log.LogAttrs(context.Background(), slog.LevelWarn, w)
 	}
 
+	// Retention deletes user-visible history irreversibly and is opt-in, so say
+	// at boot that it is on and with what windows. This is the cheapest safety
+	// net there is: it makes a first sweep attributable after the fact instead
+	// of a mystery, and it costs nothing on the default (all-zero) config.
+	if cfg.Retention != (config.RetentionSection{}) {
+		log.LogAttrs(context.Background(), slog.LevelWarn, "retention enabled: matching rows will be permanently deleted",
+			slog.Int("ip_history_days", cfg.Retention.IPHistoryDays),
+			slog.Int("ip_history_per_device_max", cfg.Retention.IPHistoryPerDeviceMax),
+			slog.Int("audit_log_days", cfg.Retention.AuditLogDays),
+		)
+	}
+
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Auth.Session.TTL, cfg.Auth.Session.SlideWindow)
 
