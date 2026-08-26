@@ -27,8 +27,11 @@ func capturingLog() (*slog.Logger, *bytes.Buffer) {
 // openFileTestStore is openTestStore's file-backed counterpart. Use it only
 // where a test deliberately cancels a context mid-query — see
 // TestPrune_AuditSurvivesCancelMidSweep for why ":memory:" cannot survive
-// that.
-func openFileTestStore(t *testing.T) *store.Store {
+// that. It also returns the file path, so a caller can open a second,
+// independent *sql.DB handle on the same WAL-mode file (e.g. to watch
+// committed rows without contending with the store's single connection —
+// store.Open sets SetMaxOpenConns(1)).
+func openFileTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(context.Background(), path)
@@ -36,7 +39,7 @@ func openFileTestStore(t *testing.T) *store.Store {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return st
+	return st, path
 }
 
 // seedRetentionDevice creates a user and a device, then appends one ip_history
@@ -543,14 +546,19 @@ func TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings(t *testing.T) {
 // cancellable ctx, so it was the FIRST thing to fail. Reviewer reproduction:
 // 100 rows deleted, 0 audit rows written, "context canceled".
 //
-// Same real-time-cancellation pattern as
-// TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings just above: enough
-// devices/rows that the sweep takes measurable wall-clock time, cancelled
-// shortly after it starts. A context already cancelled BEFORE the sweep began
-// would never reach this code path at all (nothing would be deleted, so the
-// ipRows+auditRows>0 guard in prune() would skip the Append entirely) — the
-// defect only shows up when cancellation lands after some deletion has
-// already committed, which is exactly what "mid-sweep" means.
+// Cancellation is driven off OBSERVED STATE, not the wall clock: a second,
+// independent *sql.DB handle on the same file polls ip_history's row count
+// until it has dropped below the seeded total, proving at least one batch
+// has committed, and only then calls cancel(). A wall-clock sleep (the
+// pattern TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings still
+// uses, safely — see its own comment) raced ListAll under -race and lost:
+// the cancel consistently landed before ListAll even ran, so nothing was
+// ever deleted and the assertion below failed every time with "list devices
+// failed: context canceled" rather than proving anything about the fix.
+// numDevices*pruneBatchSize=1 means the sweep needs hundreds more round
+// trips after the first observed commit before it could reach Append, so
+// "some progress observed" and "still mid-sweep" coincide with enormous
+// margin — there is no timing window left to race.
 //
 // Uses a temp-file-backed store, NOT openTestStore's ":memory:" DSN. Measured
 // cause: when a cancelled ctx makes a query fail, database/sql sometimes
@@ -558,17 +566,33 @@ func TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings(t *testing.T) {
 // call. For ":memory:" with no shared-cache DSN, the replacement connection is
 // a brand-new, empty database — the whole schema silently vanishes mid-test
 // ("no such table: ip_history"), which is a property of the :memory: test
-// fixture, not of the fix. A file on disk survives a connection swap.
+// fixture, not of the fix. A file on disk survives a connection swap, and a
+// file is also what makes the second polling handle possible in the first
+// place.
 func TestPrune_AuditSurvivesCancelMidSweep(t *testing.T) {
-	st := openFileTestStore(t)
+	st, path := openFileTestStore(t)
 	const numDevices = 100
 	for i := range numDevices {
 		seedRetentionDevice(t, st, fmt.Sprintf("audit-%03d", i), []int64{100, 200, 300})
 	}
+	const totalRows = numDevices * 3
 
 	old := pruneBatchSize
 	pruneBatchSize = 1
 	t.Cleanup(func() { pruneBatchSize = old })
+
+	// A second handle on the same file, independent of the store's own
+	// single-connection pool (store.Open sets SetMaxOpenConns(1)), so
+	// polling it never contends with the sweep for that one connection.
+	watcher, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open watcher handle: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+	watcher.SetMaxOpenConns(1)
+	if _, err := watcher.ExecContext(t.Context(), "PRAGMA busy_timeout = 5000"); err != nil {
+		t.Fatalf("watcher busy_timeout: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	log, buf := capturingLog()
@@ -579,21 +603,30 @@ func TestPrune_AuditSurvivesCancelMidSweep(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(2 * time.Millisecond) // let the sweep delete something before cutting it off
+	// Poll until at least one batch has committed, THEN cancel — this is what
+	// makes cancellation land mid-sweep deterministically instead of racing
+	// the wall clock.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var remaining int
+		if err := watcher.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM ip_history`).Scan(&remaining); err != nil {
+			t.Fatalf("watch ip_history count: %v", err)
+		}
+		if remaining < totalRows {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no ip_history row committed within 5s; sweep never got underway")
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
 	cancel()
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("prune did not return within 5s of ctx cancellation")
-	}
-
-	remaining := 0
-	for i := range numDevices {
-		remaining += ipHistoryCount(t, st, fmt.Sprintf("audit-%03d", i))
-	}
-	if remaining == numDevices*3 {
-		t.Skip("watcher never observed a committed batch before cancel() fired — cannot exercise mid-sweep cancellation this run")
 	}
 
 	auditRows := auditLogCount(t, st)
