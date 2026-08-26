@@ -448,6 +448,7 @@ var knownEventTypes = []string{
 	service.EventEmailSendFailed,
 	"passkey.invite_issued", "passkey.recovery_issued", "passkey.recovery_redeemed",
 	"passkey.registered", "passkey.removed", "passkey.renamed", "passkey.signcount_anomaly",
+	"retention.prune",
 	"session.revoked",
 	"user.created", "user.deleted", "user.disabled", "user.enabled",
 	"user.login.oidc", "user.login.passkey", "user.logout",

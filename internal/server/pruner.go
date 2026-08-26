@@ -75,6 +75,16 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 	}
 
 	ipRows, auditRows := pruneRetention(ctx, st, ret, log)
+	if ipRows+auditRows > 0 {
+		// The empty actor is the established encoding for a system event; the
+		// web UI renders it as "system". Logged rather than swallowed on
+		// failure: every other audit writer goes through service.AuditSink,
+		// which discards Append errors by design, but prune() has no AuditSink
+		// and this row is the only durable record that deletion happened.
+		if _, err := st.AuditLog().Append(ctx, store.AuditEntry{EventType: "retention.prune"}); err != nil {
+			log.LogAttrs(ctx, slog.LevelWarn, "append retention.prune audit event failed", slog.Any("error", err))
+		}
+	}
 
 	log.LogAttrs(ctx, slog.LevelDebug, "pruned expired records",
 		slog.Int("replay_nonces", nonces),

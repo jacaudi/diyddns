@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 
@@ -395,5 +396,59 @@ func TestPruneRetention_ListAllFailureStillPrunesAuditLog(t *testing.T) {
 	}
 	if auditRows != 4 {
 		t.Errorf("auditRows = %d, want 4 (the audit_log pass must still run)", auditRows)
+	}
+}
+
+// TestPrune_EmitsRetentionAuditEvent: exactly one event per sweep that deleted
+// something, with an empty actor and no details_json.
+func TestPrune_EmitsRetentionAuditEvent(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	seedRetentionDevice(t, st, "auditevent",
+		[]int64{1000, 900, 800, 700, 600, 500, 400, 300, 200, 100})
+
+	prune(ctx, st, config.RetentionSection{IPHistoryPerDeviceMax: 5}, discardLog())
+
+	var count int
+	var actor, details sql.NullString
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE event_type = ?`, "retention.prune",
+	).Scan(&count); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("retention.prune events = %d, want exactly 1", count)
+	}
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT actor_user_id, details_json FROM audit_log WHERE event_type = ?`, "retention.prune",
+	).Scan(&actor, &details); err != nil {
+		t.Fatalf("read event: %v", err)
+	}
+	if actor.Valid && actor.String != "" {
+		t.Errorf("actor_user_id = %q, want empty (the web UI renders that as \"system\")", actor.String)
+	}
+	if details.Valid && details.String != "" {
+		t.Errorf("details_json = %q, want empty — the column has no readers", details.String)
+	}
+}
+
+// TestPrune_NoAuditEventWhenNothingDeleted: a sweep that deletes nothing writes
+// no event, so an idle server does not accrue an hourly row.
+func TestPrune_NoAuditEventWhenNothingDeleted(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	seedRetentionDevice(t, st, "noevent", []int64{100, 200, 300})
+
+	// Retention fully disabled: nothing is eligible.
+	prune(ctx, st, config.RetentionSection{}, discardLog())
+
+	var count int
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE event_type = ?`, "retention.prune",
+	).Scan(&count); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("retention.prune events = %d, want 0", count)
 	}
 }
