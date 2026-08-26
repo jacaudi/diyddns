@@ -301,7 +301,7 @@ func TestIPHistoryPruneByAgeKeepsLatest(t *testing.T) {
 	// olderThan=250 → rows at 100 and 200 are candidates. perDeviceMax=0 → no cap.
 	// MAX(id) is the row with ts=300, excluded from deletion by NOT IN clause.
 	// So rows 100 and 200 are deleted. Returns 2.
-	deleted, err := s.IPHistory().Prune(ctx, d.ID, 250, 0)
+	deleted, err := s.IPHistory().Prune(ctx, d.ID, 250, 0, 1000)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestIPHistoryPruneByCapKeepsLatest(t *testing.T) {
 
 	// olderThan=0 → observed_at < 0 never fires. perDeviceMax=2 → keep 2 newest.
 	// Expected: delete rows with ids 1, 2, 3 (3 deleted), keep ids 4, 5.
-	deleted, err := s.IPHistory().Prune(ctx, d.ID, 0, 2)
+	deleted, err := s.IPHistory().Prune(ctx, d.ID, 0, 2, 1000)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestIPHistoryPruneNeverDeletesSoleLatest(t *testing.T) {
 	}
 
 	// Even with an aggressive cutoff, the single row must survive.
-	deleted, err := s.IPHistory().Prune(ctx, d.ID, 999999999, 0)
+	deleted, err := s.IPHistory().Prune(ctx, d.ID, 999999999, 0, 1000)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestIPHistoryPruneCombinedAgeAndCap(t *testing.T) {
 	// Age cutoff: <350 → rows 100, 200, 300 are candidates.
 	// Cap: keep 2 newest → delete rows with ids 1,2,3 (same 3).
 	// Either way, 3 rows deleted. Latest (id=5, ts=500) preserved.
-	deleted, err := s.IPHistory().Prune(ctx, d.ID, 350, 2)
+	deleted, err := s.IPHistory().Prune(ctx, d.ID, 350, 2, 1000)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -507,5 +507,77 @@ func TestIPHistoryPruneFKCascadeOnDeviceDelete(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("cascade: ip_history count = %d, want 0", count)
+	}
+}
+
+// ---------- 8b. Prune honours the batch bound ----------
+
+func TestIPHistoryPruneRespectsBatch(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "hist8b@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	d, err := s.Devices().Create(ctx, Device{UserID: u.ID, Label: "dev8b", SecretHash: "h"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	for i := int64(1); i <= 10; i++ {
+		if _, err := s.IPHistory().Append(ctx, IPHistory{
+			DeviceID: d.ID, IPv4: "1.2.3.4", ObservedAt: i * 100,
+		}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	// 9 rows are eligible (MAX(id) is always kept), but batch=2 caps this call.
+	deleted, err := s.IPHistory().Prune(ctx, d.ID, 99999, 0, 2)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("Prune: deleted = %d, want 2 (the batch bound)", deleted)
+	}
+}
+
+// ---------- 8c. The cap-DISABLED form still keeps the latest row ----------
+//
+// D3a gives the cap-disabled configuration its own statement, so
+// always-keep-latest has to be re-proven for it rather than inherited.
+
+func TestIPHistoryPruneCapDisabledKeepsLatest(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "hist8c@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	d, err := s.Devices().Create(ctx, Device{UserID: u.ID, Label: "dev8c", SecretHash: "h"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	for i := int64(1); i <= 3; i++ {
+		if _, err := s.IPHistory().Append(ctx, IPHistory{
+			DeviceID: d.ID, IPv4: "1.2.3.4", ObservedAt: i * 100,
+		}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	// Every row is older than the cutoff, and the cap is OFF.
+	deleted, err := s.IPHistory().Prune(ctx, d.ID, 99999, 0, 1000)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("Prune: deleted = %d, want 2 (the newest row must survive)", deleted)
+	}
+	latest, err := s.IPHistory().Latest(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("Latest after Prune: %v", err)
+	}
+	if latest.ObservedAt != 300 {
+		t.Errorf("Latest.ObservedAt = %d, want 300", latest.ObservedAt)
 	}
 }
