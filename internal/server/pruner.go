@@ -5,18 +5,21 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// prunerInterval is how often the background pruner sweeps expired replay
-// nonces, sessions, and enrollment codes. Fixed for Plan 04 — a configurable
-// retention.* section is a later plan.
+// prunerInterval is how often the background pruner sweeps. It is deliberately
+// a constant and deliberately does NOT join the retention.* config section:
+// retention windows are day-granular, so an hourly sweep is already 24x finer
+// than the finest policy any operator can express, and no present requirement
+// is served by making it configurable.
 const prunerInterval = time.Hour
 
 // runPruner sweeps expired records every prunerInterval until ctx is
 // cancelled. Started as a goroutine by Server.Run; ctx cancellation is its
 // only shutdown path.
-func runPruner(ctx context.Context, st *store.Store, log *slog.Logger) {
+func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection, log *slog.Logger) {
 	ticker := time.NewTicker(prunerInterval)
 	defer ticker.Stop()
 	for {
@@ -24,16 +27,18 @@ func runPruner(ctx context.Context, st *store.Store, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			prune(ctx, st, log)
+			prune(ctx, st, ret, log)
 		}
 	}
 }
 
-// prune sweeps replay_nonces, sessions, and enrollment_codes once each and
-// logs the counts removed. Each sweep runs independently — a failure in one
-// does not block the others — and failures are logged (there is no caller to
-// report them to).
-func prune(ctx context.Context, st *store.Store, log *slog.Logger) {
+// prune sweeps replay_nonces, sessions, enrollment_codes, oidc_device_flows and
+// account_recovery_tokens for expired rows, then applies the operator's
+// retention policy to ip_history and audit_log, and logs the counts removed.
+//
+// Each sweep runs independently — a failure in one does not block the others —
+// and failures are logged (there is no caller to report them to).
+func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, log *slog.Logger) {
 	now := store.NowUnix()
 
 	nonces, err := st.ReplayNonces().PruneExpired(ctx, now)

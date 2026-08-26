@@ -1,13 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/spf13/viper"
+
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -50,7 +55,7 @@ func TestPrune_RemovesExpiredRecords(t *testing.T) {
 		t.Fatalf("EnrollmentCodes().Create: %v", err)
 	}
 
-	prune(ctx, st, discardLog())
+	prune(ctx, st, config.RetentionSection{}, discardLog())
 
 	if exists, err := st.ReplayNonces().Exists(ctx, "expired-sig"); err != nil {
 		t.Fatalf("ReplayNonces().Exists: %v", err)
@@ -77,7 +82,7 @@ func TestPrune_SweepsOIDCDeviceFlows(t *testing.T) {
 		t.Fatalf("OIDCDeviceFlows().Create: %v", err)
 	}
 
-	prune(ctx, st, discardLog())
+	prune(ctx, st, config.RetentionSection{}, discardLog())
 
 	if _, err := st.OIDCDeviceFlows().Get(ctx, "old"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected expired oidc device flow pruned, got %v", err)
@@ -92,7 +97,7 @@ func TestRunPruner_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runPruner(ctx, st, discardLog())
+		runPruner(ctx, st, config.RetentionSection{}, discardLog())
 		close(done)
 	}()
 
@@ -101,5 +106,32 @@ func TestRunPruner_StopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("runPruner did not stop within 5s of ctx cancellation")
+	}
+}
+
+// TestNew_WiresRetentionIntoTheServer guards the exact hazard #73 exists to
+// fix: a Prune path that is fully implemented, fully tested, and never actually
+// called in production. Every other retention test drives prune() or
+// pruneRetention() directly, so dropping cfg.Retention on the floor in New
+// would leave retention silently dead with the whole suite still green.
+func TestNew_WiresRetentionIntoTheServer(t *testing.T) {
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	v.Set("auth.hmac.secret_key", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, 32)))
+	v.Set("server.base_url", "https://ddns.example.com")
+	v.Set("retention.ip_history_days", 90)
+	v.Set("retention.ip_history_per_device_max", 500)
+	v.Set("retention.audit_log_days", 365)
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	srv, err := New(cfg, openTestStore(t), discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if srv.retention != cfg.Retention {
+		t.Errorf("Server.retention = %+v, want %+v — retention never reaches runPruner", srv.retention, cfg.Retention)
 	}
 }

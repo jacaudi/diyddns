@@ -38,6 +38,7 @@ type Server struct {
 	log        *slog.Logger
 	st         *store.Store
 	oidcMgr    *oidc.Manager
+	retention  config.RetentionSection
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -218,9 +219,10 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log:     log,
-		st:      st,
-		oidcMgr: mgr,
+		log:       log,
+		st:        st,
+		oidcMgr:   mgr,
+		retention: cfg.Retention,
 	}, nil
 }
 
@@ -234,7 +236,7 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-	go runPruner(ctx, s.st, s.log)
+	go runPruner(ctx, s.st, s.retention, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 
 	select {
