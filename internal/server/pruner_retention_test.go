@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/config"
@@ -238,5 +240,160 @@ func TestPruneRetention_DrainsPastOneBatch(t *testing.T) {
 	}
 	if got := ipHistoryCount(t, st, dev); got != 2 {
 		t.Errorf("ip_history rows = %d, want 2", got)
+	}
+}
+
+// TestPruneRetention_PerDeviceContinueOnError proves one failing device does not
+// starve the devices ordered after it.
+func TestPruneRetention_PerDeviceContinueOnError(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	healthy := seedRetentionDevice(t, st, "healthy", []int64{100, 200, 300, 400})
+	failing := seedRetentionDevice(t, st, "failing", []int64{100, 200, 300, 400})
+
+	// ListAll orders by created_at DESC, and both devices are created within the
+	// same second, so the tie resolves to INSERTION order — which would put the
+	// healthy device first and let an abort-on-error implementation pass. Force
+	// the failing device to sort first, or this test proves nothing.
+	if _, err := st.DB().ExecContext(ctx,
+		`UPDATE devices SET created_at = created_at + 100 WHERE id = ?`, failing); err != nil {
+		t.Fatalf("reorder devices: %v", err)
+	}
+
+	// The failing device MUST have prunable rows, or the trigger never fires and
+	// this test passes vacuously.
+	if _, err := st.DB().ExecContext(ctx, fmt.Sprintf(
+		`CREATE TRIGGER inject_fail BEFORE DELETE ON ip_history
+		 WHEN OLD.device_id = '%s'
+		 BEGIN SELECT RAISE(ABORT, 'injected'); END;`, failing)); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	if devs, err := st.Devices().ListAll(ctx); err != nil {
+		t.Fatalf("ListAll: %v", err)
+	} else if devs[0].ID != failing {
+		t.Fatalf("fixture: the failing device must sort first, got %q", devs[0].ID)
+	}
+
+	ipRows, _ := pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, discardLog())
+
+	if got := ipHistoryCount(t, st, failing); got != 4 {
+		t.Errorf("failing device rows = %d, want 4 (its drain aborted)", got)
+	}
+	if got := ipHistoryCount(t, st, healthy); got != 1 {
+		t.Errorf("healthy device rows = %d, want 1 (it must still be pruned)", got)
+	}
+	if ipRows != 3 {
+		t.Errorf("ipRows = %d, want 3 (the healthy device's deletions)", ipRows)
+	}
+}
+
+// TestPruneRetention_CountsSurviveMidDrainFailure proves a drain that commits
+// one batch and then fails reports what it COMMITTED, not 0. Those totals gate
+// the retention.prune audit event, so zeroing them would suppress the operator's
+// only durable record of thousands of irreversible deletions.
+func TestPruneRetention_CountsSurviveMidDrainFailure(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	dev := seedRetentionDevice(t, st, "middrain",
+		[]int64{100, 200, 300, 400, 500, 600, 700, 800, 900, 1000})
+
+	old := pruneBatchSize
+	pruneBatchSize = 3
+	t.Cleanup(func() { pruneBatchSize = old })
+
+	// A counter table, not a device-keyed trigger: a device-keyed trigger aborts
+	// the FIRST batch, so the committed count would be 0 — the opposite of what
+	// this test observes. This fires during batch 2 regardless of which rows a
+	// batch picks, which matters because the outer SELECT carries no ORDER BY.
+	if _, err := st.DB().ExecContext(ctx, `CREATE TABLE probe_counter (n INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("counter table: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx, `INSERT INTO probe_counter (n) VALUES (0)`); err != nil {
+		t.Fatalf("counter seed: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx, `
+		CREATE TRIGGER inject_after_batch BEFORE DELETE ON ip_history
+		BEGIN
+		  UPDATE probe_counter SET n = n + 1;
+		  SELECT RAISE(ABORT, 'injected') WHERE (SELECT n FROM probe_counter) > 3;
+		END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	ipRows, _ := pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, discardLog())
+
+	if ipRows != 3 {
+		t.Errorf("ipRows = %d, want 3 (the first batch committed before batch 2 failed)", ipRows)
+	}
+	if got := ipHistoryCount(t, st, dev); got != 7 {
+		t.Errorf("ip_history rows = %d, want 7", got)
+	}
+}
+
+// TestPruneRetention_AuditLogDrainFailureKeepsIPCounts proves a failed audit_log
+// drain keeps its committed count and leaves the ip_history counts standing.
+func TestPruneRetention_AuditLogDrainFailureKeepsIPCounts(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	now := store.NowUnix()
+	dev := seedRetentionDevice(t, st, "auditfail", []int64{100, 200, 300, 400})
+	seedAuditRows(t, st, []int64{now - 48*3600, now - 48*3600, now - 48*3600})
+
+	// A BEFORE INSERT trigger cannot fail a DELETE; it must be BEFORE DELETE.
+	if _, err := st.DB().ExecContext(ctx, `
+		CREATE TRIGGER inject_audit_fail BEFORE DELETE ON audit_log
+		BEGIN SELECT RAISE(ABORT, 'injected'); END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	ipRows, auditRows := pruneRetention(ctx, st, config.RetentionSection{
+		IPHistoryDays: 1, AuditLogDays: 1,
+	}, discardLog())
+
+	if auditRows != 0 {
+		t.Errorf("auditRows = %d, want 0 (every batch failed)", auditRows)
+	}
+	if ipRows != 3 {
+		t.Errorf("ipRows = %d, want 3 (the ip_history counts must still stand)", ipRows)
+	}
+	if got := ipHistoryCount(t, st, dev); got != 1 {
+		t.Errorf("ip_history rows = %d, want 1", got)
+	}
+}
+
+// TestPruneRetention_ListAllFailureStillPrunesAuditLog proves a failure to
+// enumerate devices skips the ip_history pass ONLY — the audit_log pass, which
+// does not depend on it, must still run.
+func TestPruneRetention_ListAllFailureStillPrunesAuditLog(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	now := store.NowUnix()
+	seedRetentionDevice(t, st, "orphan", []int64{100, 200, 300})
+	seedAuditRows(t, st, []int64{
+		now - 48*3600, now - 48*3600, now - 48*3600, now - 48*3600,
+	})
+
+	// No trigger can fail a SELECT, so rename the table out from under ListAll.
+	// SQLite rewrites ip_history's FK to "devices_x" as part of the rename
+	// (foreign_keys is ON), and the restoring rename below puts it back to
+	// "devices" — measured. The restore is clean, but not because the FK was
+	// left untouched.
+	if _, err := st.DB().ExecContext(ctx, `ALTER TABLE devices RENAME TO devices_x`); err != nil {
+		t.Fatalf("rename devices: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = st.DB().ExecContext(context.Background(), `ALTER TABLE devices_x RENAME TO devices`)
+	})
+
+	ipRows, auditRows := pruneRetention(ctx, st, config.RetentionSection{
+		IPHistoryDays: 1, AuditLogDays: 1,
+	}, discardLog())
+
+	if ipRows != 0 {
+		t.Errorf("ipRows = %d, want 0", ipRows)
+	}
+	if auditRows != 4 {
+		t.Errorf("auditRows = %d, want 4 (the audit_log pass must still run)", auditRows)
 	}
 }
