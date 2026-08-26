@@ -209,12 +209,16 @@ func (r *AuditLogRepo) ListPaginated(ctx context.Context, f AuditFilter, cursor 
 	return AuditPage{Rows: result, NextCursor: nextCursor}, nil
 }
 
-// Prune deletes all rows with created_at < olderThan.
+// Prune deletes rows with created_at < olderThan, at most batch rows per call.
+// A caller drains a large backlog by looping until Prune returns 0 rather than
+// holding the process's single SQLite connection for one long statement (see
+// internal/server/pruner.go).
 // Returns the number of rows deleted.
-func (r *AuditLogRepo) Prune(ctx context.Context, olderThan int64) (int, error) {
+func (r *AuditLogRepo) Prune(ctx context.Context, olderThan int64, batch int) (int, error) {
 	res, err := r.db.ExecContext(ctx,
-		`DELETE FROM audit_log WHERE created_at < ?`,
-		olderThan,
+		`DELETE FROM audit_log
+		 WHERE id IN (SELECT id FROM audit_log WHERE created_at < ? LIMIT ?)`,
+		olderThan, batch,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("audit_log.Prune: %w", err)
