@@ -310,6 +310,44 @@ func TestEndpointDetail_RendersFailureClassNotRawError(t *testing.T) {
 	}
 }
 
+// TestEndpointDetail_UnknownFailureClassRendersUnknown is the regression
+// guard for failureClassLabel's default branch — the §5.8 leak channel: the
+// six classes above are internal/server/notify's own fixed vocabulary, but
+// LastFailure is a plain string column, and nothing at the database layer
+// stops the worker from someday writing a class outside that vocabulary
+// (a typo, a new class added on one side and not the other). The default
+// branch is the only thing standing between that value and raw text landing
+// on the page; mutating it from "Unknown" to a raw passthrough left every
+// other test in this file green.
+func TestEndpointDetail_UnknownFailureClassRendersUnknown(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "detail-unknown@example.com", "user")
+	ep := seedEndpoint(t, st, usr.ID, "webhook", "https://example.com/hook", true)
+
+	const unrecognized = "some-future-class-not-in-the-switch"
+	seedDelivery(t, st, ep.ID, "ip.changed", "failed", unrecognized, 3)
+
+	cookie := signIn(t, deps, usr)
+	req := httptest.NewRequest(http.MethodGet, "/account/endpoints/"+ep.ID, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Unknown") {
+		t.Error("body missing the fallback phrase \"Unknown\" for an unrecognised failure class")
+	}
+	if strings.Contains(body, unrecognized) {
+		t.Errorf("body contains the raw unrecognised failure class %q verbatim; it must only ever render as \"Unknown\"", unrecognized)
+	}
+}
+
 func TestEndpoints_SetEnabledTogglesAndRedirects(t *testing.T) {
 	deps, st := testDeps(t)
 	enableNotifications(&deps)

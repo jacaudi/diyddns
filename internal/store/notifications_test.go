@@ -61,21 +61,28 @@ func TestMigration004_AcceptsDeliveryInsert(t *testing.T) {
 	}
 }
 
+// TestNotificationEndpoints_ListEnabledByUser also guards the cross-user
+// blind spot: with only one user seeded, removing the `user_id = ?`
+// predicate from the query would still pass (there is nothing else to leak
+// into the result), so u2's enabled endpoint below is what actually exercises
+// scoping.
 func TestNotificationEndpoints_ListEnabledByUser(t *testing.T) {
 	s, ctx := newTestStore(t)
 	now := NowUnix()
 	if _, err := s.DB().ExecContext(ctx,
 		`INSERT INTO users (id, email, role, disabled, created_at, updated_at)
-		 VALUES ('u1', 'a@example.com', 'user', 0, ?, ?)`, now, now); err != nil {
-		t.Fatalf("seed user: %v", err)
+		 VALUES ('u1', 'a@example.com', 'user', 0, ?, ?), ('u2', 'b@example.com', 'user', 0, ?, ?)`,
+		now, now, now, now); err != nil {
+		t.Fatalf("seed users: %v", err)
 	}
 	if _, err := s.DB().ExecContext(ctx,
 		`INSERT INTO notification_endpoints
 		   (id, user_id, label, url, secret_sealed, enabled, created_at, updated_at)
 		 VALUES
 		   ('ep1', 'u1', 'enabled', 'https://example.com/1', 'sealed', 1, ?, ?),
-		   ('ep2', 'u1', 'disabled', 'https://example.com/2', 'sealed', 0, ?, ?)`,
-		now, now, now, now); err != nil {
+		   ('ep2', 'u1', 'disabled', 'https://example.com/2', 'sealed', 0, ?, ?),
+		   ('ep3', 'u2', 'other user enabled', 'https://example.com/3', 'sealed', 1, ?, ?)`,
+		now, now, now, now, now, now); err != nil {
 		t.Fatalf("seed endpoints: %v", err)
 	}
 

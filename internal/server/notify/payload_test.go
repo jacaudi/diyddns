@@ -58,6 +58,35 @@ func TestRenderIPChanged_AbsentFamilyIsNullNotEmptyString(t *testing.T) {
 	}
 }
 
+// TestRenderIPChanged_NoChangedFamiliesMarshalsEmptyArray is the regression
+// guard for the `if changed == nil { changed = []string{} }` fallback in
+// RenderIPChanged: json.Marshal of a nil []string emits JSON null, but the
+// wire contract (README) promises "changed" is always an array. Every other
+// payload test seeds at least one changed family, so removing the fallback
+// left all of them passing.
+func TestRenderIPChanged_NoChangedFamiliesMarshalsEmptyArray(t *testing.T) {
+	ev := store.IPChangeEvent{
+		EventID: 7, Device: store.Device{ID: "d"},
+		PrevIPv4: "1.1.1.1", CurrIPv4: "1.1.1.1", // unchanged
+		PrevIPv6: "", CurrIPv6: "", // unchanged (both absent)
+	}
+	b, err := RenderIPChanged(ev)
+	if err != nil {
+		t.Fatalf("RenderIPChanged: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	changed, ok := got["changed"].([]any)
+	if !ok {
+		t.Fatalf("changed = %#v, want a JSON array, not null", got["changed"])
+	}
+	if len(changed) != 0 {
+		t.Errorf("changed = %v, want an empty array", changed)
+	}
+}
+
 func TestRenderIPChanged_BothFamiliesMoved(t *testing.T) {
 	ev := store.IPChangeEvent{
 		EventID: 1, Device: store.Device{ID: "d"},
@@ -73,5 +102,43 @@ func TestRenderIPChanged_BothFamiliesMoved(t *testing.T) {
 	changed := got["changed"].([]any)
 	if len(changed) != 2 {
 		t.Errorf("changed = %v, want both families", changed)
+	}
+}
+
+// TestRenderTest pins RenderTest's envelope: nothing in this package
+// referenced RenderTest before this test, despite the webui /test route
+// (Task 8) consuming it in production.
+func TestRenderTest(t *testing.T) {
+	const now = 1755153174 // 2025-08-14T06:32:54Z, same fixture value as the other payload tests
+
+	b, err := RenderTest(now)
+	if err != nil {
+		t.Fatalf("RenderTest: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if got["version"] != float64(1) {
+		t.Errorf("version = %v, want 1", got["version"])
+	}
+	if got["type"] != "endpoint.test" {
+		t.Errorf("type = %v, want endpoint.test", got["type"])
+	}
+	if got["id"] != float64(0) {
+		t.Errorf("id = %v, want 0", got["id"])
+	}
+	if got["occurred_at"] != "2025-08-14T06:32:54Z" {
+		t.Errorf("occurred_at = %v, want 2025-08-14T06:32:54Z", got["occurred_at"])
+	}
+	if device, present := got["device"]; present && device != nil {
+		t.Errorf("device = %v, want absent/null: a test event has no device", device)
+	}
+	changed, ok := got["changed"].([]any)
+	if !ok {
+		t.Fatalf("changed = %#v, want a JSON array, not null", got["changed"])
+	}
+	if len(changed) != 0 {
+		t.Errorf("changed = %v, want an empty array", changed)
 	}
 }

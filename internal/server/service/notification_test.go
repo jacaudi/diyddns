@@ -81,6 +81,65 @@ func seedTerminalDelivery(t *testing.T, st *store.Store, endpointID, status stri
 	return id
 }
 
+// seedUserInitiatedDelivery inserts one notification_deliveries row with
+// user_initiated_at stamped explicitly at userInitiatedAt, so budget-window
+// tests can construct attempts that are old enough to have aged out.
+func seedUserInitiatedDelivery(t *testing.T, st *store.Store, endpointID string, userInitiatedAt int64) int64 {
+	t.Helper()
+	now := store.NowUnix()
+	res, err := st.DB().ExecContext(t.Context(),
+		`INSERT INTO notification_deliveries
+		   (endpoint_id, event_type, event_id, payload, attempts,
+		    next_attempt_at, status, user_initiated_at, created_at, updated_at)
+		 VALUES (?, 'endpoint.test', 0, ?, 0, NULL, 'delivered', ?, ?, ?)`,
+		endpointID, []byte(`{}`), userInitiatedAt, now, now,
+	)
+	if err != nil {
+		t.Fatalf("seed user-initiated delivery: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("seed user-initiated delivery: LastInsertId: %v", err)
+	}
+	return id
+}
+
+// TestBudget_OldAttemptsAgeOutOfWindow is the regression guard for the
+// windowStart computation in Test/Redeliver:
+//
+//	windowStart := now - int64(notify.UserBudgetWindow/time.Second)
+//
+// notify.UserBudgetWindow is a time.Duration (nanoseconds); it must be
+// divided by time.Second before being subtracted from now, a Unix-seconds
+// timestamp. Passing the raw, unconverted Duration makes windowStart deeply
+// negative — a window reaching back roughly 9,500 years — which inside a
+// short-lived test is indistinguishable from a correct 300-second window: it
+// only manifests when an attempt genuinely older than 5 minutes should age
+// OUT of the budget and, under the bug, doesn't. This control has silently
+// failed three times in this project's history; this test is the guard.
+//
+// It exhausts the budget with attempts a full day old, then asserts a fresh
+// attempt is ALLOWED because those old attempts have aged out of the
+// 5-minute window. Under the raw-Duration mutation the old rows never age
+// out, the budget stays "exhausted" forever, and this assertion fails.
+func TestBudget_OldAttemptsAgeOutOfWindow(t *testing.T) {
+	st, userID, svc := newNotificationServiceTest(t)
+	ep := seedEndpoint(t, st, userID, "https://example.com/hook", true)
+
+	dayOld := store.NowUnix() - int64(24*time.Hour/time.Second)
+	for range notify.UserBudgetCount {
+		seedUserInitiatedDelivery(t, st, ep.ID, dayOld)
+	}
+
+	ok, err := svc.Test(t.Context(), userID, ep.ID)
+	if err != nil {
+		t.Fatalf("Test: unexpected error %v", err)
+	}
+	if !ok {
+		t.Fatal("expected a fresh attempt to be allowed: the day-old attempts should have aged out of the 5-minute budget window")
+	}
+}
+
 func TestCreate_RejectsNonHTTPScheme(t *testing.T) {
 	st, userID, svc := newNotificationServiceTest(t)
 

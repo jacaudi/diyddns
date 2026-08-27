@@ -218,8 +218,14 @@ email:
 # even while disabled — so a misconfigured policy fails at boot rather than at
 # switch-on.
 notifications:
-  # Default false.
-  # enabled: false
+  # Default false. Left live (unlike its four siblings below) because a
+  # null-valued `notifications:` section — every child commented out — makes
+  # viper's env-var binding for this section non-deterministic per process:
+  # a nil-valued YAML parent can shadow child env bindings depending on
+  # config.Load's (map-iteration-ordered) SetDefault/BindEnv sequence. Every
+  # other top-level section already has at least one live child for the same
+  # reason; keep it that way.
+  enabled: false
 
   # Operator-only allowlist of private/internal CIDR prefixes a notification
   # endpoint URL is permitted to resolve into. Default [] (empty): no private

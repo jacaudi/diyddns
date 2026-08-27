@@ -6,7 +6,15 @@ import (
 	"testing"
 )
 
-// Every prefix must be in masked form, or Contains silently misbehaves.
+// Every prefix must be in masked form. This is NOT because Contains
+// misbehaves on an unmasked prefix — netip.Prefix.Contains truncates both
+// operands to the prefix length on the fly, so a masked and an unmasked
+// prefix over the same network match identically (verified against Go's
+// stdlib source and empirically). Masking is still correct practice: it
+// keeps the table in canonical form, keeps error messages honest (denied has
+// no ParseAllowed step to mask through), and makes the prefixes safe as map
+// keys, where an unmasked and masked prefix over the same network compare
+// unequal.
 func TestDeniedTableIsMasked(t *testing.T) {
 	for _, p := range denied {
 		if p.Masked() != p {
@@ -76,17 +84,53 @@ func TestPermit(t *testing.T) {
 }
 
 // The worker classifies on this sentinel, so it must survive wrapping through
-// net.Dialer.Control and out of http.Client.Do.
+// net.Dialer.Control and out of http.Client.Do. The original three probes
+// (127.0.0.1, 169.254.169.254, fec0::1%eth0) all exit at step 1 (zone) or
+// step 4 (global-unicast) — removing %w from the step-5 table-match return
+// left this test green. 192.0.2.1 (TEST-NET-1) is global unicast AND denied
+// by the table, so it is the probe that actually reaches step 5. The last
+// two probes cover the scheme-composition returns (steps 6 and 8).
 func TestPermit_ErrorsWrapErrDenied(t *testing.T) {
-	for _, addr := range []string{"127.0.0.1", "169.254.169.254", "fec0::1%eth0"} {
-		a := netip.MustParseAddr(addr)
-		err := Permit("https", a, nil)
-		if err == nil {
-			t.Fatalf("Permit(%s) = nil, want denial", addr)
-		}
-		if !errors.Is(err, ErrDenied) {
-			t.Errorf("Permit(%s) error does not wrap ErrDenied: %v", addr, err)
-		}
+	tests := []struct {
+		name, addr, scheme string
+	}{
+		{"zone check, step 1", "fec0::1%eth0", "https"},
+		{"global-unicast check, step 4", "127.0.0.1", "https"},
+		{"global-unicast check, step 4 (link-local)", "169.254.169.254", "https"},
+		{"denied-table match, step 5", "192.0.2.1", "https"},
+		{"unsupported scheme, step 6", "8.8.8.8", "ftp"},
+		{"http to non-loopback, step 8", "8.8.8.8", "http"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := netip.MustParseAddr(tc.addr)
+			err := Permit(tc.scheme, a, nil)
+			if err == nil {
+				t.Fatalf("Permit(%s, %s) = nil, want denial", tc.scheme, tc.addr)
+			}
+			if !errors.Is(err, ErrDenied) {
+				t.Errorf("Permit(%s, %s) error does not wrap ErrDenied: %v", tc.scheme, tc.addr, err)
+			}
+		})
+	}
+}
+
+// TestParseAllowed_MasksHostBits is the regression guard for ParseAllowed's
+// call to p.Masked(): every CIDR in TestPermit's table is already pre-masked,
+// so removing .Masked() from ParseAllowed caused zero failures suite-wide.
+// This uses an operator CIDR with host bits set and asserts the returned
+// prefix comes back in canonical (masked) form.
+func TestParseAllowed_MasksHostBits(t *testing.T) {
+	got, err := ParseAllowed([]string{"192.168.1.0/16"})
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d prefixes, want 1", len(got))
+	}
+	want := netip.MustParsePrefix("192.168.0.0/16")
+	if got[0] != want {
+		t.Errorf("ParseAllowed([%q]) = %s, want %s (masked to canonical form)", "192.168.1.0/16", got[0], want)
 	}
 }
 

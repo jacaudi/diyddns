@@ -689,6 +689,64 @@ func TestLoad_NotificationsValidation(t *testing.T) {
 	}
 }
 
+// TestLoad_ExampleConfigNotificationsEnvOverridesApply is the regression guard
+// for the #65 fix-wave finding: config.Load iterates keyDefaults (a Go map,
+// randomized order per process) to call SetDefault/BindEnv for every key. When
+// the config file's notifications: section has every child commented out, it
+// parses as a nil-valued YAML mapping, and depending on iteration order that
+// nil parent can shadow the DIYDDNS_NOTIFICATIONS_* env bindings underneath
+// it — dropping them roughly half the time. Reproduced empirically: 12
+// separate `go test -count=1` process invocations against the pre-fix
+// shipped config.example.yaml gave PASS=1 FAIL=11 for this exact assertion.
+//
+// A single in-process run of this test CANNOT prove the bug is fixed — the
+// randomization is per-process, so one passing run is not evidence; only a
+// loop of separate process invocations is (see the fix-wave report for the
+// before/after tally). What this test CAN assert in one run, and does:
+//
+//  1. Against the shipped config.example.yaml, the two notifications env
+//     overrides apply in THIS run.
+//  2. The shape guard: config.example.yaml's notifications: section has at
+//     least one live (uncommented) child key, matching every other top-level
+//     section (server, database, logging, auth, email). A null-valued
+//     section is exactly the shape that triggers the shadowing above, so
+//     keeping this assertion green is what keeps the bug from coming back
+//     even though assertion #1 alone can't catch a regression reliably.
+func TestLoad_ExampleConfigNotificationsEnvOverridesApply(t *testing.T) {
+	const examplePath = "../../config.example.yaml"
+
+	t.Setenv("DIYDDNS_NOTIFICATIONS_ENABLED", "true")
+	t.Setenv("DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS", "10.42.0.0/16")
+
+	cfg, err := config.Load(viper.New(), examplePath)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", examplePath, err)
+	}
+	if !cfg.Notifications.Enabled {
+		t.Error("Notifications.Enabled = false, want true (DIYDDNS_NOTIFICATIONS_ENABLED was dropped)")
+	}
+	want := []string{"10.42.0.0/16"}
+	if len(cfg.Notifications.AllowedPrivateCIDRs) != len(want) || cfg.Notifications.AllowedPrivateCIDRs[0] != want[0] {
+		t.Errorf("Notifications.AllowedPrivateCIDRs = %v, want %v (DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS was dropped)",
+			cfg.Notifications.AllowedPrivateCIDRs, want)
+	}
+
+	// Shape guard: read the file with a bare viper instance (no SetDefault
+	// calls at all) so this reflects the file's own shape, not Load's
+	// defaults filling in the gap.
+	shape := viper.New()
+	shape.SetConfigFile(examplePath)
+	if err := shape.ReadInConfig(); err != nil {
+		t.Fatalf("ReadInConfig(%s): %v", examplePath, err)
+	}
+	section, ok := shape.Get("notifications").(map[string]any)
+	if !ok || len(section) == 0 {
+		t.Errorf("config.example.yaml notifications: section has no live children (got %#v) — "+
+			"a null-valued section reproduces the env-drop bug; give it at least one live child, "+
+			"as every other top-level section already has", shape.Get("notifications"))
+	}
+}
+
 func TestNotificationsEgressWarning(t *testing.T) {
 	var cfg config.Server
 	cfg.Notifications.Enabled = true

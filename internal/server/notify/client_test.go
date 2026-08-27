@@ -92,16 +92,17 @@ func TestClients_RedirectsNotFollowed(t *testing.T) {
 	}
 }
 
-// Control's parse-failure branch must fail closed. Design §14 asks for this and
-// no other test reaches it: netip.ParseAddrPort rejects an address net.Dialer
-// would otherwise hand through.
+// Control's parse-failure branch must fail closed. Design §14 asks for this.
+// The previous version of this test only asserted that netip.ParseAddrPort
+// rejects malformed strings — it never invoked the Control closure at all,
+// so mutating the parse-error branch to `return nil` (fail OPEN) left it
+// passing. This calls dialControl's returned func directly with a malformed
+// address, the same way net.Dialer would, and asserts it returns an error.
 func TestPermit_UnparseableAddressFailsClosed(t *testing.T) {
-	// Permit is only reached with a parsed Addr, so assert the Control wrapper's
-	// contract directly: any address string that ParseAddrPort rejects must
-	// produce an error, never a nil (permit) result.
+	control := dialControl("https", nil)
 	for _, bad := range []string{"", "not-an-address", "127.0.0.1", "[::1]"} { // no port / malformed
-		if _, err := netip.ParseAddrPort(bad); err == nil {
-			t.Errorf("ParseAddrPort(%q) unexpectedly succeeded; the guard's fail-closed branch is unreachable for it", bad)
+		if err := control("tcp", bad, nil); err == nil {
+			t.Errorf("dialControl's Control(%q) = nil error, want a failure (fail-closed on an unparseable dial address)", bad)
 		}
 	}
 }

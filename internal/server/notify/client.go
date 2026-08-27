@@ -40,23 +40,29 @@ func (c *Clients) For(scheme string) (*http.Client, error) {
 	}
 }
 
+// dialControl builds the net.Dialer.Control func for scheme: it runs after
+// resolution and before connect, with the address the kernel is about to
+// dial. Checking here rather than at URL-parse time is what closes the
+// DNS-rebinding window and makes obfuscated hosts irrelevant. Extracted from
+// newClient so it can be exercised directly in tests, independent of an
+// actual dial.
+func dialControl(scheme string, allowed []netip.Prefix) func(_, address string, _ syscall.RawConn) error {
+	return func(_, address string, _ syscall.RawConn) error {
+		// Control receives raddr.String(). For IPv6 that can carry a zone
+		// ("[fe80::1%eth0]:443"), which net.ParseIP rejects and
+		// netip.ParseAddrPort accepts. Parse failure FAILS CLOSED.
+		ap, err := netip.ParseAddrPort(address)
+		if err != nil {
+			return fmt.Errorf("notify: unparseable dial address %q: %w", address, err)
+		}
+		return Permit(scheme, ap.Addr(), allowed)
+	}
+}
+
 func newClient(scheme string, allowed []netip.Prefix, timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{
 		Timeout: timeout,
-		// Control runs after resolution and before connect, with the address
-		// the kernel is about to dial. Checking here rather than at URL-parse
-		// time is what closes the DNS-rebinding window and makes obfuscated
-		// hosts irrelevant.
-		Control: func(_, address string, _ syscall.RawConn) error {
-			// Control receives raddr.String(). For IPv6 that can carry a zone
-			// ("[fe80::1%eth0]:443"), which net.ParseIP rejects and
-			// netip.ParseAddrPort accepts. Parse failure FAILS CLOSED.
-			ap, err := netip.ParseAddrPort(address)
-			if err != nil {
-				return fmt.Errorf("notify: unparseable dial address %q: %w", address, err)
-			}
-			return Permit(scheme, ap.Addr(), allowed)
-		},
+		Control: dialControl(scheme, allowed),
 	}
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
