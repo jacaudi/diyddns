@@ -60,3 +60,63 @@ func TestMigration004_AcceptsDeliveryInsert(t *testing.T) {
 		t.Errorf("RowsAffected = %d, want 1", n)
 	}
 }
+
+func TestNotificationEndpoints_ListEnabledByUser(t *testing.T) {
+	s, ctx := newTestStore(t)
+	now := NowUnix()
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO users (id, email, role, disabled, created_at, updated_at)
+		 VALUES ('u1', 'a@example.com', 'user', 0, ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO notification_endpoints
+		   (id, user_id, label, url, secret_sealed, enabled, created_at, updated_at)
+		 VALUES
+		   ('ep1', 'u1', 'enabled', 'https://example.com/1', 'sealed', 1, ?, ?),
+		   ('ep2', 'u1', 'disabled', 'https://example.com/2', 'sealed', 0, ?, ?)`,
+		now, now, now, now); err != nil {
+		t.Fatalf("seed endpoints: %v", err)
+	}
+
+	got, err := s.NotificationEndpoints().ListEnabledByUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("ListEnabledByUser: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "ep1" {
+		t.Errorf("ListEnabledByUser = %+v, want exactly [ep1]", got)
+	}
+}
+
+func TestNotificationDeliveries_EnqueueLeavesUserInitiatedNull(t *testing.T) {
+	s, ctx := newTestStore(t)
+	now := NowUnix()
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO users (id, email, role, disabled, created_at, updated_at)
+		 VALUES ('u1', 'a@example.com', 'user', 0, ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO notification_endpoints
+		   (id, user_id, label, url, secret_sealed, enabled, created_at, updated_at)
+		 VALUES ('ep1', 'u1', 'l', 'https://example.com/h', 'sealed', 1, ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed endpoint: %v", err)
+	}
+
+	err := s.NotificationDeliveries().Enqueue(ctx, NotificationDelivery{
+		EndpointID: "ep1", EventType: "device.ip_changed", EventID: 42,
+		Payload: []byte(`{}`), NextAttemptAt: NowUnix(), Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	var ui any
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT user_initiated_at FROM notification_deliveries WHERE endpoint_id='ep1'`).Scan(&ui); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if ui != nil {
+		t.Errorf("user_initiated_at = %v, want NULL; a server-initiated delivery must not spend a user's budget", ui)
+	}
+}
