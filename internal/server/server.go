@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
+	"github.com/jacaudi/diyddns/internal/server/notify"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/server/webui"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -38,6 +40,7 @@ type Server struct {
 	log        *slog.Logger
 	st         *store.Store
 	oidcMgr    *oidc.Manager
+	notifier   *notify.Worker // nil when notifications are disabled
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -72,6 +75,27 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// say it at boot where it can still be acted on.
 	if w := config.InsecureCookieWarning(cfg); w != "" {
 		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+	// Same rationale as InsecureCookieWarning immediately above: a broad
+	// allowed_private_cidrs entry is a valid operator choice, not a startup
+	// failure, but it re-opens a whole address family and deserves saying so
+	// where it can still be acted on.
+	if w := config.NotificationsEgressWarning(cfg); w != "" {
+		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+
+	// config.validateNotifications already rejected malformed entries at
+	// startup; this is belt-and-braces on the same values, and fails closed
+	// the same way the HMAC-key and required-OIDC checks above do. The parsed
+	// prefixes themselves have no consumer here yet — service.NewNotificationService
+	// (Task 8) is what needs them — so only the error is kept.
+	if _, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs); err != nil {
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, err
+	}
+
+	var notifier service.Notifier = service.NopNotifier{}
+	if cfg.Notifications.Enabled {
+		notifier = notify.NewEnqueuer(st, log)
 	}
 
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
@@ -136,7 +160,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Sessions:  sessions,
 		Enroll:    enrollSvc,
 		Devices:   devicesSvc,
-		Checkin:   service.NewCheckinService(st, service.NopNotifier{}),
+		Checkin:   service.NewCheckinService(st, notifier),
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, log, audit, nil, passkeySvc, key),
 		OIDC:      oidcSvc,
@@ -212,15 +236,35 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	var notifier *notify.Worker
+	if cfg.Notifications.Enabled {
+		key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("server: %w", err)
+		}
+		allowed, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs)
+		if err != nil {
+			return nil, fmt.Errorf("server: %w", err)
+		}
+		clients := notify.NewClients(allowed, cfg.Notifications.Timeout)
+		// rand.Float64 here is math/rand/v2, not the legacy math/rand gosec's
+		// G404 flags: it needs no seeding and jitter timing is not
+		// security-sensitive regardless (see poller.go's defaultRandFloat).
+		notifier = notify.NewWorker(st, clients, key, cfg.Notifications.MaxAttempts,
+			service.NewAuditWriter(st), rand.Float64, log)
+	}
+
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.Server.Listen,
 			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log:     log,
-		st:      st,
-		oidcMgr: mgr,
+		log:      log,
+		st:       st,
+		oidcMgr:  mgr,
+		notifier: notifier,
 	}, nil
 }
 
@@ -236,6 +280,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 	go runPruner(ctx, s.st, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
+	if s.notifier != nil {
+		go s.notifier.Run(ctx)
+	}
 
 	select {
 	case err := <-errCh:

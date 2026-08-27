@@ -31,3 +31,15 @@ func TestSign_Deterministic(t *testing.T) {
 		t.Fatal("Sign not deterministic")
 	}
 }
+
+func TestCanonicalNotification_OmitsMethodAndPathAndIsDomainSeparated(t *testing.T) {
+	got := CanonicalNotification("1755153174", "abc", "def")
+	want := "diyddns-notify-v1\n1755153174\nabc\ndef"
+	if got != want {
+		t.Errorf("CanonicalNotification = %q, want %q", got, want)
+	}
+	// Must not be constructible from CanonicalRequest with any method/path.
+	if got == CanonicalRequest("POST", "/hook", "1755153174", "abc", "def") {
+		t.Error("notification and request canonical forms collide")
+	}
+}

@@ -140,3 +140,77 @@ func (r *NotificationDeliveryRepo) Enqueue(ctx context.Context, d NotificationDe
 	}
 	return nil
 }
+
+// DueDelivery is one sweep-selected delivery joined with the endpoint fields
+// the worker needs to attempt it, so a second query per row is never needed.
+type DueDelivery struct {
+	NotificationDelivery
+	EndpointURL  string
+	SecretSealed string
+}
+
+// DueForAttempt selects up to limit deliveries whose next_attempt_at has
+// passed, ordered oldest-due-first. The join against notification_endpoints
+// and its `e.enabled = 1` filter are load-bearing, not an optimization:
+// disabling an endpoint must stop deliveries already in flight, not just new
+// ones, so a row whose endpoint was disabled after being scheduled is
+// excluded here rather than only at enqueue time.
+func (r *NotificationDeliveryRepo) DueForAttempt(ctx context.Context, before int64, limit int) ([]DueDelivery, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT d.id, d.endpoint_id, d.event_type, d.event_id, d.payload, d.attempts,
+		        d.next_attempt_at, d.status, d.last_failure, d.user_initiated_at,
+		        d.created_at, d.updated_at, e.url, e.secret_sealed
+		   FROM notification_deliveries d
+		   JOIN notification_endpoints e ON e.id = d.endpoint_id
+		  WHERE d.next_attempt_at IS NOT NULL AND d.next_attempt_at <= ?
+		    AND e.enabled = 1
+		  ORDER BY d.next_attempt_at
+		  LIMIT ?`,
+		before, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("notification_deliveries.DueForAttempt: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []DueDelivery
+	for rows.Next() {
+		var d DueDelivery
+		var nextAttemptAt, userInitiatedAt sql.NullInt64
+		var lastFailure sql.NullString
+		if err := rows.Scan(
+			&d.ID, &d.EndpointID, &d.EventType, &d.EventID, &d.Payload, &d.Attempts,
+			&nextAttemptAt, &d.Status, &lastFailure, &userInitiatedAt,
+			&d.CreatedAt, &d.UpdatedAt, &d.EndpointURL, &d.SecretSealed,
+		); err != nil {
+			return nil, fmt.Errorf("notification_deliveries.DueForAttempt: scan: %w", err)
+		}
+		d.NextAttemptAt = nextAttemptAt.Int64
+		d.LastFailure = lastFailure.String
+		d.UserInitiatedAt = userInitiatedAt.Int64
+		result = append(result, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("notification_deliveries.DueForAttempt: rows: %w", err)
+	}
+	return result, nil
+}
+
+// UpdateAfterAttempt writes back the outcome of one delivery attempt: the new
+// attempts count, resulting status, next retry time (0 means NULL, i.e. no
+// further attempt is scheduled), and last_failure class (empty means NULL,
+// i.e. delivered). This is the only write for an attempt, issued once the
+// HTTP call has already completed — see notify.Worker's sweep for why there
+// is no separate claim step.
+func (r *NotificationDeliveryRepo) UpdateAfterAttempt(ctx context.Context, id int64, attempts int, status string, nextAttemptAt int64, lastFailure string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE notification_deliveries
+		    SET attempts = ?, status = ?, next_attempt_at = ?, last_failure = ?, updated_at = ?
+		  WHERE id = ?`,
+		attempts, status, nullIfZero(nextAttemptAt), nullIfEmpty(lastFailure), NowUnix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("notification_deliveries.UpdateAfterAttempt: %w", err)
+	}
+	return nil
+}
