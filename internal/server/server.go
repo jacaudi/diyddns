@@ -136,7 +136,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Sessions:  sessions,
 		Enroll:    enrollSvc,
 		Devices:   devicesSvc,
-		Checkin:   service.NewCheckinService(st, audit),
+		Checkin:   service.NewCheckinService(st, service.NopNotifier{}),
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, log, audit, nil, passkeySvc, key),
 		OIDC:      oidcSvc,
