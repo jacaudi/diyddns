@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -68,6 +69,135 @@ func scanNotificationEndpoint(row interface {
 	}
 	e.Enabled = enabled != 0
 	return e, nil
+}
+
+// Create inserts e via a single statement that also enforces maxPerUser —
+// design §10.1/§10.3's single-statement discipline: a preceding
+// `SELECT count(*)` is not acceptable because internal/store has no
+// transactions and SetMaxOpenConns(1) serialises statements, not sequences,
+// so N concurrent creates would all read "under the cap" and all insert.
+// e.ID, e.CreatedAt and e.UpdatedAt must already be set by the caller;
+// enabled is always 1 for a newly created endpoint. Returns ErrConflict when
+// the cap is exceeded (RowsAffected()==0) or (user_id, url) already exists
+// (UNIQUE violation) — both are reported identically, since Create does not
+// promise to distinguish them.
+func (r *NotificationEndpointRepo) Create(ctx context.Context, e NotificationEndpoint, maxPerUser int) error {
+	res, err := r.db.ExecContext(ctx,
+		`INSERT INTO notification_endpoints (id, user_id, label, url, secret_sealed, enabled, created_at, updated_at)
+		 SELECT ?, ?, ?, ?, ?, 1, ?, ?
+		  WHERE (SELECT count(*) FROM notification_endpoints WHERE user_id = ?) < ?`,
+		e.ID,           // 1: id
+		e.UserID,       // 2: user_id
+		e.Label,        // 3: label
+		e.URL,          // 4: url
+		e.SecretSealed, // 5: secret_sealed
+		e.CreatedAt,    // 6: created_at
+		e.UpdatedAt,    // 7: updated_at
+		e.UserID,       // 8: cap subquery user_id
+		maxPerUser,     // 9: cap subquery bound
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("notification_endpoints.Create: %w", ErrConflict)
+		}
+		return fmt.Errorf("notification_endpoints.Create: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("notification_endpoints.Create: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("notification_endpoints.Create: %w", ErrConflict)
+	}
+	return nil
+}
+
+// GetOwned fetches the endpoint identified by id, but only if it belongs to
+// userID. Returns ErrNotFound if it does not exist or is owned by someone
+// else — the two cases are indistinguishable by design, so ids stay
+// unenumerable.
+func (r *NotificationEndpointRepo) GetOwned(ctx context.Context, userID, id string) (NotificationEndpoint, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+notificationEndpointColumns+` FROM notification_endpoints WHERE id = ? AND user_id = ?`,
+		id, userID,
+	)
+	e, err := scanNotificationEndpoint(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NotificationEndpoint{}, fmt.Errorf("notification_endpoints.GetOwned: %w", ErrNotFound)
+		}
+		return NotificationEndpoint{}, fmt.Errorf("notification_endpoints.GetOwned: %w", err)
+	}
+	return e, nil
+}
+
+// ListByUser returns all notification endpoints owned by userID, regardless
+// of enabled state. A user with none gets an empty (nil) slice, not an error.
+func (r *NotificationEndpointRepo) ListByUser(ctx context.Context, userID string) ([]NotificationEndpoint, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+notificationEndpointColumns+` FROM notification_endpoints
+		 WHERE user_id = ?
+		 ORDER BY created_at, id`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("notification_endpoints.ListByUser: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []NotificationEndpoint
+	for rows.Next() {
+		e, err := scanNotificationEndpoint(rows)
+		if err != nil {
+			return nil, fmt.Errorf("notification_endpoints.ListByUser: scan: %w", err)
+		}
+		result = append(result, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("notification_endpoints.ListByUser: rows: %w", err)
+	}
+	return result, nil
+}
+
+// SetEnabled toggles enabled for the endpoint identified by (id, userID).
+// Returns ErrNotFound if no row matched — foreign or missing are
+// indistinguishable.
+func (r *NotificationEndpointRepo) SetEnabled(ctx context.Context, userID, id string, enabled bool) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE notification_endpoints SET enabled = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+		boolToInt(enabled), NowUnix(), id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("notification_endpoints.SetEnabled: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("notification_endpoints.SetEnabled: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("notification_endpoints.SetEnabled: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// Delete removes the endpoint identified by (id, userID); its deliveries
+// cascade per the schema FK. Returns ErrNotFound if no row matched.
+func (r *NotificationEndpointRepo) Delete(ctx context.Context, userID, id string) error {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM notification_endpoints WHERE id = ? AND user_id = ?`,
+		id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("notification_endpoints.Delete: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("notification_endpoints.Delete: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("notification_endpoints.Delete: %w", ErrNotFound)
+	}
+	return nil
 }
 
 // ListEnabledByUser returns the enabled notification endpoints owned by
@@ -213,4 +343,142 @@ func (r *NotificationDeliveryRepo) UpdateAfterAttempt(ctx context.Context, id in
 		return fmt.Errorf("notification_deliveries.UpdateAfterAttempt: %w", err)
 	}
 	return nil
+}
+
+// InsertUserTest inserts one endpoint.test delivery row for endpointID,
+// budgeted against design §10.3's shared outbound-attempt budget. The
+// ownership check (endpoint owned by userID and enabled), and the budget
+// check (fewer than budget rows already stamped with user_initiated_at
+// after windowStart), are both carried by this single statement — a
+// preceding SELECT is not acceptable, per §10.3, because internal/store has
+// no transactions and SetMaxOpenConns(1) serialises statements, not
+// sequences: N concurrent callers would otherwise all read "under budget"
+// and all insert.
+//
+// Returns (false, nil) — refused — when RowsAffected()==0, for any of:
+// the endpoint does not exist, is owned by someone else, is disabled, or
+// the budget is exhausted. Callers must report one generic message for all
+// of these; the row count alone cannot distinguish them, by design.
+func (r *NotificationDeliveryRepo) InsertUserTest(ctx context.Context, endpointID, userID string, payload []byte, now, windowStart int64, budget int) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`INSERT INTO notification_deliveries
+		       (endpoint_id, event_type, event_id, payload, attempts,
+		        next_attempt_at, status, user_initiated_at, created_at, updated_at)
+		 SELECT ?, 'endpoint.test', 0, ?, 0,
+		        ?, 'pending', ?, ?, ?
+		  WHERE EXISTS (SELECT 1 FROM notification_endpoints
+		                 WHERE id = ? AND user_id = ? AND enabled = 1)
+		    AND (SELECT count(*) FROM notification_deliveries
+		          WHERE endpoint_id = ?
+		            AND user_initiated_at > ?) < ?`,
+		endpointID,  // 1: endpoint_id
+		payload,     // 2: payload
+		now,         // 3: next_attempt_at
+		now,         // 4: user_initiated_at
+		now,         // 5: created_at
+		now,         // 6: updated_at
+		endpointID,  // 7: EXISTS id
+		userID,      // 8: EXISTS user_id
+		endpointID,  // 9: budget subquery endpoint_id
+		windowStart, // 10: budget subquery user_initiated_at >
+		budget,      // 11: budget cap
+	)
+	if err != nil {
+		return false, fmt.Errorf("notification_deliveries.InsertUserTest: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("notification_deliveries.InsertUserTest: RowsAffected: %w", err)
+	}
+	return n != 0, nil
+}
+
+// InsertRedelivery inserts a COPY of the terminal delivery row identified by
+// deliveryID — it does not re-arm the existing row in place. A redelivery is
+// another user-initiated attempt, so it must become another row stamped
+// with user_initiated_at; an UPDATE that moved the stamp onto the existing
+// row would not increase the budget-window row count and would not debit
+// anything (design §10.3, §21). This also preserves the source row's
+// history: its status/attempts/last_failure are untouched.
+//
+// The single statement carries ownership (via the join to
+// notification_endpoints), the terminal-status and enabled predicates, and
+// the same shared budget check as InsertUserTest — for the same atomicity
+// reason. Returns (false, nil) — refused — when RowsAffected()==0, for any
+// of: deliveryID does not exist, belongs to an endpoint not owned by
+// userID, its endpoint is disabled, the source row is not terminal
+// (status not in 'failed'/'delivered'), or the budget is exhausted.
+func (r *NotificationDeliveryRepo) InsertRedelivery(ctx context.Context, deliveryID int64, userID string, now, windowStart int64, budget int) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`INSERT INTO notification_deliveries
+		       (endpoint_id, event_type, event_id, payload, attempts,
+		        next_attempt_at, status, user_initiated_at, created_at, updated_at)
+		 SELECT src.endpoint_id, src.event_type, src.event_id, src.payload, 0,
+		        ?, 'pending', ?, ?, ?
+		   FROM notification_deliveries src
+		   JOIN notification_endpoints e ON e.id = src.endpoint_id
+		  WHERE src.id = ?
+		    AND src.status IN ('failed', 'delivered')
+		    AND e.user_id = ? AND e.enabled = 1
+		    AND (SELECT count(*) FROM notification_deliveries
+		          WHERE endpoint_id = src.endpoint_id
+		            AND user_initiated_at > ?) < ?`,
+		now,         // 1: next_attempt_at
+		now,         // 2: user_initiated_at
+		now,         // 3: created_at
+		now,         // 4: updated_at
+		deliveryID,  // 5: src.id
+		userID,      // 6: e.user_id
+		windowStart, // 7: budget subquery user_initiated_at >
+		budget,      // 8: budget cap
+	)
+	if err != nil {
+		return false, fmt.Errorf("notification_deliveries.InsertRedelivery: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("notification_deliveries.InsertRedelivery: RowsAffected: %w", err)
+	}
+	return n != 0, nil
+}
+
+// ListByEndpoint returns up to limit deliveries for endpointID, most recent
+// first, for the endpoint detail page's delivery history.
+func (r *NotificationDeliveryRepo) ListByEndpoint(ctx context.Context, endpointID string, limit int) ([]NotificationDelivery, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, endpoint_id, event_type, event_id, payload, attempts,
+		        next_attempt_at, status, last_failure, user_initiated_at,
+		        created_at, updated_at
+		   FROM notification_deliveries
+		  WHERE endpoint_id = ?
+		  ORDER BY created_at DESC, id DESC
+		  LIMIT ?`,
+		endpointID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("notification_deliveries.ListByEndpoint: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []NotificationDelivery
+	for rows.Next() {
+		var d NotificationDelivery
+		var nextAttemptAt, userInitiatedAt sql.NullInt64
+		var lastFailure sql.NullString
+		if err := rows.Scan(
+			&d.ID, &d.EndpointID, &d.EventType, &d.EventID, &d.Payload, &d.Attempts,
+			&nextAttemptAt, &d.Status, &lastFailure, &userInitiatedAt,
+			&d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("notification_deliveries.ListByEndpoint: scan: %w", err)
+		}
+		d.NextAttemptAt = nextAttemptAt.Int64
+		d.LastFailure = lastFailure.String
+		d.UserInitiatedAt = userInitiatedAt.Int64
+		result = append(result, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("notification_deliveries.ListByEndpoint: rows: %w", err)
+	}
+	return result, nil
 }
