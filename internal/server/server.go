@@ -86,10 +86,11 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 	// config.validateNotifications already rejected malformed entries at
 	// startup; this is belt-and-braces on the same values, and fails closed
-	// the same way the HMAC-key and required-OIDC checks above do. The parsed
-	// prefixes themselves have no consumer here yet — service.NewNotificationService
-	// (Task 8) is what needs them — so only the error is kept.
-	if _, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs); err != nil {
+	// the same way the HMAC-key and required-OIDC checks above do.
+	// service.NewNotificationService (below) is the consumer of the parsed
+	// prefixes.
+	allowedPrivateCIDRs, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs)
+	if err != nil {
 		return nil, nil, api.ServerDeps{}, webui.Deps{}, err
 	}
 
@@ -103,6 +104,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 	audit := service.NewAuditWriter(st)
 	authSvc := service.NewAuthService(sessions, audit)
+	notifySvc := service.NewNotificationService(st, key, cfg.Notifications.MaxEndpointsPerUser, allowedPrivateCIDRs, audit)
 
 	oidcMgr := oidc.NewManager(cfg.Auth.OIDC, cfg.Server.BaseURL, log)
 	if cfg.Auth.OIDC.Enabled && cfg.Auth.OIDC.Required {
@@ -192,6 +194,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Enroll:    enrollSvc,
 		Admin:     adminSvc,
 		Grants:    grantSvc,
+		Notify:    notifySvc,
 		Info:      version.Current(),
 		StartedAt: time.Now(),
 	}
