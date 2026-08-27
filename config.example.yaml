@@ -212,3 +212,28 @@ email:
   # startup. NOTE: none + a non-empty username above is also rejected at
   # startup unless host is localhost/127.0.0.1/::1 (see username, above).
   tls: "starttls"
+
+# Outbound IP-change webhook (#65). Notifies operator-configured endpoints when
+# a device's public IP changes. Validation runs unconditionally at startup —
+# even while disabled — so a misconfigured policy fails at boot rather than at
+# switch-on.
+notifications:
+  # Default false.
+  # enabled: false
+
+  # Operator-only allowlist of private/internal CIDR prefixes a notification
+  # endpoint URL is permitted to resolve into. Default [] (empty): no private
+  # destinations are allowed, so an endpoint pointing at an internal address is
+  # rejected at send time. Comma-separated when set via
+  # DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS.
+  # allowed_private_cidrs: []
+
+  # Per-attempt HTTP timeout. Default "10s".
+  # timeout: 10s
+
+  # Maximum delivery attempts (with doubling backoff) before giving up.
+  # Default 8. Must be 1..16 — beyond that the backoff can overflow.
+  # max_attempts: 8
+
+  # Maximum notification endpoints a single user may configure. Default 5.
+  # max_endpoints_per_user: 5

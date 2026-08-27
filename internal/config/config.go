@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -23,11 +24,12 @@ import (
 
 // Server is the fully-resolved server configuration.
 type Server struct {
-	Server   ServerSection
-	Database DatabaseSection
-	Logging  LoggingSection
-	Auth     Auth
-	Email    EmailSection
+	Server        ServerSection
+	Database      DatabaseSection
+	Logging       LoggingSection
+	Auth          Auth
+	Email         EmailSection
+	Notifications Notifications
 }
 
 // ServerSection holds HTTP listener settings.
@@ -112,6 +114,15 @@ type WebAuthnCfg struct {
 	Timeout       time.Duration `mapstructure:"timeout"`
 }
 
+// Notifications configures the outbound IP-change hook (#65).
+type Notifications struct {
+	Enabled             bool          `mapstructure:"enabled"`
+	AllowedPrivateCIDRs []string      `mapstructure:"allowed_private_cidrs"`
+	Timeout             time.Duration `mapstructure:"timeout"`
+	MaxAttempts         int           `mapstructure:"max_attempts"`
+	MaxEndpointsPerUser int           `mapstructure:"max_endpoints_per_user"`
+}
+
 // keyDefaults enumerates every config key, its default, and its env var. Keys
 // with a corresponding CLI flag (server.listen) still carry a SetDefault here;
 // viper ranks SetDefault above an unchanged flag's default, so a changed flag
@@ -142,21 +153,26 @@ var keyDefaults = map[string]any{
 	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
 	// (viper delivers env values as a single string, not []string). Configure
 	// scopes via YAML or flags; the default covers the common case.
-	"auth.oidc.scopes":              []string{"openid", "profile", "email"},
-	"auth.oidc.auto_link_by_email":  true,
-	"auth.oidc.allow_oidc_signup":   true,
-	"auth.webauthn.rp_id":           "",
-	"auth.webauthn.rp_origin":       "",
-	"auth.webauthn.rp_display_name": "DIYDDNS",
-	"auth.webauthn.timeout":         "120s",
-	"auth.hide_local_login_ui":      false,
-	"email.enabled":                 false,
-	"email.host":                    "",
-	"email.port":                    0,
-	"email.username":                "",
-	"email.password":                "",
-	"email.from":                    "",
-	"email.tls":                     "starttls",
+	"auth.oidc.scopes":                     []string{"openid", "profile", "email"},
+	"auth.oidc.auto_link_by_email":         true,
+	"auth.oidc.allow_oidc_signup":          true,
+	"auth.webauthn.rp_id":                  "",
+	"auth.webauthn.rp_origin":              "",
+	"auth.webauthn.rp_display_name":        "DIYDDNS",
+	"auth.webauthn.timeout":                "120s",
+	"auth.hide_local_login_ui":             false,
+	"email.enabled":                        false,
+	"email.host":                           "",
+	"email.port":                           0,
+	"email.username":                       "",
+	"email.password":                       "",
+	"email.from":                           "",
+	"email.tls":                            "starttls",
+	"notifications.enabled":                false,
+	"notifications.allowed_private_cidrs":  []string{},
+	"notifications.timeout":                "10s",
+	"notifications.max_attempts":           8,
+	"notifications.max_endpoints_per_user": 5,
 }
 
 // Load resolves configuration into a Server. Callers may pre-configure v (e.g.
@@ -194,6 +210,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, err
 	}
 	if err := validateEmail(cfg); err != nil {
+		return Server{}, err
+	}
+	if err := validateNotifications(cfg); err != nil {
 		return Server{}, err
 	}
 	return cfg, nil
@@ -347,6 +366,64 @@ func validateEmail(cfg Server) error {
 	}
 
 	return errors.Join(problems...)
+}
+
+// validateNotifications enforces the notifications.* invariants. Extracted
+// from Load for the same reason validateOIDC and validateEmail are
+// (config.go:203-204): Load's cyclomatic complexity budget.
+//
+// max_attempts is bounded above because the backoff doubles: far beyond 16,
+// 15s*2^n overflows time.Duration's int64 nanoseconds and can yield a
+// negative delay, i.e. a hot retry loop.
+func validateNotifications(cfg Server) error {
+	n := cfg.Notifications
+	for _, c := range n.AllowedPrivateCIDRs {
+		if _, err := netip.ParsePrefix(c); err != nil {
+			return fmt.Errorf("config: notifications.allowed_private_cidrs: %q: %w", c, err)
+		}
+	}
+	if n.Timeout <= 0 {
+		return fmt.Errorf("config: notifications.timeout must be > 0, got %s", n.Timeout)
+	}
+	if n.MaxAttempts < 1 || n.MaxAttempts > 16 {
+		return fmt.Errorf("config: notifications.max_attempts must be 1..16, got %d", n.MaxAttempts)
+	}
+	if n.MaxEndpointsPerUser < 1 {
+		return fmt.Errorf("config: notifications.max_endpoints_per_user must be >= 1, got %d",
+			n.MaxEndpointsPerUser)
+	}
+	return nil
+}
+
+// NotificationsEgressWarning returns a non-empty warning when the operator has
+// permitted a destination prefix broad enough to re-open a whole address
+// family. Returned rather than logged so the binary owns output, exactly like
+// InsecureCookieWarning (config.go:397, called from server.go:73) — Load has no
+// logger and cannot warn.
+func NotificationsEgressWarning(cfg Server) string {
+	if !cfg.Notifications.Enabled {
+		return ""
+	}
+	var broad []string
+	for _, c := range cfg.Notifications.AllowedPrivateCIDRs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			continue // validateNotifications already rejected these
+		}
+		switch {
+		case p.Bits() == 0,
+			p.Addr().Is4() && p.Bits() < 8,
+			p.Addr().Is6() && p.Bits() < 16,
+			p.String() == "64:ff9b::/96":
+			broad = append(broad, c)
+		}
+	}
+	if len(broad) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"notifications.allowed_private_cidrs contains very broad or sensitive prefixes %v: "+
+			"the server may be directed at internal addresses by any user", broad)
 }
 
 // ResolveWebAuthn derives the WebAuthn Relying Party ID and origin, falling

@@ -621,3 +621,82 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_NotificationsDefaults(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notifications.Enabled {
+		t.Error("notifications.enabled should default to false")
+	}
+	if got := cfg.Notifications.Timeout; got != 10*time.Second {
+		t.Errorf("timeout = %v, want 10s", got)
+	}
+	if got := cfg.Notifications.MaxAttempts; got != 8 {
+		t.Errorf("max_attempts = %d, want 8", got)
+	}
+	if got := cfg.Notifications.MaxEndpointsPerUser; got != 5 {
+		t.Errorf("max_endpoints_per_user = %d, want 5", got)
+	}
+	if len(cfg.Notifications.AllowedPrivateCIDRs) != 0 {
+		t.Errorf("allowed_private_cidrs = %v, want empty", cfg.Notifications.AllowedPrivateCIDRs)
+	}
+}
+
+// The security-critical key must come through the env, comma-separated. This is
+// the measurement issue #98 is about: Unmarshal splits, GetStringSlice does not.
+func TestLoad_AllowedPrivateCIDRsFromEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+	t.Setenv("DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS", "10.42.0.0/16,192.168.1.50/32")
+
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"10.42.0.0/16", "192.168.1.50/32"}
+	if len(cfg.Notifications.AllowedPrivateCIDRs) != len(want) {
+		t.Fatalf("got %v, want %v", cfg.Notifications.AllowedPrivateCIDRs, want)
+	}
+	for i := range want {
+		if cfg.Notifications.AllowedPrivateCIDRs[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, cfg.Notifications.AllowedPrivateCIDRs[i], want[i])
+		}
+	}
+}
+
+func TestLoad_NotificationsValidation(t *testing.T) {
+	tests := []struct {
+		name, key, val string
+	}{
+		{"bad cidr", "DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS", "not-a-cidr"},
+		{"zero timeout", "DIYDDNS_NOTIFICATIONS_TIMEOUT", "0s"},
+		{"zero attempts", "DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS", "0"},
+		{"too many attempts", "DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS", "17"},
+		{"zero endpoints", "DIYDDNS_NOTIFICATIONS_MAX_ENDPOINTS_PER_USER", "0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+			t.Setenv("DIYDDNS_NOTIFICATIONS_ENABLED", "true")
+			t.Setenv(tc.key, tc.val)
+			if _, err := config.Load(viper.New(), ""); err == nil {
+				t.Fatal("Load succeeded, want error")
+			}
+		})
+	}
+}
+
+func TestNotificationsEgressWarning(t *testing.T) {
+	var cfg config.Server
+	cfg.Notifications.Enabled = true
+	if got := config.NotificationsEgressWarning(cfg); got != "" {
+		t.Errorf("no CIDRs: got %q, want empty", got)
+	}
+	cfg.Notifications.AllowedPrivateCIDRs = []string{"0.0.0.0/0"}
+	if got := config.NotificationsEgressWarning(cfg); got == "" {
+		t.Error("0.0.0.0/0: got empty, want a warning")
+	}
+}
