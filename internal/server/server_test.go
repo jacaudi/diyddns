@@ -401,3 +401,59 @@ func TestVerifier_SurvivesRestart(t *testing.T) {
 		t.Fatalf("Verify() device = %q, want %q", gotID, result.DeviceID)
 	}
 }
+
+// bufferLogger returns a logger writing into buf, for asserting on log output.
+func bufferLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, nil))
+}
+
+// retentionConfig builds a valid server config with the given retention keys.
+// It does not reuse testConfig, whose signature takes only a secret key.
+func retentionConfig(t *testing.T, ipDays, perDeviceMax, auditDays int) config.Server {
+	t.Helper()
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	v.Set("auth.hmac.secret_key", validSecretKey())
+	v.Set("server.base_url", "https://ddns.example.com")
+	v.Set("retention.ip_history_days", ipDays)
+	v.Set("retention.ip_history_per_device_max", perDeviceMax)
+	v.Set("retention.audit_log_days", auditDays)
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
+
+func TestNew_WarnsWhenRetentionEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := server.New(retentionConfig(t, 90, 0, 365), memStore(t), bufferLogger(&buf)); err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "retention enabled") {
+		t.Errorf("startup log does not warn that retention is on:\n%s", out)
+	}
+	for _, want := range []string{
+		"ip_history_days=90",
+		"ip_history_per_device_max=0",
+		"audit_log_days=365",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("startup warning does not name %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("retention notice is not at WARN level:\n%s", out)
+	}
+}
+
+func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := server.New(retentionConfig(t, 0, 0, 0), memStore(t), bufferLogger(&buf)); err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	if strings.Contains(buf.String(), "retention enabled") {
+		t.Errorf("all-zero retention must warn about nothing:\n%s", buf.String())
+	}
+}

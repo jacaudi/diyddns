@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 )
@@ -202,33 +201,51 @@ func (r *IPHistoryRepo) Page(ctx context.Context, deviceID, cursor string, limit
 // seconds) or beyond perDeviceMax newest rows — but never deletes the row with
 // the highest id (the most recent insert) for that device.
 //
-// If perDeviceMax <= 0 the per-device cap is treated as unlimited.
+// At most batch rows are deleted per call, so a caller drains a large backlog
+// by looping until Prune returns 0 rather than holding the process's single
+// SQLite connection for one long statement (see internal/server/pruner.go).
+//
+// If perDeviceMax <= 0 the per-device cap is disabled and its clause is OMITTED
+// from the statement entirely. That is not an optimisation: the cap clause
+// carries a correlated subquery that sorts the device's whole history, and
+// under batching that sort would run once per batch instead of once per sweep.
+//
+// A disabled age window must be passed as math.MinInt64, never as the current
+// time — the two policies are ORed, so olderThan = now matches every row and
+// deletes the device's entire history but its newest row.
+//
 // Returns the number of rows deleted.
-func (r *IPHistoryRepo) Prune(ctx context.Context, deviceID string, olderThan int64, perDeviceMax int) (int, error) {
-	keepN := perDeviceMax
-	if keepN <= 0 {
-		keepN = math.MaxInt32
+func (r *IPHistoryRepo) Prune(ctx context.Context, deviceID string, olderThan int64, perDeviceMax, batch int) (int, error) {
+	var (
+		query string
+		args  []any
+	)
+	if perDeviceMax > 0 {
+		query = `DELETE FROM ip_history
+			 WHERE id IN (
+			   SELECT id FROM ip_history
+			    WHERE device_id = ?
+			      AND id NOT IN (SELECT MAX(id) FROM ip_history WHERE device_id = ?)
+			      AND ( observed_at < ?
+			            OR id < (SELECT MIN(id) FROM (
+			                 SELECT id FROM ip_history WHERE device_id = ?
+			                  ORDER BY id DESC LIMIT ?)) )
+			    LIMIT ?
+			 )`
+		args = []any{deviceID, deviceID, olderThan, deviceID, perDeviceMax, batch}
+	} else {
+		query = `DELETE FROM ip_history
+			 WHERE id IN (
+			   SELECT id FROM ip_history
+			    WHERE device_id = ?
+			      AND id NOT IN (SELECT MAX(id) FROM ip_history WHERE device_id = ?)
+			      AND observed_at < ?
+			    LIMIT ?
+			 )`
+		args = []any{deviceID, deviceID, olderThan, batch}
 	}
 
-	res, err := r.db.ExecContext(ctx,
-		`DELETE FROM ip_history
-		 WHERE device_id = ?
-		   AND id NOT IN (
-		     SELECT MAX(id) FROM ip_history WHERE device_id = ?
-		   )
-		   AND (
-		     observed_at < ?
-		     OR id < (
-		       SELECT MIN(id) FROM (
-		         SELECT id FROM ip_history
-		         WHERE device_id = ?
-		         ORDER BY id DESC
-		         LIMIT ?
-		       )
-		     )
-		   )`,
-		deviceID, deviceID, olderThan, deviceID, keepN,
-	)
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("ip_history.Prune: %w", err)
 	}

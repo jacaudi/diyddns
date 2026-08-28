@@ -38,6 +38,7 @@ type Server struct {
 	log        *slog.Logger
 	st         *store.Store
 	oidcMgr    *oidc.Manager
+	retention  config.RetentionSection
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -72,6 +73,18 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// say it at boot where it can still be acted on.
 	if w := config.InsecureCookieWarning(cfg); w != "" {
 		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+
+	// Retention deletes user-visible history irreversibly and is opt-in, so say
+	// at boot that it is on and with what windows. This is the cheapest safety
+	// net there is: it makes a first sweep attributable after the fact instead
+	// of a mystery, and it costs nothing on the default (all-zero) config.
+	if cfg.Retention != (config.RetentionSection{}) {
+		log.LogAttrs(context.Background(), slog.LevelWarn, "retention enabled: matching rows will be permanently deleted",
+			slog.Int("ip_history_days", cfg.Retention.IPHistoryDays),
+			slog.Int("ip_history_per_device_max", cfg.Retention.IPHistoryPerDeviceMax),
+			slog.Int("audit_log_days", cfg.Retention.AuditLogDays),
+		)
 	}
 
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
@@ -218,9 +231,10 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log:     log,
-		st:      st,
-		oidcMgr: mgr,
+		log:       log,
+		st:        st,
+		oidcMgr:   mgr,
+		retention: cfg.Retention,
 	}, nil
 }
 
@@ -234,7 +248,7 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-	go runPruner(ctx, s.st, s.log)
+	go runPruner(ctx, s.st, s.retention, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 
 	select {

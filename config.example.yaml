@@ -212,3 +212,36 @@ email:
   # startup. NOTE: none + a non-empty username above is also rejected at
   # startup unless host is localhost/127.0.0.1/::1 (see username, above).
   tls: "starttls"
+
+# Data retention for ip_history and audit_log. Disabled by default: neither
+# table loses a row to this policy until you set one of the three keys below,
+# so upgrading DIYDDNS never destroys history you already have because of
+# retention.
+#
+# NOTE: separately and unconditionally, every sweep also deletes expired
+# single-use tokens (account_recovery_tokens, enrollment_codes) once they
+# expire, whether or not they were used. This is NOT gated by the keys below
+# and starts on the first hourly sweep after upgrade. The audit trail is
+# unaffected (device.enroll.code and passkey.recovery_issued events survive);
+# what is lost is the token rows themselves, including
+# enrollment_codes.device_id.
+#
+# Deletion is PERMANENT and there is no undo. When you first enable a key, the
+# next sweep removes everything already outside the window. That work is done in
+# batches so it cannot monopolise the database, but on a long-lived deployment
+# it can still be a lot of rows the first time.
+#
+# The most recent ip_history row for each device is ALWAYS kept, whatever you
+# set here. The sweep runs hourly and is not configurable.
+retention:
+  # Delete ip_history rows older than this many days. Default 0 (keep forever).
+  # Maximum 36500 (100 years).
+  ip_history_days: 0
+
+  # Keep at most this many ip_history rows per device. Default 0 (unlimited).
+  # Maximum 36500.
+  ip_history_per_device_max: 0
+
+  # Delete audit_log rows older than this many days. Default 0 (keep forever).
+  # Maximum 36500 (100 years).
+  audit_log_days: 0

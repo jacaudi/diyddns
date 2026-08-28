@@ -378,7 +378,7 @@ func TestAuditLogPruneByAge(t *testing.T) {
 		}
 	}
 
-	deleted, err := s.AuditLog().Prune(ctx, 250)
+	deleted, err := s.AuditLog().Prune(ctx, 250, 1000)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -395,5 +395,28 @@ func TestAuditLogPruneByAge(t *testing.T) {
 	}
 	if page.Rows[0].CreatedAt != 300 {
 		t.Errorf("remaining row CreatedAt = %d, want 300", page.Rows[0].CreatedAt)
+	}
+}
+
+// ---------- 11b. Prune honours the batch bound ----------
+
+func TestAuditLogPruneRespectsBatch(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	for i := range 10 {
+		if _, err := s.AuditLog().Append(ctx, AuditEntry{
+			EventType: "test.event", CreatedAt: int64(100 + i*10),
+		}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	// All 10 rows are older than the cutoff; batch=3 caps this call.
+	deleted, err := s.AuditLog().Prune(ctx, 99999, 3)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if deleted != 3 {
+		t.Errorf("Prune: deleted = %d, want 3 (the batch bound)", deleted)
 	}
 }

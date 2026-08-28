@@ -621,3 +621,79 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 		})
 	}
 }
+
+func loadRetention(t *testing.T) config.Server {
+	t.Helper()
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
+
+func TestRetention_DefaultsToDisabled(t *testing.T) {
+	cfg := loadRetention(t)
+	if cfg.Retention.IPHistoryDays != 0 ||
+		cfg.Retention.IPHistoryPerDeviceMax != 0 ||
+		cfg.Retention.AuditLogDays != 0 {
+		t.Errorf("retention defaults = %+v, want every field 0 (disabled)", cfg.Retention)
+	}
+}
+
+// TestRetention_BindsEnv is not boilerplate: config.Load has no
+// viper.AutomaticEnv(), so a key missing from keyDefaults has its DIYDDNS_*
+// variable SILENTLY ignored.
+func TestRetention_BindsEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_RETENTION_IP_HISTORY_DAYS", "90")
+	t.Setenv("DIYDDNS_RETENTION_IP_HISTORY_PER_DEVICE_MAX", "500")
+	t.Setenv("DIYDDNS_RETENTION_AUDIT_LOG_DAYS", "365")
+
+	cfg := loadRetention(t)
+	if cfg.Retention.IPHistoryDays != 90 {
+		t.Errorf("IPHistoryDays = %d, want 90", cfg.Retention.IPHistoryDays)
+	}
+	if cfg.Retention.IPHistoryPerDeviceMax != 500 {
+		t.Errorf("IPHistoryPerDeviceMax = %d, want 500", cfg.Retention.IPHistoryPerDeviceMax)
+	}
+	if cfg.Retention.AuditLogDays != 365 {
+		t.Errorf("AuditLogDays = %d, want 365", cfg.Retention.AuditLogDays)
+	}
+}
+
+func TestRetention_RejectsOutOfRange(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"retention.ip_history_days", "-1"},
+		{"retention.ip_history_days", "36501"},
+		{"retention.ip_history_per_device_max", "-1"},
+		{"retention.ip_history_per_device_max", "36501"},
+		{"retention.audit_log_days", "-1"},
+		{"retention.audit_log_days", "36501"},
+	} {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set(tc.key, tc.val)
+
+			_, err := config.Load(v, "")
+			if err == nil {
+				t.Fatalf("Load(%s=%s) = nil error, want rejection", tc.key, tc.val)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q does not name the offending key %q", err, tc.key)
+			}
+		})
+	}
+}
+
+func TestRetention_AcceptsBounds(t *testing.T) {
+	for _, val := range []string{"0", "36500"} {
+		v := viper.New()
+		v.Set("database.path", ":memory:")
+		v.Set("retention.audit_log_days", val)
+		if _, err := config.Load(v, ""); err != nil {
+			t.Errorf("Load(retention.audit_log_days=%s) = %v, want accepted", val, err)
+		}
+	}
+}
