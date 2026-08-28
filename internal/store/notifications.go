@@ -20,6 +20,53 @@ type NotificationEndpoint struct {
 	UpdatedAt    int64
 }
 
+// Delivery status values — the fixed vocabulary of NotificationDelivery.Status.
+// Named the same way worker.go's six fixed failure classes are, so the
+// vocabulary has one authoritative source instead of a bare-literal contract
+// repeated at every site that sets or compares it (internal/server/notify's
+// enqueue.go and worker.go, this file's own InsertUserTest/InsertRedelivery
+// SQL, and internal/server/webui/endpoints.go's Redeliverable check).
+const (
+	// DeliveryPending marks a row not yet attempted, or awaiting its next
+	// retry after a non-terminal failure.
+	DeliveryPending = "pending"
+	// DeliveryDelivered marks a row whose attempt received a 2xx response.
+	DeliveryDelivered = "delivered"
+	// DeliveryFailed marks a row that will not be retried again: attempts
+	// exhausted, or a 410 Gone response (terminal regardless of attempts
+	// remaining).
+	DeliveryFailed = "failed"
+)
+
+// deliveryTerminalStatuses is the SQL fragment naming the statuses
+// InsertRedelivery accepts as a redelivery source, built from the same
+// constants webui's Redeliverable check compares against — so the two
+// cannot silently diverge the way a hand-typed IN (...) literal could.
+var deliveryTerminalStatuses = fmt.Sprintf("'%s', '%s'", DeliveryFailed, DeliveryDelivered)
+
+// insertUserTestQuery is InsertUserTest's query, built from DeliveryPending
+// rather than a bare 'pending' literal.
+var insertUserTestQuery = fmt.Sprintf(`INSERT INTO notification_deliveries
+		       (endpoint_id, event_type, event_id, payload, attempts,
+		        next_attempt_at, status, user_initiated_at, created_at, updated_at)
+		 SELECT ?, 'endpoint.test', 0, ?, 0,
+		        ?, '%s', ?, ?, ?
+		  WHERE EXISTS (SELECT 1 FROM notification_endpoints
+		                 WHERE id = ? AND user_id = ? AND enabled = 1)`, DeliveryPending)
+
+// insertRedeliveryQuery is InsertRedelivery's query, built from
+// DeliveryPending and deliveryTerminalStatuses rather than bare literals.
+var insertRedeliveryQuery = fmt.Sprintf(`INSERT INTO notification_deliveries
+		       (endpoint_id, event_type, event_id, payload, attempts,
+		        next_attempt_at, status, user_initiated_at, created_at, updated_at)
+		 SELECT src.endpoint_id, src.event_type, src.event_id, src.payload, 0,
+		        ?, '%s', ?, ?, ?
+		   FROM notification_deliveries src
+		   JOIN notification_endpoints e ON e.id = src.endpoint_id
+		  WHERE src.id = ?
+		    AND src.status IN (%s)
+		    AND e.user_id = ? AND e.enabled = 1`, DeliveryPending, deliveryTerminalStatuses)
+
 // NotificationDelivery is one outbox row: an event rendered for one endpoint,
 // tracked through delivery attempts.
 type NotificationDelivery struct {
@@ -359,29 +406,16 @@ func (r *NotificationDeliveryRepo) UpdateAfterAttempt(ctx context.Context, id in
 // the endpoint does not exist, is owned by someone else, is disabled, or
 // the budget is exhausted. Callers must report one generic message for all
 // of these; the row count alone cannot distinguish them, by design.
-func (r *NotificationDeliveryRepo) InsertUserTest(ctx context.Context, endpointID, userID string, payload []byte, now, windowStart int64, budget int) (bool, error) {
-	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO notification_deliveries
-		       (endpoint_id, event_type, event_id, payload, attempts,
-		        next_attempt_at, status, user_initiated_at, created_at, updated_at)
-		 SELECT ?, 'endpoint.test', 0, ?, 0,
-		        ?, 'pending', ?, ?, ?
-		  WHERE EXISTS (SELECT 1 FROM notification_endpoints
-		                 WHERE id = ? AND user_id = ? AND enabled = 1)
-		    AND (SELECT count(*) FROM notification_deliveries
-		          WHERE endpoint_id = ?
-		            AND user_initiated_at > ?) < ?`,
-		endpointID,  // 1: endpoint_id
-		payload,     // 2: payload
-		now,         // 3: next_attempt_at
-		now,         // 4: user_initiated_at
-		now,         // 5: created_at
-		now,         // 6: updated_at
-		endpointID,  // 7: EXISTS id
-		userID,      // 8: EXISTS user_id
-		endpointID,  // 9: budget subquery endpoint_id
-		windowStart, // 10: budget subquery user_initiated_at >
-		budget,      // 11: budget cap
+func (r *NotificationDeliveryRepo) InsertUserTest(ctx context.Context, endpointID, userID string, payload []byte, now int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx, insertUserTestQuery,
+		endpointID, // 1: endpoint_id
+		payload,    // 2: payload
+		now,        // 3: next_attempt_at
+		now,        // 4: user_initiated_at
+		now,        // 5: created_at
+		now,        // 6: updated_at
+		endpointID, // 7: EXISTS id
+		userID,     // 8: EXISTS user_id
 	)
 	if err != nil {
 		return false, fmt.Errorf("notification_deliveries.InsertUserTest: %w", err)
@@ -408,29 +442,14 @@ func (r *NotificationDeliveryRepo) InsertUserTest(ctx context.Context, endpointI
 // of: deliveryID does not exist, belongs to an endpoint not owned by
 // userID, its endpoint is disabled, the source row is not terminal
 // (status not in 'failed'/'delivered'), or the budget is exhausted.
-func (r *NotificationDeliveryRepo) InsertRedelivery(ctx context.Context, deliveryID int64, userID string, now, windowStart int64, budget int) (bool, error) {
-	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO notification_deliveries
-		       (endpoint_id, event_type, event_id, payload, attempts,
-		        next_attempt_at, status, user_initiated_at, created_at, updated_at)
-		 SELECT src.endpoint_id, src.event_type, src.event_id, src.payload, 0,
-		        ?, 'pending', ?, ?, ?
-		   FROM notification_deliveries src
-		   JOIN notification_endpoints e ON e.id = src.endpoint_id
-		  WHERE src.id = ?
-		    AND src.status IN ('failed', 'delivered')
-		    AND e.user_id = ? AND e.enabled = 1
-		    AND (SELECT count(*) FROM notification_deliveries
-		          WHERE endpoint_id = src.endpoint_id
-		            AND user_initiated_at > ?) < ?`,
-		now,         // 1: next_attempt_at
-		now,         // 2: user_initiated_at
-		now,         // 3: created_at
-		now,         // 4: updated_at
-		deliveryID,  // 5: src.id
-		userID,      // 6: e.user_id
-		windowStart, // 7: budget subquery user_initiated_at >
-		budget,      // 8: budget cap
+func (r *NotificationDeliveryRepo) InsertRedelivery(ctx context.Context, deliveryID int64, userID string, now int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx, insertRedeliveryQuery,
+		now,        // 1: next_attempt_at
+		now,        // 2: user_initiated_at
+		now,        // 3: created_at
+		now,        // 4: updated_at
+		deliveryID, // 5: src.id
+		userID,     // 6: e.user_id
 	)
 	if err != nil {
 		return false, fmt.Errorf("notification_deliveries.InsertRedelivery: %w", err)
@@ -442,19 +461,28 @@ func (r *NotificationDeliveryRepo) InsertRedelivery(ctx context.Context, deliver
 	return n != 0, nil
 }
 
-// ListByEndpoint returns up to limit deliveries for endpointID, most recent
-// first, for the endpoint detail page's delivery history.
-func (r *NotificationDeliveryRepo) ListByEndpoint(ctx context.Context, endpointID string, limit int) ([]NotificationDelivery, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, endpoint_id, event_type, event_id, payload, attempts,
+// listByEndpointQuery is ListByEndpoint's query, named so
+// TestListByEndpoint_UsesIndexNoTempBTree can EXPLAIN QUERY PLAN the exact
+// SQL this method runs, rather than a copy that could silently drift from it.
+//
+// Ordering by id DESC alone (rather than created_at DESC, id DESC) is
+// deliberate: id is INTEGER PRIMARY KEY AUTOINCREMENT and created_at is set
+// once at insert, so the two orderings are equivalent, and id DESC lets
+// SQLite walk the (endpoint_id, id) index directly instead of materialising
+// and sorting every row for the endpoint before LIMIT — confirmed via
+// EXPLAIN QUERY PLAN (see migrations/00005_notification_deliveries_id_index.sql).
+const listByEndpointQuery = `SELECT id, endpoint_id, event_type, event_id, payload, attempts,
 		        next_attempt_at, status, last_failure, user_initiated_at,
 		        created_at, updated_at
 		   FROM notification_deliveries
 		  WHERE endpoint_id = ?
-		  ORDER BY created_at DESC, id DESC
-		  LIMIT ?`,
-		endpointID, limit,
-	)
+		  ORDER BY id DESC
+		  LIMIT ?`
+
+// ListByEndpoint returns up to limit deliveries for endpointID, most recent
+// first, for the endpoint detail page's delivery history.
+func (r *NotificationDeliveryRepo) ListByEndpoint(ctx context.Context, endpointID string, limit int) ([]NotificationDelivery, error) {
+	rows, err := r.db.QueryContext(ctx, listByEndpointQuery, endpointID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("notification_deliveries.ListByEndpoint: %w", err)
 	}
@@ -481,4 +509,50 @@ func (r *NotificationDeliveryRepo) ListByEndpoint(ctx context.Context, endpointI
 		return nil, fmt.Errorf("notification_deliveries.ListByEndpoint: rows: %w", err)
 	}
 	return result, nil
+}
+
+// NotificationAttemptRepo provides the user-initiated outbound-attempt budget
+// (design §10.3).
+type NotificationAttemptRepo struct{ db *sql.DB }
+
+// NotificationAttempts returns a NotificationAttemptRepo bound to this Store's
+// database.
+func (s *Store) NotificationAttempts() *NotificationAttemptRepo {
+	return &NotificationAttemptRepo{db: s.db}
+}
+
+// claimAttemptQuery debits one user-initiated attempt if the user is under
+// budget. It is ONE statement on purpose: internal/store has no transactions
+// and SetMaxOpenConns(1) serialises statements, not sequences, so a
+// SELECT-then-INSERT pair would let N concurrent requests all read "under
+// budget" and all proceed.
+const claimAttemptQuery = `INSERT INTO notification_attempts (user_id, at)
+		 SELECT ?, ?
+		  WHERE (SELECT count(*) FROM notification_attempts
+		          WHERE user_id = ? AND at > ?) < ?`
+
+// Claim debits one user-initiated outbound attempt against userID's rolling
+// window, reporting whether it was allowed. windowStart is the exclusive lower
+// bound on `at`; budget is the cap.
+//
+// Callers claim BEFORE performing the work. A claim spent on a request that is
+// then refused for some other reason (endpoint disabled, not owned, source row
+// not terminal) is the safe direction: over-counting attempts throttles a user
+// slightly early, whereas claiming afterwards would let concurrent requests
+// race past the cap before any of them recorded anything.
+//
+// This ledger deliberately does not reference notification_endpoints. Counting
+// stamped notification_deliveries rows instead let a user reset the window by
+// deleting and recreating an endpoint, because those rows cascade — verified,
+// 5 stamped rows before the delete and 0 after.
+func (r *NotificationAttemptRepo) Claim(ctx context.Context, userID string, now, windowStart int64, budget int) (bool, error) {
+	res, err := r.db.ExecContext(ctx, claimAttemptQuery, userID, now, userID, windowStart, budget)
+	if err != nil {
+		return false, fmt.Errorf("notification_attempts.Claim: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("notification_attempts.Claim: RowsAffected: %w", err)
+	}
+	return n != 0, nil
 }

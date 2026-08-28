@@ -16,7 +16,7 @@ func TestBuildMux_SharesServiceInstancesWithWebUI(t *testing.T) {
 	// calls goose's package-level SetBaseFS/SetDialect with no synchronization,
 	// which races under -race against other tests that open a store — see
 	// TestWebUIPatternsAreReachable in routes_test.go.
-	_, _, apiDeps, webDeps, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog())
+	_, _, apiDeps, webDeps, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}

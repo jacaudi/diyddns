@@ -255,12 +255,14 @@ Once verified, **branch on the body's `type`.** Known types today are `device.ip
 may add new event types, and treating an unknown type as an error breaks forward compatibility
 for every existing consumer.
 
-#### `410 Gone` opts you out
+#### `410 Gone` ends that delivery
 
-Respond `410 Gone` to any delivery you never want to receive again, and that endpoint's deliveries
-stop **permanently** — the only way back in is to re-add the endpoint. Every other non-2xx
-response (or no response at all — timeout, connection refused, TLS failure) is retried with
-doubling backoff up to `notifications.max_attempts`.
+Respond `410 Gone` and that **one delivery** stops immediately — no further retries for it,
+regardless of attempts remaining. It does **not** disable the endpoint: the next event (a new IP
+change, or another manual test) is still delivered to it. There is no consumer-side way to opt an
+endpoint out of future deliveries in this version; only the account owner can disable or delete the
+endpoint. Every other non-2xx response (or no response at all — timeout, connection refused, TLS
+failure) is retried with doubling backoff up to `notifications.max_attempts`.
 
 #### Egress policy (operator-only)
 
@@ -277,7 +279,8 @@ there is no UI or per-user control for it.
 Two ranges need an explicit entry if you use them as a destination, because both are private by
 default like any other internal range:
 
-- **Tailscale**: its CGNAT IPv4 range `100.64.0.0/10` and its IPv6 ULA range `fc00::/7`.
+- **Tailscale**: its CGNAT IPv4 range `100.64.0.0/10` and its IPv6 range `fd7a:115c:a1e0::/48`
+  (Tailscale's own allocation within the ULA space, not the whole `fc00::/7`).
 - **NAT64**: `64:ff9b::/96`.
 
 Permitting `64:ff9b::/96` is unusually consequential: that prefix embeds an IPv4 address in its
@@ -297,8 +300,9 @@ variables, so a self-built macOS binary needs the CA installed in the system key
 #### What a user sees on failure
 
 A failed delivery's cause is reported to the endpoint's owner as exactly one of six fixed classes:
-`blocked`, `unreachable`, `tls`, `rejected`, `gone`, `internal`. No status code, resolved address,
-or raw error text is ever shown — that detail is deliberately withheld so a user configuring an
+`blocked`, `unreachable`, `tls`, `rejected`, `gone` ("Target removed (410)"), `internal`. No
+resolved address or raw error text is ever shown, and no status code beyond the `410` already
+implied by the `gone` class itself — that detail is deliberately withheld so a user configuring an
 outbound target cannot use failure detail as a probe of your internal network.
 
 ## Documentation

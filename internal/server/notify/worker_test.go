@@ -3,9 +3,14 @@ package notify
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +39,53 @@ func halfJitter() float64 { return 0.5 }
 type nopAudit struct{}
 
 func (nopAudit) Log(context.Context, store.AuditEntry) {}
+
+// capturingAudit records every entry it is given, for tests that need to
+// assert an audit event actually fired (and what it said).
+type capturingAudit struct{ entries []store.AuditEntry }
+
+func (c *capturingAudit) Log(_ context.Context, e store.AuditEntry) {
+	c.entries = append(c.entries, e)
+}
+
+// roundTripFunc adapts a plain function to http.RoundTripper, so a test can
+// give each of two *http.Client values a distinguishable transport without
+// any real dial or listener.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// recordingClient returns an *http.Client whose Transport sets *called to
+// true and answers every request with a 204, never touching the network.
+func recordingClient(called *bool) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		*called = true
+		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+}
+
+// fakeErrCtx wraps a live context but reports a caller-controlled non-nil
+// Err() while leaving Done() exactly as the embedded context reports it
+// (never closed for a context built from t.Context()). This is deliberately
+// NOT the same as an actually-cancelled context: database/sql's own
+// connection-acquisition check rejects any call made with a Done() context
+// before the driver ever runs (verified empirically — ExecContext/
+// QueryContext with an already-cancelled context fail immediately with
+// "context canceled"), which would mask whether worker.go's OWN ctx.Err()
+// guards are present at all. Keeping Done() open while faking Err() isolates
+// exactly the application-level guards under test from that unrelated
+// protection.
+type fakeErrCtx struct {
+	context.Context
+	err atomic.Bool
+}
+
+func (c *fakeErrCtx) Err() error {
+	if c.err.Load() {
+		return context.Canceled
+	}
+	return nil
+}
 
 // seedUserAndEndpoint inserts one user and one notification endpoint whose
 // secret is sealed under key, returning the endpoint's id.
@@ -326,12 +378,17 @@ func TestDeliver_BlockedTargetRecordsNoAddress(t *testing.T) {
 	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1)
 	w.sweep(t.Context())
 
+	// last_failure is the only column that could carry a leaked address (the
+	// others are the original event payload/type, untouched by a failed
+	// send), so asserting it against the exact fixed literal IS the leak
+	// check: any leaked detail — the address, a wrapped Go error, anything
+	// beyond the six fixed classes — would make this equality fail. A
+	// separate strings.Contains(row.lastFailure, "10.1.2.3") check here would
+	// be vacuous: it could only ever fire on a value this line has already
+	// rejected.
 	row := readDelivery(t, st, id)
 	if row.status != "failed" || row.lastFailure != "blocked" {
-		t.Errorf("status/last_failure = %q/%q, want failed/blocked", row.status, row.lastFailure)
-	}
-	if strings.Contains(row.lastFailure, "10.1.2.3") {
-		t.Errorf("last_failure leaked the resolved address: %q", row.lastFailure)
+		t.Fatalf("status/last_failure = %q/%q, want failed/blocked (or a leaked detail)", row.status, row.lastFailure)
 	}
 }
 
@@ -440,5 +497,214 @@ func TestDeliver_UnsupportedStoredSchemeIsInternal(t *testing.T) {
 	row := readDelivery(t, st, id)
 	if row.status != "failed" || row.lastFailure != "internal" {
 		t.Errorf("status/last_failure = %q/%q, want failed/internal", row.status, row.lastFailure)
+	}
+}
+
+// TestDeliver_HTTPSchemeUsesHTTPClient binds the worker's OWN scheme->client
+// derivation (worker.go's `client, err := w.clients.For(target.Scheme)`) to
+// the correct *http.Client. It exists because M50 — routing http to
+// c.HTTPS — survived every other test in this file: TestClients_For only
+// tests the scheme->client map in isolation, and
+// TestDeliver_ClientSelectionIsReDerived substitutes ftp (unsupported) for
+// http, which slips past exactly this defect (see that test's comment for
+// the substitution and why it matters).
+//
+// Each client here gets its own distinguishable transport, so the assertion
+// is which client the request actually reached — not merely that SOME
+// response came back, which a shared/misrouted client would also produce.
+func TestDeliver_HTTPSchemeUsesHTTPClient(t *testing.T) {
+	var httpCalled, httpsCalled bool
+	clients := &Clients{HTTP: recordingClient(&httpCalled), HTTPS: recordingClient(&httpsCalled)}
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), "http://127.0.0.1/hook")
+	id := seedDelivery(t, st, ep, EventIPChanged)
+
+	w := NewWorker(st, clients, testKey(), 5, nopAudit{}, halfJitter, discardLog())
+	w.sweep(t.Context())
+
+	if !httpCalled {
+		t.Error("an http:// delivery never reached the HTTP client")
+	}
+	if httpsCalled {
+		t.Error("an http:// delivery reached the HTTPS client — scheme routing is broken (M50)")
+	}
+	row := readDelivery(t, st, id)
+	if row.status != "delivered" {
+		t.Errorf("status = %q, want delivered", row.status)
+	}
+}
+
+// TestSweep_CtxErrSkipsRemainingRows binds the sweep loop's per-iteration
+// `if ctx.Err() != nil { return }` (worker.go's guard against starting a new
+// attempt once shutdown has begun) to an observable effect: with two due
+// rows and a ctx that already reports non-nil Err(), sweep must not attempt
+// EITHER row. Uses fakeErrCtx (see its doc comment) rather than an actually-
+// cancelled context, because a genuinely cancelled context would fail the
+// SELECT that fetches the due rows before the loop guard is ever reached,
+// which would make the mutation survive for an unrelated reason.
+func TestSweep_CtxErrSkipsRemainingRows(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	id1 := seedDelivery(t, st, ep, EventIPChanged)
+	id2 := seedDelivery(t, st, ep, EventIPChanged)
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	fc := &fakeErrCtx{Context: t.Context()}
+	fc.err.Store(true)
+	w.sweep(fc)
+
+	if hits.Load() != 0 {
+		t.Errorf("server hit %d times, want 0 — sweep must not start any new attempt once ctx.Err() is non-nil", hits.Load())
+	}
+	for _, id := range []int64{id1, id2} {
+		row := readDelivery(t, st, id)
+		if row.status != "pending" || row.attempts != 0 {
+			t.Errorf("row %d = %+v, want untouched (pending, 0 attempts)", id, row)
+		}
+	}
+}
+
+// TestAttempt_CtxErrReturnsEmptyClass binds attempt's own
+// `if ctx.Err() != nil { return "" }` guard (checked after client.Do
+// returns an error) to its return value directly. The send itself fails for
+// a real, unrelated reason (connection refused) so the guard's branch is
+// actually reached; fakeErrCtx (see its doc comment) reports ctx.Err() as
+// non-nil without ever closing Done(), so the send is not itself a
+// consequence of the fake cancellation.
+func TestAttempt_CtxErrReturnsEmptyClass(t *testing.T) {
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), "http://127.0.0.1:1/hook") // connection refused
+	seedDelivery(t, st, ep, EventIPChanged)
+
+	due, err := st.NotificationDeliveries().DueForAttempt(t.Context(), store.NowUnix(), 10)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
+	}
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	fc := &fakeErrCtx{Context: t.Context()}
+	fc.err.Store(true)
+	if class := w.attempt(fc, due[0]); class != "" {
+		t.Errorf("attempt with ctx.Err() != nil = %q, want \"\" (a shutdown must never be classified as a delivery failure)", class)
+	}
+}
+
+// TestDeliverOne_CtxErrSkipsWriteBack binds deliverOne's
+// `if class == "" { return }` guard to the database, using the SAME
+// fakeErrCtx technique as the two tests above so attempt() genuinely
+// returns "" (via its own guard, proven by TestAttempt_CtxErrReturnsEmptyClass)
+// while the write-back call itself is still free to run if the guard here is
+// missing.
+func TestDeliverOne_CtxErrSkipsWriteBack(t *testing.T) {
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), "http://127.0.0.1:1/hook") // connection refused
+	id := seedDelivery(t, st, ep, EventIPChanged)
+
+	due, err := st.NotificationDeliveries().DueForAttempt(t.Context(), store.NowUnix(), 10)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
+	}
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	fc := &fakeErrCtx{Context: t.Context()}
+	fc.err.Store(true)
+	w.deliverOne(fc, due[0])
+
+	row := readDelivery(t, st, id)
+	if row.status != "pending" || row.attempts != 0 {
+		t.Errorf("row = %+v after a cancelled-mid-attempt deliverOne, want untouched (pending, 0 attempts) — no write-back on a cancelled ctx (design §8.3)", row)
+	}
+}
+
+// TestClassifySendError pins every classification classifySendError makes,
+// table-driven so a future case is added the same way. M30b — a *net.DNSError
+// misclassified as unreachable instead of blocked — rebuilds exactly the
+// internal-DNS oracle §5.8 merges DNS failures and guard rejections to close.
+func TestClassifySendError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"denied sentinel", fmt.Errorf("wrap: %w", ErrDenied), failureBlocked},
+		{"dns failure", &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true}, failureBlocked},
+		{"tls certificate verification", &tls.CertificateVerificationError{Err: errors.New("x")}, failureTLS},
+		{"tls hostname mismatch", x509.HostnameError{}, failureTLS},
+		{"tls unknown authority", x509.UnknownAuthorityError{}, failureTLS},
+		{"tls certificate invalid", x509.CertificateInvalidError{}, failureTLS},
+		{"plain connection error", errors.New("connection refused"), failureUnreachable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifySendError(tc.err); got != tc.want {
+				t.Errorf("classifySendError(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDeliver_302IsRejectedNotDelivered is the regression guard for M25: a
+// 3xx counted as "delivered" would silently lose the event — the row reads
+// delivered but the consumer's redirect target, not the consumer, received
+// it (CheckRedirect refuses to follow, per TestClients_RedirectsNotFollowed).
+func TestDeliver_302IsRejectedNotDelivered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	id := seedDelivery(t, st, ep, EventIPChanged)
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w.sweep(t.Context())
+
+	row := readDelivery(t, st, id)
+	if row.status == "delivered" {
+		t.Fatal("a 3xx response was counted as delivered — the event was silently lost")
+	}
+	if row.lastFailure != "rejected" {
+		t.Errorf("last_failure = %q, want rejected", row.lastFailure)
+	}
+}
+
+// TestDeliver_BlockedTargetAuditsRejection is the regression guard for both
+// M4 (auditBlocked never firing on a guard rejection — the audit log is the
+// ONLY place a resolved address is ever recorded) and S5 (the event type
+// naming design §12/the plan's "notification.target_blocked", not
+// "notification.delivery_blocked").
+func TestDeliver_BlockedTargetAuditsRejection(t *testing.T) {
+	const target = "https://10.1.2.3/hook" // RFC1918, denied, never dialed for real
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), target)
+	seedDelivery(t, st, ep, EventIPChanged)
+
+	allowed, err := ParseAllowed([]string{"127.0.0.0/8"})
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	audit := &capturingAudit{}
+	w := NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), 1, audit, halfJitter, discardLog())
+	w.sweep(t.Context())
+
+	if len(audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want exactly 1", len(audit.entries))
+	}
+	got := audit.entries[0]
+	if got.EventType != "notification.target_blocked" {
+		t.Errorf("EventType = %q, want notification.target_blocked", got.EventType)
+	}
+	if got.TargetID != ep {
+		t.Errorf("TargetID = %q, want %q", got.TargetID, ep)
 	}
 }

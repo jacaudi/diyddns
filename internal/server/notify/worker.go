@@ -148,15 +148,15 @@ func (w *Worker) deliverOne(ctx context.Context, d store.DueDelivery) {
 		lastFailure   string
 	)
 	switch {
-	case class == "delivered":
-		status = "delivered"
+	case class == store.DeliveryDelivered:
+		status = store.DeliveryDelivered
 	// 410 is terminal on the first attempt regardless of attempts remaining;
 	// everything else is retried until attempts is exhausted.
 	case class == failureGone, attempts >= maxAttempts:
-		status = "failed"
+		status = store.DeliveryFailed
 		lastFailure = class
 	default:
-		status = "pending"
+		status = store.DeliveryPending
 		lastFailure = class
 		nextAttemptAt = store.NowUnix() + int64(backoffFor(attempts+1, w.randFloat).Seconds())
 	}
@@ -222,7 +222,7 @@ func (w *Worker) attempt(ctx context.Context, d store.DueDelivery) string {
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return "delivered"
+		return store.DeliveryDelivered
 	case resp.StatusCode == http.StatusGone:
 		return failureGone
 	default:
@@ -250,7 +250,7 @@ func (w *Worker) auditBlocked(ctx context.Context, d store.DueDelivery, raw erro
 	// map[string]string cannot fail to marshal.
 	details, _ := json.Marshal(map[string]string{"error": raw.Error()})
 	w.audit.Log(ctx, store.AuditEntry{
-		EventType:   "notification.delivery_blocked",
+		EventType:   "notification.target_blocked",
 		TargetType:  "notification_endpoint",
 		TargetID:    d.EndpointID,
 		DetailsJSON: string(details),

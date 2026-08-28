@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jacaudi/diyddns/internal/server/notify"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -120,17 +121,18 @@ func (h *handler) handleEndpointsCreate(w http.ResponseWriter, r *http.Request, 
 
 	ep, secret, err := h.deps.Notify.Create(r.Context(), usr.ID, label, rawURL)
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			data.FieldErr = "You already have an endpoint with that URL, or you're at your endpoint limit."
-		} else {
-			// Create's own validation never touches the network — its doc
-			// comment states it performs no DNS resolution — so its errors
-			// describe only the URL the user just typed. Nothing here is
-			// threat-adjacent the way a delivery failure's raw error is (see
-			// failureClassLabel): there is no upstream response to leak
-			// because no request was ever sent.
-			data.FieldErr = "That target was rejected: " + strings.TrimPrefix(err.Error(), "service.Create: ")
+		msg, ok := createErrorMessage(err)
+		if !ok {
+			// Create can also fail via auth.GenerateSecret, auth.SealSecret, or
+			// any non-conflict store error — none of which describe only the
+			// URL the user typed, and any of which may carry a raw
+			// driver/internal string. Never render that; log it and show the
+			// generic failure page instead (same defect class as 3eed9f8,
+			// "stop blaming the database").
+			h.logAndFail(w, r, usr, "create notification endpoint", err)
+			return
 		}
+		data.FieldErr = msg
 		h.renderStatus(w, r, http.StatusUnprocessableEntity, "endpoints", data)
 		return
 	}
@@ -149,6 +151,32 @@ func (h *handler) handleEndpointsCreate(w http.ResponseWriter, r *http.Request, 
 	refreshed.NewLabel = ep.Label
 	refreshed.Secret = secret
 	h.render(w, r, "endpoints", refreshed)
+}
+
+// createErrorMessage classifies a Create failure into user-facing text, or
+// reports ok=false when no such text is safe to show. It recognizes exactly
+// the two causes proven not to carry raw internal detail:
+//
+//   - store.ErrConflict — the (user_id, url) already exists, or the
+//     per-user cap was hit; both describe only counts and the URL typed.
+//   - notify.ErrDenied — validateTarget (service/notification.go) rejected
+//     the scheme, host, or IP literal. It performs no DNS resolution and no
+//     network I/O, so its message describes only the URL the user just
+//     typed.
+//
+// Every other Create failure (a URL that fails to even parse,
+// auth.GenerateSecret, auth.SealSecret, or any non-conflict store error) may
+// carry a raw driver/internal string and must never reach the page — the
+// caller falls back to the generic, logged failure path instead.
+func createErrorMessage(err error) (msg string, ok bool) {
+	switch {
+	case errors.Is(err, store.ErrConflict):
+		return "You already have an endpoint with that URL, or you're at your endpoint limit.", true
+	case errors.Is(err, notify.ErrDenied):
+		return "That target was rejected: " + strings.TrimPrefix(err.Error(), "service.Create: "), true
+	default:
+		return "", false
+	}
 }
 
 // ownedEndpoint loads a notification endpoint for the signed-in user,
@@ -240,7 +268,10 @@ func (h *handler) handleEndpointTest(w http.ResponseWriter, r *http.Request, usr
 // endpoint_id is a hidden form field the endpoint-detail page already knows
 // (it is rendering that endpoint's own history) and is used ONLY to choose
 // the redirect target on success — never for authorization, which is
-// entirely the service call's job.
+// entirely the service call's job. It is still attacker-controlled POST
+// data, though, so it is verified against ownedEndpoint before being
+// reflected into the Location header — a value that is not the caller's own
+// endpoint falls back to the generic list page instead.
 func (h *handler) handleDeliveryRedeliver(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 	deliveryID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -258,7 +289,9 @@ func (h *handler) handleDeliveryRedeliver(w http.ResponseWriter, r *http.Request
 	}
 	dest := "/account/endpoints"
 	if endpointID := r.PostFormValue("endpoint_id"); endpointID != "" {
-		dest = "/account/endpoints/" + endpointID
+		if _, err := h.deps.Notify.Get(r.Context(), usr.ID, endpointID); err == nil {
+			dest = "/account/endpoints/" + endpointID
+		}
 	}
 	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
@@ -307,10 +340,11 @@ type deliveryRow struct {
 }
 
 // deliveryRows converts store rows into rendered ones. Status is one of
-// "pending", "delivered", "failed" (internal/server/notify/enqueue.go,
-// worker.go); "failed" and "delivered" are the two terminal states
-// redelivery accepts (design §10.3's INSERT ... WHERE clause), so both mark
-// Redeliverable.
+// store.DeliveryPending/DeliveryDelivered/DeliveryFailed; the latter two are
+// the terminal states InsertRedelivery's own query accepts (built from the
+// same constants — see store.deliveryTerminalStatuses), so both mark
+// Redeliverable. Comparing against anything else here would let this button
+// drift from what the service call underneath it actually permits.
 func deliveryRows(rows []store.NotificationDelivery) []deliveryRow {
 	out := make([]deliveryRow, 0, len(rows))
 	for _, d := range rows {
@@ -322,7 +356,7 @@ func deliveryRows(rows []store.NotificationDelivery) []deliveryRow {
 			FailureClass:  failureClassLabel(d.LastFailure),
 			CreatedAbs:    absTime(d.CreatedAt),
 			UpdatedAbs:    absTime(d.UpdatedAt),
-			Redeliverable: d.Status == "failed" || d.Status == "delivered",
+			Redeliverable: d.Status == store.DeliveryFailed || d.Status == store.DeliveryDelivered,
 		})
 	}
 	return out

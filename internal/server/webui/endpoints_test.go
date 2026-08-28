@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacaudi/diyddns/internal/server/notify"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -81,6 +84,75 @@ func seedDelivery(t *testing.T, st *store.Store, endpointID, eventType, status, 
 // non-default config flag.
 func enableNotifications(deps *Deps) {
 	deps.Cfg.Notifications.Enabled = true
+}
+
+// TestCreateErrorMessage is the regression guard for S3: endpoints.go used to
+// render every non-ErrConflict Create failure as "That target was rejected: "
+// plus the raw error string, on the theory that Create's validation never
+// touches the network. That theory is false for auth.GenerateSecret/
+// auth.SealSecret failures and for any non-conflict store error, which can
+// all reach the same branch — the same defect class as 3eed9f8 ("stop
+// blaming the database"). createErrorMessage must show specific text ONLY
+// for the two causes proven safe (a conflict, or validateTarget's
+// notify.ErrDenied, which describes only the URL the user typed and never
+// touches the network); everything else must come back ok=false so the
+// caller falls through to the generic, logged failure path.
+func TestCreateErrorMessage(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		wantOK       bool
+		wantContains string
+	}{
+		{"conflict", fmt.Errorf("service.Create: %w", store.ErrConflict), true, "endpoint limit"},
+		{"denied target", fmt.Errorf("service.Create: %w", notify.ErrDenied), true, "That target was rejected"},
+		{"raw store error", fmt.Errorf("service.Create: %w", errors.New("no such table: notification_endpoints")), false, ""},
+		{"generate secret failure", fmt.Errorf("service.Create: %w", errors.New("crypto/rand: read failed")), false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, ok := createErrorMessage(tc.err)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && !strings.Contains(msg, tc.wantContains) {
+				t.Errorf("msg = %q, want it to contain %q", msg, tc.wantContains)
+			}
+			if !ok && msg != "" {
+				t.Errorf("msg = %q, want empty when ok=false (caller must not render it)", msg)
+			}
+		})
+	}
+}
+
+// TestDeliveryRows_RedeliverableMatchesStatusConsts is the regression guard
+// for S6: deliveryRows' Redeliverable flag and InsertRedelivery's own
+// terminal-status SQL (store.deliveryTerminalStatuses) must agree on exactly
+// which statuses are redeliverable, or the UI shows a Redeliver button that
+// always refuses (a status accepted here but not by the SQL) or hides one
+// that would have worked (accepted by the SQL but not here). This test uses
+// store's own named constants rather than re-typed literals, so a rename of
+// one automatically exercises the other.
+func TestDeliveryRows_RedeliverableMatchesStatusConsts(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{store.DeliveryPending, false},
+		{store.DeliveryFailed, true},
+		{store.DeliveryDelivered, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			rows := deliveryRows([]store.NotificationDelivery{{Status: tc.status}})
+			if len(rows) != 1 {
+				t.Fatalf("got %d rows, want 1", len(rows))
+			}
+			if rows[0].Redeliverable != tc.want {
+				t.Errorf("Redeliverable(%q) = %v, want %v", tc.status, rows[0].Redeliverable, tc.want)
+			}
+		})
+	}
 }
 
 func TestEndpoints_ListRequiresSession(t *testing.T) {
@@ -506,4 +578,78 @@ func TestEndpoints_RedeliverSucceedsForOwnTerminalDelivery(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("got %d deliveries, want 2 (the original terminal row plus the redelivered copy)", len(rows))
 	}
+}
+
+// TestEndpoints_RedeliverIgnoresUntrustedEndpointIDForRedirect is the
+// regression guard for the minor finding on handleDeliveryRedeliver: the
+// endpoint_id form field is attacker-controlled (it is never used for
+// authorization — Redeliver's own ownership check is what actually gates the
+// action) and was concatenated straight into the redirect's Location header
+// with no validation. Not exploitable today (the result always starts
+// /account/endpoints/, and Go's http.Redirect strips CR/LF), but a value
+// that is not the caller's own — here, another user's endpoint id — must not
+// be reflected into the redirect at all.
+func TestEndpoints_RedeliverIgnoresUntrustedEndpointIDForRedirect(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "redeliver-untrusted@example.com", "user")
+	other := seedUser(t, st, "redeliver-other@example.com", "user")
+	ep := seedEndpoint(t, st, usr.ID, "webhook", "https://example.com/hook", true)
+	otherEp := seedEndpoint(t, st, other.ID, "not-yours", "https://example.com/hook2", true)
+	d := seedDelivery(t, st, ep.ID, "ip.changed", "failed", "unreachable", 8)
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "endpoint_id": {otherEp.ID}}
+	req := httptest.NewRequest(http.MethodPost, "/account/deliveries/"+strconv.FormatInt(d.ID, 10)+"/redeliver",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/account/endpoints" {
+		t.Errorf("Location = %q, want /account/endpoints (a foreign endpoint_id must never be reflected)", got)
+	}
+}
+
+// TestAccount_LinksToEndpointsOnlyWhenEnabled pins the discoverability fix: the
+// endpoint routes are only registered when notifications.enabled is true, so
+// /account must offer the link exactly then and never otherwise — a link to an
+// unregistered route is a 404 dead end.
+func TestAccount_LinksToEndpointsOnlyWhenEnabled(t *testing.T) {
+	getAccount := func(t *testing.T, enabled bool) string {
+		t.Helper()
+		deps, st := testDeps(t)
+		if enabled {
+			enableNotifications(&deps)
+		}
+		h, _ := New(deps)
+		usr := seedUser(t, st, "nav@example.com", "user")
+		cookie := signIn(t, deps, usr)
+
+		req := httptest.NewRequest(http.MethodGet, "/account", nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /account status = %d, want 200", rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	t.Run("enabled: link present", func(t *testing.T) {
+		if body := getAccount(t, true); !strings.Contains(body, `href="/account/endpoints"`) {
+			t.Error("/account does not link to /account/endpoints; the feature is undiscoverable")
+		}
+	})
+	t.Run("disabled: link absent", func(t *testing.T) {
+		if body := getAccount(t, false); strings.Contains(body, `href="/account/endpoints"`) {
+			t.Error("/account links to /account/endpoints while notifications are disabled; that route is a 404")
+		}
+	})
 }

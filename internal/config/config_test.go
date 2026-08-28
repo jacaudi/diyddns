@@ -689,6 +689,64 @@ func TestLoad_NotificationsValidation(t *testing.T) {
 	}
 }
 
+// TestLoad_NullSectionFailsLoud is the regression guard for B3(b): a
+// top-level section with every child commented out parses as a nil-valued
+// YAML mapping, which viper's env-var binding can silently confuse with that
+// section's whole defaults sub-map (see TestLoad_ExampleConfigNotificationsEnvOverridesApply's
+// doc comment for the mechanism). Rather than rely on every config file
+// keeping at least one live child forever, Load itself must detect the shape
+// and fail loud, naming the section, so an operator who comments out
+// notifications.enabled gets a clear error instead of a config that silently
+// reverts every DIYDDNS_NOTIFICATIONS_* env var to its default.
+func TestLoad_NullSectionFailsLoud(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{
+			name: "null notifications section",
+			content: "database:\n  path: \"/tmp/x.db\"\n" +
+				"notifications:\n  # enabled: false\n",
+			wantErr: "notifications",
+		},
+		{
+			name: "null email section",
+			content: "database:\n  path: \"/tmp/x.db\"\n" +
+				"email:\n  # enabled: false\n",
+			wantErr: "email",
+		},
+		{
+			name: "live child is fine",
+			content: "database:\n  path: \"/tmp/x.db\"\n" +
+				"notifications:\n  enabled: false\n",
+			wantErr: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := config.Load(viper.New(), path)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: unexpected error %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Load succeeded, want an error naming the null section")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestLoad_ExampleConfigNotificationsEnvOverridesApply is the regression guard
 // for the #65 fix-wave finding: config.Load iterates keyDefaults (a Go map,
 // randomized order per process) to call SetDefault/BindEnv for every key. When
@@ -756,5 +814,22 @@ func TestNotificationsEgressWarning(t *testing.T) {
 	cfg.Notifications.AllowedPrivateCIDRs = []string{"0.0.0.0/0"}
 	if got := config.NotificationsEgressWarning(cfg); got == "" {
 		t.Error("0.0.0.0/0: got empty, want a warning")
+	}
+}
+
+// TestNotificationsEgressWarning_UnmaskedNAT64IsStillFlagged is the
+// regression guard for the minor finding on NotificationsEgressWarning's
+// literal p.String() == "64:ff9b::/96" comparison: ParseAllowed masks every
+// prefix it accepts (host bits cleared), but this function re-parses the raw
+// config strings directly, so an operator-typed "64:ff9b::1/96" (host bits
+// set, same network) parses to a *different* String() and slipped past the
+// comparison entirely — silently skipping the metadata-address warning for
+// exactly the spelling an operator who fat-fingered a host bit would use.
+func TestNotificationsEgressWarning_UnmaskedNAT64IsStillFlagged(t *testing.T) {
+	var cfg config.Server
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.AllowedPrivateCIDRs = []string{"64:ff9b::1/96"}
+	if got := config.NotificationsEgressWarning(cfg); got == "" {
+		t.Error("64:ff9b::1/96 (unmasked NAT64): got empty, want a warning")
 	}
 }

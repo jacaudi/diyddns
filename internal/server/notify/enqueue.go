@@ -51,7 +51,7 @@ func (e *Enqueuer) IPChanged(ctx context.Context, ev store.IPChangeEvent) {
 			EventID:       ev.EventID,
 			Payload:       payload,
 			NextAttemptAt: now,
-			Status:        "pending",
+			Status:        store.DeliveryPending,
 			// UserInitiatedAt deliberately zero -> NULL: server-initiated
 			// deliveries must not debit the user's attempt budget.
 		}); err != nil {

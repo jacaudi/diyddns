@@ -175,6 +175,56 @@ var keyDefaults = map[string]any{
 	"notifications.max_endpoints_per_user": 5,
 }
 
+// sectionPrefixes returns every dotted key prefix that appears as a parent
+// in keyDefaults — e.g. "auth" and "auth.session" for "auth.session.ttl".
+// None of these prefixes is ever itself a valid leaf value in the schema, so
+// seeing one appear as a bare key in a config file (detectNullSections)
+// means every key nested under it was omitted or commented out.
+func sectionPrefixes() map[string]bool {
+	prefixes := make(map[string]bool)
+	for key := range keyDefaults {
+		parts := strings.Split(key, ".")
+		for i := 1; i < len(parts); i++ {
+			prefixes[strings.Join(parts[:i], ".")] = true
+		}
+	}
+	return prefixes
+}
+
+// detectNullSections fails loud when configPath contains a section whose
+// every child key is commented out or omitted, which YAML parses as a
+// nil-valued mapping rather than a mapping with live children.
+//
+// This shape is dangerous, not merely empty: viper's flattening puts the
+// section's BARE dotted name into AllKeys() (flattenAndMergeMap's default
+// branch, viper v1.21.0), and because a bare (non-nested) key skips the
+// config-shadow check that would otherwise stop it (viper.go's find()), that
+// nil value can silently overwrite the env-derived defaults for every key
+// nested under it, depending on Go map iteration order inside viper's own
+// getSettings() — see config.example.yaml's notifications: comment for the
+// full mechanism. Detected here with a second, unconfigured viper.Viper
+// reading the same file: a live config always flattens to fully-dotted leaf
+// keys, so a bare section prefix surviving into ITS AllKeys() is exactly the
+// nil-mapping shape, independent of any SetDefault/BindEnv call order.
+func detectNullSections(configPath string) error {
+	shape := viper.New()
+	shape.SetConfigFile(configPath)
+	if err := shape.ReadInConfig(); err != nil {
+		return fmt.Errorf("config: read %s: %w", configPath, err)
+	}
+	prefixes := sectionPrefixes()
+	for _, key := range shape.AllKeys() {
+		if prefixes[key] {
+			return fmt.Errorf(
+				"config: %q in %s has no live (uncommented) child keys, which viper parses as a "+
+					"null value that can silently override other settings — give it at least one "+
+					"live child, or comment out the whole %q section",
+				key, configPath, key)
+		}
+	}
+	return nil
+}
+
 // Load resolves configuration into a Server. Callers may pre-configure v (e.g.
 // viper.BindPFlag for flags) before calling. If configPath is non-empty the
 // file is read; a missing/invalid file is an error.
@@ -192,6 +242,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		v.SetConfigFile(configPath)
 		if err := v.ReadInConfig(); err != nil {
 			return Server{}, fmt.Errorf("config: read %s: %w", configPath, err)
+		}
+		if err := detectNullSections(configPath); err != nil {
+			return Server{}, err
 		}
 	}
 
@@ -414,7 +467,7 @@ func NotificationsEgressWarning(cfg Server) string {
 		case p.Bits() == 0,
 			p.Addr().Is4() && p.Bits() < 8,
 			p.Addr().Is6() && p.Bits() < 16,
-			p.String() == "64:ff9b::/96":
+			p.Masked().String() == "64:ff9b::/96":
 			broad = append(broad, c)
 		}
 	}

@@ -196,7 +196,19 @@ func (s *NotificationService) Test(ctx context.Context, userID, id string) (bool
 		return false, fmt.Errorf("service.Test: render payload: %w", err)
 	}
 	windowStart := now - int64(notify.UserBudgetWindow/time.Second)
-	ok, err := s.st.NotificationDeliveries().InsertUserTest(ctx, id, userID, payload, now, windowStart, notify.UserBudgetCount)
+	// Claim first. The ledger is the rate limiter, and it must be debited
+	// before the work is attempted — claiming afterwards would let concurrent
+	// requests race past the cap before any of them recorded anything. A claim
+	// spent on a request that is then refused for another reason throttles the
+	// user slightly early, which is the safe direction.
+	claimed, err := s.st.NotificationAttempts().Claim(ctx, userID, now, windowStart, notify.UserBudgetCount)
+	if err != nil {
+		return false, fmt.Errorf("service.Test: %w", err)
+	}
+	if !claimed {
+		return false, nil
+	}
+	ok, err := s.st.NotificationDeliveries().InsertUserTest(ctx, id, userID, payload, now)
 	if err != nil {
 		return false, fmt.Errorf("service.Test: %w", err)
 	}
@@ -221,7 +233,16 @@ func (s *NotificationService) Test(ctx context.Context, userID, id string) (bool
 func (s *NotificationService) Redeliver(ctx context.Context, userID string, deliveryID int64) (bool, error) {
 	now := store.NowUnix()
 	windowStart := now - int64(notify.UserBudgetWindow/time.Second)
-	ok, err := s.st.NotificationDeliveries().InsertRedelivery(ctx, deliveryID, userID, now, windowStart, notify.UserBudgetCount)
+	// Claim first — see Test. /test and /redeliver debit the SAME ledger, so
+	// the budget bounds the primitive rather than one route onto it.
+	claimed, err := s.st.NotificationAttempts().Claim(ctx, userID, now, windowStart, notify.UserBudgetCount)
+	if err != nil {
+		return false, fmt.Errorf("service.Redeliver: %w", err)
+	}
+	if !claimed {
+		return false, nil
+	}
+	ok, err := s.st.NotificationDeliveries().InsertRedelivery(ctx, deliveryID, userID, now)
 	if err != nil {
 		return false, fmt.Errorf("service.Redeliver: %w", err)
 	}

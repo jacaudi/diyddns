@@ -405,6 +405,91 @@ func TestBudget_TestAndRedeliverShareIt(t *testing.T) {
 // one endpoint must yield exactly five successes and exactly five rows. This
 // closes the one thing design §17 explicitly parks as unverified. Run with
 // -race -count=5.
+// TestTest_RefusedForForeignEndpoint is the regression guard for M17:
+// NotificationService.Test deliberately has no ownership pre-check (its own
+// doc comment explains why — a preceding check would reopen the
+// check-then-write race), so the "AND user_id = ?" predicate inside
+// InsertUserTest's EXISTS clause is the ONLY thing standing between any
+// authenticated user and any other user's endpoint on this route.
+func TestTest_RefusedForForeignEndpoint(t *testing.T) {
+	st, userID, svc := newNotificationServiceTest(t)
+	other := seedUser(t, st, "other@b.co", "user")
+	ep := seedEndpoint(t, st, userID, "https://example.com/hook", true)
+
+	ok, err := svc.Test(t.Context(), other.ID, ep.ID)
+	if err != nil {
+		t.Fatalf("Test: unexpected error %v", err)
+	}
+	if ok {
+		t.Fatal("expected refusal: Test's INSERT is the only ownership check on this route")
+	}
+
+	rows, err := st.NotificationDeliveries().ListByEndpoint(t.Context(), ep.ID, 10)
+	if err != nil {
+		t.Fatalf("ListByEndpoint: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("got %d delivery rows for a foreign Test() call, want 0", len(rows))
+	}
+}
+
+// TestTest_AuditsTestSent is the regression guard for M37: a successful
+// Test() must record notification.test_sent, using a real audit writer
+// (not the discard fake newNotificationServiceTest wires) so the entry is
+// actually queryable.
+func TestTest_AuditsTestSent(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	allowed, err := notify.ParseAllowed(nil)
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	svc := NewNotificationService(st, testKey32(), 5, allowed, NewAuditWriter(st))
+	ep := seedEndpoint(t, st, usr.ID, "https://example.com/hook", true)
+
+	ok, err := svc.Test(t.Context(), usr.ID, ep.ID)
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if !ok {
+		t.Fatal("Test refused, want allowed")
+	}
+
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "notification.test_sent"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("notification.test_sent entries = %d, want 1", len(page.Rows))
+	}
+}
+
+// TestCreate_AuditsSecretRevealed is the regression guard for M38: a
+// successful Create() must record notification.secret_revealed alongside
+// notification.endpoint_created, using a real audit writer so the entry is
+// actually queryable.
+func TestCreate_AuditsSecretRevealed(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	allowed, err := notify.ParseAllowed(nil)
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	svc := NewNotificationService(st, testKey32(), 5, allowed, NewAuditWriter(st))
+
+	if _, _, err := svc.Create(t.Context(), usr.ID, "ep", "https://example.com/hook"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "notification.secret_revealed"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("notification.secret_revealed entries = %d, want 1", len(page.Rows))
+	}
+}
+
 func TestBudget_IsAtomicUnderConcurrency(t *testing.T) {
 	st, userID, svc := newNotificationServiceTest(t)
 	ep := seedEndpoint(t, st, userID, "https://example.com/hook", true)
