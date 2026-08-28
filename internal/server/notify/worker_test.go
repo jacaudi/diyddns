@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -634,13 +633,10 @@ func TestClassifySendError(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"denied sentinel", fmt.Errorf("wrap: %w", ErrDenied), failureBlocked},
-		{"dns failure", &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true}, failureBlocked},
-		{"tls certificate verification", &tls.CertificateVerificationError{Err: errors.New("x")}, failureTLS},
-		{"tls hostname mismatch", x509.HostnameError{}, failureTLS},
-		{"tls unknown authority", x509.UnknownAuthorityError{}, failureTLS},
-		{"tls certificate invalid", x509.CertificateInvalidError{}, failureTLS},
-		{"plain connection error", errors.New("connection refused"), failureUnreachable},
+		{"denied sentinel", fmt.Errorf("wrap: %w", ErrDenied), FailureBlocked},
+		{"dns failure", &net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true}, FailureBlocked},
+		{"tls certificate verification", &tls.CertificateVerificationError{Err: errors.New("x")}, FailureTLS},
+		{"plain connection error", errors.New("connection refused"), FailureUnreachable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -648,6 +644,39 @@ func TestClassifySendError(t *testing.T) {
 				t.Errorf("classifySendError(%v) = %q, want %q", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifySendError_RealTLSFailure drives a genuine untrusted-certificate
+// failure rather than a hand-built error value, because the shape matters and
+// hand-built ones get it wrong.
+//
+// An earlier version of this test asserted on BARE x509 errors
+// (x509.HostnameError{}, UnknownAuthorityError{}, CertificateInvalidError{}),
+// and classifySendError carried an errors.As branch for each. Those branches
+// were unreachable: crypto/tls has wrapped every verification failure in
+// *tls.CertificateVerificationError since Go 1.20, so the single check above
+// catches all three and the extra branches never fired. The synthetic cases
+// were also invalid values — x509.HostnameError{} has a nil Certificate, so
+// calling its Error() panics, which only went unnoticed because errors.As
+// matched before anything formatted it.
+func TestClassifySendError_RealTLSFailure(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+
+	// A client that does NOT trust httptest's self-signed CA, dialing a
+	// permitted loopback address so the destination guard is not what fails.
+	allowed, err := ParseAllowed([]string{"127.0.0.0/8"})
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	resp, err := NewClients(allowed, 5*time.Second).HTTPS.Get(srv.URL)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("connected to a server with an untrusted certificate")
+	}
+	if got := classifySendError(err); got != FailureTLS {
+		t.Errorf("classifySendError(%v) = %q, want %q", err, got, FailureTLS)
 	}
 }
 

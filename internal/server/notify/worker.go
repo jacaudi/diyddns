@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,13 +21,18 @@ import (
 )
 
 const (
-	notifierInterval  = 15 * time.Second // sweep cadence
-	deliveryBatchSize = 20               // max rows per sweep; bounds the LIMIT
-	backoffBase       = 15 * time.Second // first gap; NOT the same concept as
-	// notifierInterval, which it happens to equal
-	maxBackoff   = 16 * time.Minute // clamp
-	bodyDrainCap = 4 << 10          // bytes drained to io.Discard so the
-	// connection can be reused
+	// notifierInterval is how often the worker sweeps for due deliveries.
+	notifierInterval = 15 * time.Second
+	// deliveryBatchSize bounds the rows one sweep claims, and so the LIMIT.
+	deliveryBatchSize = 20
+	// backoffBase is the first retry gap. It equals notifierInterval by
+	// coincidence, not by relation — changing one must not change the other.
+	backoffBase = 15 * time.Second
+	// maxBackoff clamps the exponential.
+	maxBackoff = 16 * time.Minute
+	// bodyDrainCap is how much of an ignored response body is drained to
+	// io.Discard so the connection can be reused within a sweep.
+	bodyDrainCap = 4 << 10
 )
 
 // Budget constants for the user-initiated attempt limit (design §10.3). Task 8
@@ -45,13 +49,17 @@ const (
 // No status code, resolved address, or Go error string is a valid seventh
 // value — a user configuring an outbound target must not get a readback
 // oracle from any richer detail than these fixed strings.
+//
+// Exported because the web UI maps each to a human phrase and must key on the
+// same vocabulary; re-typing these as literals there would put one contract in
+// two packages.
 const (
-	failureBlocked     = "blocked"     // DNS failure OR guard rejection (deliberately merged)
-	failureUnreachable = "unreachable" // timeout or connection refused
-	failureTLS         = "tls"         // certificate verification failure
-	failureRejected    = "rejected"    // any non-2xx except 410, incl. 3xx
-	failureGone        = "gone"        // 410, terminal regardless of attempts remaining
-	failureInternal    = "internal"    // render/seal/scheme/nonce/internal error
+	FailureBlocked     = "blocked"     // DNS failure OR guard rejection (deliberately merged)
+	FailureUnreachable = "unreachable" // timeout or connection refused
+	FailureTLS         = "tls"         // certificate verification failure
+	FailureRejected    = "rejected"    // any non-2xx except 410, incl. 3xx
+	FailureGone        = "gone"        // 410, terminal regardless of attempts remaining
+	FailureInternal    = "internal"    // render/seal/scheme/nonce/internal error
 )
 
 // AuditSink records security-relevant delivery events. Declared here rather
@@ -152,7 +160,7 @@ func (w *Worker) deliverOne(ctx context.Context, d store.DueDelivery) {
 		status = store.DeliveryDelivered
 	// 410 is terminal on the first attempt regardless of attempts remaining;
 	// everything else is retried until attempts is exhausted.
-	case class == failureGone, attempts >= maxAttempts:
+	case class == FailureGone, attempts >= maxAttempts:
 		status = store.DeliveryFailed
 		lastFailure = class
 	default:
@@ -175,21 +183,21 @@ func (w *Worker) deliverOne(ctx context.Context, d store.DueDelivery) {
 func (w *Worker) attempt(ctx context.Context, d store.DueDelivery) string {
 	target, err := url.Parse(d.EndpointURL)
 	if err != nil {
-		return w.logFailure(ctx, d, failureInternal, err)
+		return w.logFailure(ctx, d, FailureInternal, err)
 	}
 	client, err := w.clients.For(target.Scheme)
 	if err != nil {
 		// Unsupported stored scheme never reaches a client.
-		return w.logFailure(ctx, d, failureInternal, err)
+		return w.logFailure(ctx, d, FailureInternal, err)
 	}
 
 	nonce, err := auth.RandToken(16)
 	if err != nil {
-		return w.logFailure(ctx, d, failureInternal, err)
+		return w.logFailure(ctx, d, FailureInternal, err)
 	}
 	secret, err := auth.OpenSecret(w.key, d.SecretSealed)
 	if err != nil {
-		return w.logFailure(ctx, d, failureInternal, err)
+		return w.logFailure(ctx, d, FailureInternal, err)
 	}
 	ts := strconv.FormatInt(store.NowUnix(), 10)
 	canonical := shared.CanonicalNotification(ts, nonce, shared.BodyHashHex(d.Payload))
@@ -197,7 +205,7 @@ func (w *Worker) attempt(ctx context.Context, d store.DueDelivery) string {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.EndpointURL, bytes.NewReader(d.Payload))
 	if err != nil {
-		return w.logFailure(ctx, d, failureInternal, err)
+		return w.logFailure(ctx, d, FailureInternal, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(shared.HeaderTimestamp, ts)
@@ -224,11 +232,11 @@ func (w *Worker) attempt(ctx context.Context, d store.DueDelivery) string {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return store.DeliveryDelivered
 	case resp.StatusCode == http.StatusGone:
-		return failureGone
+		return FailureGone
 	default:
 		w.log.LogAttrs(ctx, slog.LevelDebug, "notify: delivery rejected",
 			slog.Int64("delivery_id", d.ID), slog.Int("status", resp.StatusCode))
-		return failureRejected
+		return FailureRejected
 	}
 }
 
@@ -266,29 +274,22 @@ func (w *Worker) auditBlocked(ctx context.Context, d store.DueDelivery, raw erro
 // check is the only reliable one.
 func classifySendError(err error) string {
 	if errors.Is(err, ErrDenied) {
-		return failureBlocked
+		return FailureBlocked
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
-		return failureBlocked
+		return FailureBlocked
 	}
+	// crypto/tls wraps every certificate-verification failure in
+	// CertificateVerificationError (since Go 1.20), so this one check covers
+	// unknown-authority, hostname-mismatch and invalid-certificate alike.
+	// Verified by execution: an unknown-authority failure matches here, and
+	// separate errors.As branches for the x509 types beneath it never fire.
 	var certErr *tls.CertificateVerificationError
 	if errors.As(err, &certErr) {
-		return failureTLS
+		return FailureTLS
 	}
-	var hostErr x509.HostnameError
-	if errors.As(err, &hostErr) {
-		return failureTLS
-	}
-	var authErr x509.UnknownAuthorityError
-	if errors.As(err, &authErr) {
-		return failureTLS
-	}
-	var invalidErr x509.CertificateInvalidError
-	if errors.As(err, &invalidErr) {
-		return failureTLS
-	}
-	return failureUnreachable
+	return FailureUnreachable
 }
 
 // backoffFor returns the delay before attempt (the attempt being SCHEDULED,

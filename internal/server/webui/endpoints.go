@@ -304,25 +304,31 @@ func (h *handler) handleDeliveryRedeliver(w http.ResponseWriter, r *http.Request
 // empty LastFailure (pending or delivered) renders as nothing; anything
 // outside the six known classes renders as "Unknown" rather than passing
 // through unrecognised text.
+// failureLabels maps notify's six fixed failure classes to the phrase shown on
+// an endpoint's page. Keyed on notify's own constants rather than re-typed
+// literals: the class vocabulary is one contract and must not live in two
+// packages.
+var failureLabels = map[string]string{
+	notify.FailureBlocked:     "Blocked by destination policy",
+	notify.FailureUnreachable: "Unreachable",
+	notify.FailureTLS:         "TLS error",
+	notify.FailureRejected:    "Rejected by target",
+	notify.FailureGone:        "Target removed (410)",
+	notify.FailureInternal:    "Internal error",
+}
+
 func failureClassLabel(class string) string {
-	switch class {
-	case "":
+	if class == "" {
 		return ""
-	case "blocked":
-		return "Blocked by destination policy"
-	case "unreachable":
-		return "Unreachable"
-	case "tls":
-		return "TLS error"
-	case "rejected":
-		return "Rejected by target"
-	case "gone":
-		return "Target removed (410)"
-	case "internal":
-		return "Internal error"
-	default:
-		return "Unknown"
 	}
+	if label, ok := failureLabels[class]; ok {
+		return label
+	}
+	// Any value the worker did not write — a future class, or a corrupted row.
+	// Never fall through to rendering `class` itself: last_failure is the one
+	// field a user reads back, and design §5.8 keeps it a fixed vocabulary so
+	// it cannot become an oracle.
+	return "Unknown"
 }
 
 // deliveryRow is one rendered notification_deliveries row. FailureClass is
