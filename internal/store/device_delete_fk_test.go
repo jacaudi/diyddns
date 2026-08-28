@@ -8,8 +8,8 @@ import (
 // TestDeviceDeleteWithConsumedEnrollmentCode guards a foreign-key gap: the
 // enrollment flow's Consume sets enrollment_codes.device_id to the new
 // device, so every code-enrolled device is referenced by a surviving
-// consumed code. Deleting that device must succeed (the code survives for
-// audit with its device link cleared), not fail on the FK.
+// consumed code. Deleting that device must succeed (the code survives the
+// cascade with its device link cleared), not fail on the FK.
 func TestDeviceDeleteWithConsumedEnrollmentCode(t *testing.T) {
 	s, ctx := newTestStore(t)
 
@@ -40,10 +40,10 @@ func TestDeviceDeleteWithConsumedEnrollmentCode(t *testing.T) {
 		t.Fatalf("GetByID after delete: %v, want ErrNotFound", err)
 	}
 
-	// The consumed code survives for audit, with its device link cleared.
+	// The consumed code survives the cascade, with its device link cleared.
 	code, err := s.EnrollmentCodes().Get(ctx, "fk-code")
 	if err != nil {
-		t.Fatalf("Get code after device delete: %v (code should survive for audit)", err)
+		t.Fatalf("Get code after device delete: %v (code should survive the cascade)", err)
 	}
 	if code.DeviceID != "" {
 		t.Fatalf("code.DeviceID = %q after device delete, want empty (link cleared by ON DELETE SET NULL)", code.DeviceID)

@@ -3414,3 +3414,12 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 		t.Errorf("recovery link was NOT shown for a disabled target — it is the only way back in:\n%s", body)
 	}
 }
+
+// TestKnownEventTypes_IncludesRetentionPrune guards the audit filter's
+// datalist. prune() writes this event type, and no other test asserts what this
+// list contains.
+func TestKnownEventTypes_IncludesRetentionPrune(t *testing.T) {
+	if !slices.Contains(knownEventTypes, "retention.prune") {
+		t.Errorf("knownEventTypes is missing %q", "retention.prune")
+	}
+}

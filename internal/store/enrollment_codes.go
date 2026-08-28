@@ -113,13 +113,14 @@ func (r *EnrollmentCodeRepo) Consume(ctx context.Context, code, deviceID string,
 	return r.Get(ctx, code)
 }
 
-// PruneExpired deletes enrollment codes that have expired and have not been
-// consumed. Consumed codes are retained for audit purposes until the owning
-// user is deleted (which cascades automatically via FK).
+// PruneExpired deletes every expired row, consumed or not. Expiry is the only
+// gate: a consumed row is already unusable (Consume matches
+// used_at IS NULL AND expires_at > ?), so deleting it once expired cannot
+// re-open it, and retaining it forever is an unbounded-growth leak.
 // Returns the number of rows deleted.
 func (r *EnrollmentCodeRepo) PruneExpired(ctx context.Context, now int64) (int, error) {
 	res, err := r.db.ExecContext(ctx,
-		`DELETE FROM enrollment_codes WHERE expires_at < ? AND used_at IS NULL`,
+		`DELETE FROM enrollment_codes WHERE expires_at < ?`,
 		now,
 	)
 	if err != nil {

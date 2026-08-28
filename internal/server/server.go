@@ -42,6 +42,7 @@ type Server struct {
 	st         *store.Store
 	oidcMgr    *oidc.Manager
 	notifier   *notify.Worker // nil when notifications are disabled
+	retention  config.RetentionSection
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -98,6 +99,18 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	var notifier service.Notifier = service.NopNotifier{}
 	if cfg.Notifications.Enabled {
 		notifier = notify.NewEnqueuer(st, log)
+	}
+
+	// Retention deletes user-visible history irreversibly and is opt-in, so say
+	// at boot that it is on and with what windows. This is the cheapest safety
+	// net there is: it makes a first sweep attributable after the fact instead
+	// of a mystery, and it costs nothing on the default (all-zero) config.
+	if cfg.Retention != (config.RetentionSection{}) {
+		log.LogAttrs(context.Background(), slog.LevelWarn, "retention enabled: matching rows will be permanently deleted",
+			slog.Int("ip_history_days", cfg.Retention.IPHistoryDays),
+			slog.Int("ip_history_per_device_max", cfg.Retention.IPHistoryPerDeviceMax),
+			slog.Int("audit_log_days", cfg.Retention.AuditLogDays),
+		)
 	}
 
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
@@ -265,10 +278,11 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log:      log,
-		st:       st,
-		oidcMgr:  mgr,
-		notifier: notifier,
+		log:       log,
+		st:        st,
+		oidcMgr:   mgr,
+		notifier:  notifier,
+		retention: cfg.Retention,
 	}, nil
 }
 
@@ -282,7 +296,7 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-	go runPruner(ctx, s.st, s.log)
+	go runPruner(ctx, s.st, s.retention, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 	if s.notifier != nil {
 		go s.notifier.Run(ctx)

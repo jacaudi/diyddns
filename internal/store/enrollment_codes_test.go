@@ -243,9 +243,9 @@ func TestEnrollmentCodeConsumeUnknownCodeReturnsErrNotFound(t *testing.T) {
 	}
 }
 
-// ---------- 8. PruneExpired removes only unused expired codes ----------
+// ---------- 8. PruneExpired removes ALL expired codes ----------
 
-func TestEnrollmentCodePruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
+func TestEnrollmentCodePruneExpiredRemovesAllExpired(t *testing.T) {
 	s, ctx := newTestStore(t)
 
 	u, err := s.Users().Create(ctx, User{Email: "ec-grace@example.com", Role: "user"})
@@ -307,8 +307,8 @@ func TestEnrollmentCodePruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PruneExpired: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("PruneExpired: rows affected = %d, want 1", n)
+	if n != 2 {
+		t.Errorf("PruneExpired: rows affected = %d, want 2 (A unused-expired, C consumed-expired)", n)
 	}
 
 	// A should be gone
@@ -325,9 +325,46 @@ func TestEnrollmentCodePruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
 		t.Errorf("After prune: code B should still exist, got %v", err)
 	}
 
-	// C should still exist (consumed, audit retention)
-	if _, err := s.EnrollmentCodes().Get(ctx, codeC.Code); err != nil {
-		t.Errorf("After prune: code C should still exist (consumed), got %v", err)
+	// C is consumed AND expired, so it is gone too: expiry is the only gate.
+	if _, err := s.EnrollmentCodes().Get(ctx, codeC.Code); !errors.Is(err, ErrNotFound) {
+		t.Errorf("After prune: consumed-expired code C should be gone, Get err = %v", err)
+	}
+}
+
+// TestEnrollmentCodePruneExpiredKeepsConsumedUnexpired pins the new clause as
+// expiry-keyed rather than use-keyed: a consumed code that has NOT yet expired
+// survives the sweep.
+func TestEnrollmentCodePruneExpiredKeepsConsumedUnexpired(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "ec-unexpired@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	dev, err := s.Devices().Create(ctx, Device{UserID: u.ID, Label: "dev", SecretHash: "h"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	now := NowUnix()
+	code, err := s.EnrollmentCodes().Create(ctx, EnrollmentCode{
+		Code: "consumed-unexpired", UserID: u.ID, Label: "x", ExpiresAt: now + 3600,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Consume's signature is (ctx, code, deviceID, now) — deviceID comes BEFORE
+	// now — and it REQUIRES a real device id: enrollment_codes.device_id carries
+	// an FK, so passing "" fails with FOREIGN KEY constraint failed (787).
+	if _, err := s.EnrollmentCodes().Consume(ctx, code.Code, dev.ID, now); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+
+	if _, err := s.EnrollmentCodes().PruneExpired(ctx, now); err != nil {
+		t.Fatalf("PruneExpired: %v", err)
+	}
+
+	if _, err := s.EnrollmentCodes().Get(ctx, code.Code); err != nil {
+		t.Errorf("consumed but unexpired code should survive, got %v", err)
 	}
 }
 

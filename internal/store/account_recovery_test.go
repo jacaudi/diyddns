@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 )
@@ -153,9 +154,9 @@ func TestAccountRecoveryConsumeSecondCallReturnsErrNotFound(t *testing.T) {
 	}
 }
 
-// ---------- 6. PruneExpired removes only unused expired tokens ----------
+// ---------- 6. PruneExpired removes ALL expired tokens ----------
 
-func TestAccountRecoveryPruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
+func TestAccountRecoveryPruneExpiredRemovesAllExpired(t *testing.T) {
 	s, ctx := newTestStore(t)
 
 	u, err := s.Users().Create(ctx, User{Email: "ar-grace@example.com", Role: "user"})
@@ -213,8 +214,8 @@ func TestAccountRecoveryPruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PruneExpired: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("PruneExpired: rows affected = %d, want 1", n)
+	if n != 2 {
+		t.Errorf("PruneExpired: rows affected = %d, want 2 (A unused-expired, C consumed-expired)", n)
 	}
 
 	// A should be gone
@@ -231,14 +232,46 @@ func TestAccountRecoveryPruneExpiredRemovesOnlyUnusedExpired(t *testing.T) {
 		t.Errorf("After prune: token B should still exist, got %v", err)
 	}
 
-	// C should still exist (consumed, audit retention) — verify via raw query
-	// since Consume would fail (already used) and there is no exported Get.
+	// C is consumed AND expired, so it is gone too: expiry is the only gate.
+	// Verified via raw query since Consume would fail either way.
 	var got string
 	err = s.DB().QueryRowContext(ctx,
 		`SELECT token_hash FROM account_recovery_tokens WHERE token_hash = ?`, tokC.TokenHash,
 	).Scan(&got)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("After prune: consumed-expired token C should be gone, Scan err = %v", err)
+	}
+}
+
+// TestAccountRecoveryPruneExpiredKeepsConsumedUnexpired pins the new clause as
+// expiry-keyed rather than use-keyed: a consumed token that has NOT yet expired
+// survives the sweep.
+func TestAccountRecoveryPruneExpiredKeepsConsumedUnexpired(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	u, err := s.Users().Create(ctx, User{Email: "ar-unexpired@example.com", Role: "user"})
 	if err != nil {
-		t.Errorf("After prune: token C should still exist (consumed), got %v", err)
+		t.Fatalf("create user: %v", err)
+	}
+	now := NowUnix()
+	// NOTE: AccountRecoveryRepo.Create returns only an error, not the token.
+	tok := RecoveryToken{UserID: u.ID, TokenHash: "consumed-unexpired", ExpiresAt: now + 3600}
+	if err := s.AccountRecovery().Create(ctx, tok); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.AccountRecovery().Consume(ctx, tok.TokenHash, now); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+
+	if _, err := s.AccountRecovery().PruneExpired(ctx, now); err != nil {
+		t.Fatalf("PruneExpired: %v", err)
+	}
+
+	var got string
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT token_hash FROM account_recovery_tokens WHERE token_hash = ?`, tok.TokenHash,
+	).Scan(&got); err != nil {
+		t.Errorf("consumed but unexpired token should survive, got %v", err)
 	}
 }
 

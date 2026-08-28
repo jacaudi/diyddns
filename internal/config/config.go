@@ -30,6 +30,7 @@ type Server struct {
 	Auth          Auth
 	Email         EmailSection
 	Notifications Notifications
+	Retention     RetentionSection
 }
 
 // ServerSection holds HTTP listener settings.
@@ -60,6 +61,16 @@ type EmailSection struct {
 	Password string
 	From     string
 	TLS      string // "starttls", "implicit", or "none" — see validateEmail
+}
+
+// RetentionSection holds data-retention windows for the tables the background
+// pruner sweeps on policy rather than on expiry. Every field defaults to 0,
+// which disables that policy — retention is opt-in so an upgrade never
+// deletes an operator's history.
+type RetentionSection struct {
+	IPHistoryDays         int `mapstructure:"ip_history_days"`
+	IPHistoryPerDeviceMax int `mapstructure:"ip_history_per_device_max"`
+	AuditLogDays          int `mapstructure:"audit_log_days"`
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
@@ -173,6 +184,9 @@ var keyDefaults = map[string]any{
 	"notifications.timeout":                "10s",
 	"notifications.max_attempts":           8,
 	"notifications.max_endpoints_per_user": 5,
+	"retention.ip_history_days":            0,
+	"retention.ip_history_per_device_max":  0,
+	"retention.audit_log_days":             0,
 }
 
 // sectionPrefixes returns every dotted key prefix that appears as a parent
@@ -266,6 +280,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, err
 	}
 	if err := validateNotifications(cfg); err != nil {
+		return Server{}, err
+	}
+	if err := validateRetention(cfg); err != nil {
 		return Server{}, err
 	}
 	return cfg, nil
@@ -587,4 +604,35 @@ func DecodeSecretKey(b64 string) ([]byte, error) {
 		return nil, fmt.Errorf("config: auth.hmac.secret_key must decode to 32 bytes, got %d", len(raw))
 	}
 	return raw, nil
+}
+
+// maxRetentionDays bounds every retention.* key at 100 years.
+//
+// For the two *_days keys the bound is load-bearing, not cosmetic:
+// pruneRetention computes its cutoff as now - days*86400, and
+// int64(days)*86400 wraps for a large enough day count, making the cutoff a
+// huge POSITIVE number that deletes everything, silently and irreversibly.
+//
+// ip_history_per_device_max is a row count and is never multiplied, so the
+// upper bound there is uniformity rather than an overflow guard: one rule,
+// applied to all three keys, is simpler to state to an operator than two.
+const maxRetentionDays = 36500
+
+// validateRetention enforces 0..maxRetentionDays on every retention key.
+// Extracted from Load to keep Load's cyclomatic complexity under the
+// project's gocyclo threshold (.golangci.yml, min-complexity: 15).
+func validateRetention(cfg Server) error {
+	for _, k := range []struct {
+		name  string
+		value int
+	}{
+		{"retention.ip_history_days", cfg.Retention.IPHistoryDays},
+		{"retention.ip_history_per_device_max", cfg.Retention.IPHistoryPerDeviceMax},
+		{"retention.audit_log_days", cfg.Retention.AuditLogDays},
+	} {
+		if k.value < 0 || k.value > maxRetentionDays {
+			return fmt.Errorf("config: %s must be between 0 and %d (got %d)", k.name, maxRetentionDays, k.value)
+		}
+	}
+	return nil
 }
