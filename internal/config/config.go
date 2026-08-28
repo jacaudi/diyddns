@@ -68,9 +68,10 @@ type EmailSection struct {
 // which disables that policy — retention is opt-in so an upgrade never
 // deletes an operator's history.
 type RetentionSection struct {
-	IPHistoryDays         int `mapstructure:"ip_history_days"`
-	IPHistoryPerDeviceMax int `mapstructure:"ip_history_per_device_max"`
-	AuditLogDays          int `mapstructure:"audit_log_days"`
+	IPHistoryDays              int `mapstructure:"ip_history_days"`
+	IPHistoryPerDeviceMax      int `mapstructure:"ip_history_per_device_max"`
+	AuditLogDays               int `mapstructure:"audit_log_days"`
+	NotificationDeliveriesDays int `mapstructure:"notification_deliveries_days"`
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
@@ -164,29 +165,30 @@ var keyDefaults = map[string]any{
 	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
 	// (viper delivers env values as a single string, not []string). Configure
 	// scopes via YAML or flags; the default covers the common case.
-	"auth.oidc.scopes":                     []string{"openid", "profile", "email"},
-	"auth.oidc.auto_link_by_email":         true,
-	"auth.oidc.allow_oidc_signup":          true,
-	"auth.webauthn.rp_id":                  "",
-	"auth.webauthn.rp_origin":              "",
-	"auth.webauthn.rp_display_name":        "DIYDDNS",
-	"auth.webauthn.timeout":                "120s",
-	"auth.hide_local_login_ui":             false,
-	"email.enabled":                        false,
-	"email.host":                           "",
-	"email.port":                           0,
-	"email.username":                       "",
-	"email.password":                       "",
-	"email.from":                           "",
-	"email.tls":                            "starttls",
-	"notifications.enabled":                false,
-	"notifications.allowed_private_cidrs":  []string{},
-	"notifications.timeout":                "10s",
-	"notifications.max_attempts":           8,
-	"notifications.max_endpoints_per_user": 5,
-	"retention.ip_history_days":            0,
-	"retention.ip_history_per_device_max":  0,
-	"retention.audit_log_days":             0,
+	"auth.oidc.scopes":                       []string{"openid", "profile", "email"},
+	"auth.oidc.auto_link_by_email":           true,
+	"auth.oidc.allow_oidc_signup":            true,
+	"auth.webauthn.rp_id":                    "",
+	"auth.webauthn.rp_origin":                "",
+	"auth.webauthn.rp_display_name":          "DIYDDNS",
+	"auth.webauthn.timeout":                  "120s",
+	"auth.hide_local_login_ui":               false,
+	"email.enabled":                          false,
+	"email.host":                             "",
+	"email.port":                             0,
+	"email.username":                         "",
+	"email.password":                         "",
+	"email.from":                             "",
+	"email.tls":                              "starttls",
+	"notifications.enabled":                  false,
+	"notifications.allowed_private_cidrs":    []string{},
+	"notifications.timeout":                  "10s",
+	"notifications.max_attempts":             8,
+	"notifications.max_endpoints_per_user":   5,
+	"retention.ip_history_days":              0,
+	"retention.ip_history_per_device_max":    0,
+	"retention.audit_log_days":               0,
+	"retention.notification_deliveries_days": 0,
 }
 
 // sectionPrefixes returns every dotted key prefix that appears as a parent
@@ -629,6 +631,7 @@ func validateRetention(cfg Server) error {
 		{"retention.ip_history_days", cfg.Retention.IPHistoryDays},
 		{"retention.ip_history_per_device_max", cfg.Retention.IPHistoryPerDeviceMax},
 		{"retention.audit_log_days", cfg.Retention.AuditLogDays},
+		{"retention.notification_deliveries_days", cfg.Retention.NotificationDeliveriesDays},
 	} {
 		if k.value < 0 || k.value > maxRetentionDays {
 			return fmt.Errorf("config: %s must be between 0 and %d (got %d)", k.name, maxRetentionDays, k.value)

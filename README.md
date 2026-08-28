@@ -328,10 +328,23 @@ set one of these keys.
 | `retention.ip_history_days` | `DIYDDNS_RETENTION_IP_HISTORY_DAYS` | `0` (keep forever) by default; max `36500` |
 | `retention.ip_history_per_device_max` | `DIYDDNS_RETENTION_IP_HISTORY_PER_DEVICE_MAX` | `0` (unlimited) by default; max `36500` |
 | `retention.audit_log_days` | `DIYDDNS_RETENTION_AUDIT_LOG_DAYS` | `0` (keep forever) by default; max `36500` |
+| `retention.notification_deliveries_days` | `DIYDDNS_RETENTION_NOTIFICATION_DELIVERIES_DAYS` | `0` (keep forever) by default; max `36500` |
 
 The two `ip_history` keys combine: a row is removed if it falls outside *either*
 window. **The most recent row for each device is always kept**, whatever you
 set, so a device never loses its current IP.
+
+`notification_deliveries_days` trims the delivery history shown on an endpoint's
+page. **Only completed deliveries are eligible** — a delivery still waiting to
+be sent or retried is never removed, however old it is, because deleting one
+would silently drop work with nothing left to retry it. Enable this if you use
+notifications: without it the table grows with every IP change, for every
+endpoint.
+
+The attempt ledger behind the per-user rate limit (`notification_attempts`) is
+**not** configurable and needs no key. Its rows only mean anything inside a live
+five-minute budget window, so they are swept hourly on age alone — the same way
+expired sessions and replay nonces are.
 
 **Deletion is permanent and there is no undo.** When you first enable a key, the
 next sweep removes everything already outside the window — on an aged database

@@ -44,6 +44,18 @@ const (
 // cannot silently diverge the way a hand-typed IN (...) literal could.
 var deliveryTerminalStatuses = fmt.Sprintf("'%s', '%s'", DeliveryFailed, DeliveryDelivered)
 
+// pruneDeliveriesQuery is NotificationDeliveryRepo.Prune's query, built from
+// deliveryTerminalStatuses rather than a hand-typed IN (...) literal — the same
+// reason insertRedeliveryQuery is. Assembled here at package level rather than
+// inline at the ExecContext call so the statement is a constant expression: the
+// interpolated fragment is built from constants only and never from input, and
+// hoisting it says so structurally instead of asking a reader (or gosec) to
+// take it on trust.
+var pruneDeliveriesQuery = fmt.Sprintf(`DELETE FROM notification_deliveries
+		 WHERE id IN (SELECT id FROM notification_deliveries
+		               WHERE created_at < ? AND status IN (%s)
+		               LIMIT ?)`, deliveryTerminalStatuses)
+
 // insertUserTestQuery is InsertUserTest's query, built from DeliveryPending
 // rather than a bare 'pending' literal.
 var insertUserTestQuery = fmt.Sprintf(`INSERT INTO notification_deliveries
@@ -555,4 +567,54 @@ func (r *NotificationAttemptRepo) Claim(ctx context.Context, userID string, now,
 		return false, fmt.Errorf("notification_attempts.Claim: RowsAffected: %w", err)
 	}
 	return n != 0, nil
+}
+
+// PruneExpired deletes attempt-ledger rows stamped before olderThan, returning
+// the number removed.
+//
+// This is expiry-gated, not retention-gated, and deliberately has no
+// retention.* key: a ledger row's only purpose is to be counted by Claim
+// inside a live budget window, so once it falls outside the widest window the
+// server can ask about it carries no information an operator could have a
+// policy about — the same reasoning that gates replay_nonces and sessions.
+//
+// Unbatched, unlike the retention sweeps: the table is bounded by
+// budget x users x window (at most a few dozen rows per user between hourly
+// sweeps), so there is no backlog for a LIMIT to protect the single
+// process-wide SQLite connection from.
+func (r *NotificationAttemptRepo) PruneExpired(ctx context.Context, olderThan int64) (int, error) {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM notification_attempts WHERE at < ?`, olderThan)
+	if err != nil {
+		return 0, fmt.Errorf("notification_attempts.PruneExpired: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("notification_attempts.PruneExpired: RowsAffected: %w", err)
+	}
+	return int(n), nil
+}
+
+// Prune deletes at most batch TERMINAL delivery rows created before olderThan,
+// returning the number removed. Callers drain in a loop until it returns 0.
+//
+// INVARIANT: a pending row is never eligible, however old it is. A pending row
+// is work the sweeper still owes; deleting one silently drops a delivery with
+// nothing left to retry it and no record that it vanished. Age alone must
+// never make owed work disappear — hence the status filter rather than a bare
+// created_at cutoff.
+//
+// Batched for the same reason audit_log.Prune is: store.Open sets
+// SetMaxOpenConns(1), so one long DELETE blocks every database access in the
+// process, not just writes.
+func (r *NotificationDeliveryRepo) Prune(ctx context.Context, olderThan int64, batch int) (int, error) {
+	res, err := r.db.ExecContext(ctx, pruneDeliveriesQuery, olderThan, batch)
+	if err != nil {
+		return 0, fmt.Errorf("notification_deliveries.Prune: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("notification_deliveries.Prune: RowsAffected: %w", err)
+	}
+	return int(n), nil
 }

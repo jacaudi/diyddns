@@ -908,3 +908,39 @@ func TestRetention_AcceptsBounds(t *testing.T) {
 		}
 	}
 }
+
+// TestLoad_NotificationDeliveriesRetention pins the new retention key: default
+// 0 (disabled, like its siblings), settable via env, and bounded by the same
+// 0..36500 rule.
+func TestLoad_NotificationDeliveriesRetention(t *testing.T) {
+	t.Run("defaults to disabled", func(t *testing.T) {
+		t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+		cfg, err := config.Load(viper.New(), "")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Retention.NotificationDeliveriesDays; got != 0 {
+			t.Errorf("notification_deliveries_days = %d, want 0", got)
+		}
+	})
+	t.Run("settable via env", func(t *testing.T) {
+		t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+		t.Setenv("DIYDDNS_RETENTION_NOTIFICATION_DELIVERIES_DAYS", "30")
+		cfg, err := config.Load(viper.New(), "")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Retention.NotificationDeliveriesDays; got != 30 {
+			t.Errorf("notification_deliveries_days = %d, want 30", got)
+		}
+	})
+	t.Run("rejects out of range", func(t *testing.T) {
+		for _, v := range []string{"-1", "36501"} {
+			t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+			t.Setenv("DIYDDNS_RETENTION_NOTIFICATION_DELIVERIES_DAYS", v)
+			if _, err := config.Load(viper.New(), ""); err == nil {
+				t.Errorf("Load accepted notification_deliveries_days=%s", v)
+			}
+		}
+	})
+}

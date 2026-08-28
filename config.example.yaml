@@ -285,3 +285,13 @@ retention:
   # Delete audit_log rows older than this many days. Default 0 (keep forever).
   # Maximum 36500 (100 years).
   audit_log_days: 0
+
+  # Delete COMPLETED notification deliveries older than this many days — the
+  # history shown on an endpoint's page. Default 0 (keep forever). Maximum
+  # 36500. A delivery still pending or awaiting retry is never removed however
+  # old it is; only finished ones are eligible.
+  #
+  # Worth setting if you use notifications: the table grows with every IP
+  # change, for every configured endpoint. The attempt ledger behind the
+  # per-user rate limit needs no key — it is swept hourly on age alone.
+  # notification_deliveries_days: 0

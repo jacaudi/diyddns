@@ -354,3 +354,104 @@ func TestBudget_WindowExpires(t *testing.T) {
 		t.Error("claim refused although every prior attempt is outside the window")
 	}
 }
+
+// TestNotificationAttempts_PruneExpired: ledger rows outside any live budget
+// window are dead weight. They are expiry-gated, not retention-gated — an
+// operator has no policy to express about them, exactly like replay_nonces.
+func TestNotificationAttempts_PruneExpired(t *testing.T) {
+	s, ctx := newTestStore(t)
+	now := NowUnix()
+	seedBudgetUser(t, s, ctx, "u1", "ep1")
+
+	for _, at := range []int64{now - 7200, now - 5400, now - 60, now} {
+		if _, err := s.DB().ExecContext(ctx,
+			`INSERT INTO notification_attempts (user_id, at) VALUES ('u1', ?)`, at); err != nil {
+			t.Fatalf("seed attempt: %v", err)
+		}
+	}
+
+	n, err := s.NotificationAttempts().PruneExpired(ctx, now-3600)
+	if err != nil {
+		t.Fatalf("PruneExpired: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("pruned %d, want 2 (the two older than the cutoff)", n)
+	}
+	var left int
+	if err := s.DB().QueryRowContext(ctx, `SELECT count(*) FROM notification_attempts`).Scan(&left); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if left != 2 {
+		t.Errorf("%d rows left, want 2", left)
+	}
+}
+
+// TestNotificationDeliveries_PruneNeverTouchesPending is the safety property
+// that matters. A pending row is work the sweeper still owes; deleting one
+// silently drops a delivery the user is waiting on, and no retry would ever
+// notice. Only terminal rows are eligible, however old a pending row is.
+func TestNotificationDeliveries_PruneNeverTouchesPending(t *testing.T) {
+	s, ctx := newTestStore(t)
+	now := NowUnix()
+	old := now - 86400*30
+	seedBudgetUser(t, s, ctx, "u1", "ep1")
+
+	insert := func(status string, createdAt int64) {
+		t.Helper()
+		if _, err := s.DB().ExecContext(ctx,
+			`INSERT INTO notification_deliveries
+			   (endpoint_id, event_type, event_id, payload, attempts,
+			    next_attempt_at, status, created_at, updated_at)
+			 VALUES ('ep1','device.ip_changed',1,?,0,?,?,?,?)`,
+			[]byte(`{}`), now, status, createdAt, createdAt); err != nil {
+			t.Fatalf("seed %s: %v", status, err)
+		}
+	}
+	insert(DeliveryPending, old)   // ancient but still owed — must survive
+	insert(DeliveryDelivered, old) // terminal and old — must go
+	insert(DeliveryFailed, old)    // terminal and old — must go
+	insert(DeliveryDelivered, now) // terminal but recent — must survive
+
+	n, err := s.NotificationDeliveries().Prune(ctx, now-86400, 5000)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("pruned %d, want 2", n)
+	}
+	var pending int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM notification_deliveries WHERE status = ?`, DeliveryPending).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 1 {
+		t.Errorf("pending rows = %d, want 1 — pruning must never delete owed work", pending)
+	}
+}
+
+// TestNotificationDeliveries_PruneRespectsBatch: the sweep must be batched, so
+// a large backlog cannot monopolise the process's single SQLite connection.
+func TestNotificationDeliveries_PruneRespectsBatch(t *testing.T) {
+	s, ctx := newTestStore(t)
+	now := NowUnix()
+	old := now - 86400*30
+	seedBudgetUser(t, s, ctx, "u1", "ep1")
+
+	for range 7 {
+		if _, err := s.DB().ExecContext(ctx,
+			`INSERT INTO notification_deliveries
+			   (endpoint_id, event_type, event_id, payload, attempts,
+			    next_attempt_at, status, created_at, updated_at)
+			 VALUES ('ep1','device.ip_changed',1,?,1,NULL,?,?,?)`,
+			[]byte(`{}`), DeliveryFailed, old, old); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	n, err := s.NotificationDeliveries().Prune(ctx, now-86400, 3)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("first batch pruned %d, want 3 (the batch cap)", n)
+	}
+}
