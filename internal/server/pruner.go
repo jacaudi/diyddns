@@ -17,6 +17,18 @@ import (
 // is served by making it configurable.
 const prunerInterval = time.Hour
 
+// attemptLedgerTTL is how long a notification_attempts row is kept. It is a
+// constant and NOT a retention.* key: the ledger only exists to be counted by
+// NotificationAttemptRepo.Claim inside a live budget window, so a row older
+// than the widest window the server can ask about carries no information an
+// operator could have a policy about — the same reasoning that gates
+// replay_nonces and sessions on expiry alone.
+//
+// An hour is deliberately far wider than notify.UserBudgetWindow (5 minutes),
+// so the sweep can never race a window still being counted, whatever the sweep
+// interval.
+const attemptLedgerTTL = time.Hour
+
 // pruneBatchSize bounds how many rows a single retention DELETE removes, so a
 // sweep of a large backlog cannot monopolise the process's single SQLite
 // connection (store.Open sets SetMaxOpenConns(1), so a long statement blocks
@@ -73,9 +85,13 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 	if err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "prune account_recovery_tokens failed", slog.Any("error", err))
 	}
+	attempts, err := st.NotificationAttempts().PruneExpired(ctx, now-int64(attemptLedgerTTL/time.Second))
+	if err != nil {
+		log.LogAttrs(ctx, slog.LevelWarn, "prune notification_attempts failed", slog.Any("error", err))
+	}
 
-	ipRows, auditRows := pruneRetention(ctx, st, ret, log)
-	if ipRows+auditRows > 0 {
+	ipRows, auditRows, deliveryRows := pruneRetention(ctx, st, ret, log)
+	if ipRows+auditRows+deliveryRows > 0 {
 		// The empty actor is the established encoding for a system event; the
 		// web UI renders it as "system". Logged rather than swallowed on
 		// failure: every other audit writer goes through service.AuditSink,
@@ -100,8 +116,10 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 		slog.Int("enrollment_codes", codes),
 		slog.Int("oidc_device_flows", flows),
 		slog.Int("account_recovery", recovery),
+		slog.Int("notification_attempts", attempts),
 		slog.Int("ip_history", ipRows),
 		slog.Int("audit_log", auditRows),
+		slog.Int("notification_deliveries", deliveryRows),
 	)
 }
 
@@ -112,7 +130,7 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 // record of thousands of irreversible deletions.
 //
 // A policy whose keys are all zero costs nothing: neither pass is entered.
-func pruneRetention(ctx context.Context, st *store.Store, ret config.RetentionSection, log *slog.Logger) (ipRows, auditRows int) {
+func pruneRetention(ctx context.Context, st *store.Store, ret config.RetentionSection, log *slog.Logger) (ipRows, auditRows, deliveryRows int) {
 	now := store.NowUnix()
 	if ret.IPHistoryDays > 0 || ret.IPHistoryPerDeviceMax > 0 {
 		ipRows = pruneIPHistory(ctx, st, ret, now, log)
@@ -120,7 +138,10 @@ func pruneRetention(ctx context.Context, st *store.Store, ret config.RetentionSe
 	if ret.AuditLogDays > 0 {
 		auditRows = pruneAuditLog(ctx, st, now-int64(ret.AuditLogDays)*86400, log)
 	}
-	return ipRows, auditRows
+	if ret.NotificationDeliveriesDays > 0 {
+		deliveryRows = pruneNotificationDeliveries(ctx, st, now-int64(ret.NotificationDeliveriesDays)*86400, log)
+	}
+	return ipRows, auditRows, deliveryRows
 }
 
 // pruneIPHistory drains ip_history for every device.
@@ -179,6 +200,29 @@ func pruneAuditLog(ctx context.Context, st *store.Store, cutoff int64, log *slog
 		n, err := st.AuditLog().Prune(ctx, cutoff, pruneBatchSize)
 		if err != nil {
 			log.LogAttrs(ctx, slog.LevelWarn, "prune audit_log failed", slog.Any("error", err))
+			break
+		}
+		deleted += n
+		if n == 0 {
+			break
+		}
+	}
+	return deleted
+}
+
+// pruneNotificationDeliveries drains terminal notification_deliveries rows
+// created before cutoff. A failed batch ends the drain and keeps the count
+// already committed, matching pruneAuditLog.
+//
+// Only TERMINAL rows are eligible — the store's Prune enforces it, and that is
+// the property that matters here: a pending row is a delivery the sweeper
+// still owes, and age alone must never make owed work disappear.
+func pruneNotificationDeliveries(ctx context.Context, st *store.Store, cutoff int64, log *slog.Logger) int {
+	var deleted int
+	for {
+		n, err := st.NotificationDeliveries().Prune(ctx, cutoff, pruneBatchSize)
+		if err != nil {
+			log.LogAttrs(ctx, slog.LevelWarn, "prune notification_deliveries failed", slog.Any("error", err))
 			break
 		}
 		deleted += n

@@ -39,3 +39,21 @@ func Sign(secret []byte, canonical string) string {
 	mac.Write([]byte(canonical))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// CanonicalNotification builds the LF-joined signing input for outbound
+// notifications:
+//
+//	diyddns-notify-v1\nTIMESTAMP\nNONCE\nBODYHASH
+//
+// Unlike CanonicalRequest it omits method and path, because a receiver behind a
+// path-rewriting reverse proxy cannot reconstruct what we sent — a normal
+// deployment for the gateway-shaped targets this feature serves, whose symptom
+// would be an invalid signature.
+//
+// The literal first line is domain separation: this package now holds two
+// signing schemes sharing Sign and the same header names, and a MAC input that
+// cannot be confused for the other scheme's is cheap to establish now and
+// expensive later.
+func CanonicalNotification(timestamp, nonce, bodyHashHex string) string {
+	return strings.Join([]string{"diyddns-notify-v1", timestamp, nonce, bodyHashHex}, "\n")
+}

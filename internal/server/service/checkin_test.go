@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/store"
@@ -26,7 +27,7 @@ func TestCheckin_FirstReport_StoresAndAppendsHistory(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, discardAudit{})
+	svc := NewCheckinService(st, NopNotifier{})
 
 	res, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{
 		IPv4: "1.2.3.4", Hostname: "lp", OS: "linux", ClientVersion: "1.0.0",
@@ -68,7 +69,7 @@ func TestCheckin_IdenticalReport_TouchesLastSeenButNoHistory(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, discardAudit{})
+	svc := NewCheckinService(st, NopNotifier{})
 
 	report := CheckinReport{IPv4: "1.2.3.4", Hostname: "lp", OS: "linux", ClientVersion: "1.0.0"}
 	if _, err := svc.Checkin(t.Context(), dev.ID, report); err != nil {
@@ -114,7 +115,7 @@ func TestCheckin_ChangedIP_AppendsNewHistoryRow(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, discardAudit{})
+	svc := NewCheckinService(st, NopNotifier{})
 
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4"}); err != nil {
 		t.Fatalf("first Checkin: %v", err)
@@ -144,7 +145,7 @@ func TestCheckin_OmittedFamily_PreservesStoredValue(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, discardAudit{})
+	svc := NewCheckinService(st, NopNotifier{})
 
 	// Establish a dual-stack device: both families stored.
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4", IPv6: "2001:db8::1"}); err != nil {
@@ -198,7 +199,7 @@ func TestCheckin_OmittedFamilyMatchingStored_IsNoOp(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, discardAudit{})
+	svc := NewCheckinService(st, NopNotifier{})
 
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4", IPv6: "2001:db8::1"}); err != nil {
 		t.Fatalf("seed dual-stack Checkin: %v", err)
@@ -230,7 +231,7 @@ func TestCheckinService_Self_ReturnsDevice(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, discardAudit{})
+	svc := NewCheckinService(st, NopNotifier{})
 
 	got, err := svc.Self(t.Context(), dev.ID)
 	if err != nil {
@@ -239,4 +240,128 @@ func TestCheckinService_Self_ReturnsDevice(t *testing.T) {
 	if got.ID != dev.ID {
 		t.Fatalf("Self: ID = %q, want %q", got.ID, dev.ID)
 	}
+}
+
+// recordingNotifier captures IPChanged calls without doing any I/O.
+type recordingNotifier struct{ events []store.IPChangeEvent }
+
+func (r *recordingNotifier) IPChanged(_ context.Context, ev store.IPChangeEvent) {
+	r.events = append(r.events, ev)
+}
+
+func TestCheckin_UnchangedIPDoesNotNotify(t *testing.T) {
+	// The helpers that actually exist: openTestStore (enrollment_test.go:28),
+	// seedUser, and seedDevice (checkin_test.go:12). There is no combined
+	// fixture and no returned ctx — the existing tests use t.Context().
+	st := openTestStore(t)
+	ctx := t.Context()
+	usr := seedUser(t, st, "owner@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+
+	// seedDevice starts a device with EMPTY IP state, so give it a prior
+	// address before asserting anything about previous values — otherwise
+	// "PrevIPv4 == dev.CurrentIPv4" is "" == "" and passes against an
+	// implementation that never sets PrevIPv4 at all.
+	if _, err := NewCheckinService(st, NopNotifier{}).Checkin(ctx, dev.ID,
+		CheckinReport{IPv4: "198.51.100.7", IPv6: "2001:db8::7"}); err != nil {
+		t.Fatalf("seed prior address: %v", err)
+	}
+	dev, err := st.Devices().GetByID(ctx, dev.ID)
+	if err != nil {
+		t.Fatalf("reload device: %v", err)
+	}
+	n := &recordingNotifier{}
+	svc := NewCheckinService(st, n)
+
+	rep := CheckinReport{IPv4: dev.CurrentIPv4, IPv6: dev.CurrentIPv6}
+	res, err := svc.Checkin(ctx, dev.ID, rep)
+	if err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if res.Stored {
+		t.Fatal("Stored = true for an unchanged check-in")
+	}
+	if len(n.events) != 0 {
+		t.Errorf("notified %d times on an unchanged check-in, want 0", len(n.events))
+	}
+}
+
+func TestCheckin_ChangedIPNotifiesOnceWithPreviousValues(t *testing.T) {
+	st := openTestStore(t)
+	ctx := t.Context()
+	usr := seedUser(t, st, "owner@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+	if _, err := NewCheckinService(st, NopNotifier{}).Checkin(ctx, dev.ID,
+		CheckinReport{IPv4: "198.51.100.7", IPv6: "2001:db8::7"}); err != nil {
+		t.Fatalf("seed prior address: %v", err)
+	}
+	dev, err := st.Devices().GetByID(ctx, dev.ID)
+	if err != nil {
+		t.Fatalf("reload device: %v", err)
+	}
+	if dev.CurrentIPv4 == "" {
+		t.Fatal("fixture did not establish a prior IPv4; the previous-value assertions below would be vacuous")
+	}
+
+	n := &recordingNotifier{}
+	svc := NewCheckinService(st, n)
+
+	rep := CheckinReport{IPv4: "203.0.113.9"} // v6 omitted: merge-on-empty preserves it
+	res, err := svc.Checkin(ctx, dev.ID, rep)
+	if err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if !res.Stored {
+		t.Fatal("Stored = false for a changed check-in")
+	}
+	if len(n.events) != 1 {
+		t.Fatalf("notified %d times, want 1", len(n.events))
+	}
+	ev := n.events[0]
+	if ev.PrevIPv4 != dev.CurrentIPv4 {
+		t.Errorf("PrevIPv4 = %q, want %q", ev.PrevIPv4, dev.CurrentIPv4)
+	}
+	if ev.CurrIPv4 != "203.0.113.9" {
+		t.Errorf("CurrIPv4 = %q, want 203.0.113.9", ev.CurrIPv4)
+	}
+	if ev.PrevIPv6 != dev.CurrentIPv6 || ev.CurrIPv6 != dev.CurrentIPv6 {
+		t.Errorf("v6 moved: prev=%q curr=%q, want both %q", ev.PrevIPv6, ev.CurrIPv6, dev.CurrentIPv6)
+	}
+	if ev.EventID == 0 {
+		t.Error("EventID = 0, want the ip_history row id")
+	}
+	if got := ev.Changed(); len(got) != 1 || got[0] != "ipv4" {
+		t.Errorf("Changed() = %v, want [ipv4]", got)
+	}
+}
+
+// The hard constraint: the device liveness path must survive a broken hook.
+// This test drives a `defer recover()` around the notify call in Checkin. If
+// the implementation omits it, this panics and the test fails — which is the
+// point.
+func TestCheckin_NotifierPanicDoesNotFailCheckin(t *testing.T) {
+	st := openTestStore(t)
+	ctx := t.Context()
+	usr := seedUser(t, st, "owner@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+	svc := NewCheckinService(st, panickingNotifier{})
+
+	res, err := svc.Checkin(ctx, dev.ID, CheckinReport{IPv4: "203.0.113.10"})
+	if err != nil {
+		t.Fatalf("Checkin failed because of the notifier: %v", err)
+	}
+	if !res.Stored {
+		t.Error("Stored = false; the check-in itself must have succeeded")
+	}
+}
+
+// panickingNotifier is the worst case a broken hook can present: not an error
+// (IPChanged returns none by design) but a panic — a nil logger or nil repo in
+// the Enqueuer would do exactly this. Without a recover in Checkin's call site
+// it propagates and the device gets a 500, violating the hard constraint that
+// /agent/v1/checkin survives a broken hook.
+type panickingNotifier struct{}
+
+func (panickingNotifier) IPChanged(context.Context, store.IPChangeEvent) {
+	panic("notifier exploded")
 }

@@ -1,0 +1,106 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/account/endpoints">Notification endpoints</a> / {{.Endpoint.Label}}</div>
+
+{{template "errorBanner" .Error}}
+
+<div class="page-head">
+  <div>
+    <h1>{{.Endpoint.Label}}
+      {{if .Endpoint.Enabled}}<span class="tag ok"><span class="dot"></span>Enabled</span>
+      {{else}}<span class="tag danger"><span class="dot"></span>Disabled</span>{{end}}
+    </h1>
+    <p class="sub">Created {{.CreatedAbs}}</p>
+  </div>
+  <form method="post" action="/account/endpoints/{{.Endpoint.ID}}/test">
+    <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+    <button class="btn primary" type="submit">Send test</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Details</h2></div>
+  <div class="card-body">
+    <dl class="kv">
+      <dt>Endpoint ID</dt><dd>{{template "copyValue" .Endpoint.ID}}</dd>
+      <dt>Target URL</dt><dd>{{template "copyValue" .Endpoint.URL}}</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Recent deliveries</h2></div>
+  {{if .Deliveries}}
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr>
+        <th>Event</th><th>Status</th><th>Attempts</th><th>Failure</th><th>Created</th><th>Updated</th><th></th>
+      </tr></thead>
+      <tbody>
+        {{range .Deliveries}}
+        <tr>
+          <td data-label="Event">{{.EventType}}</td>
+          <td data-label="Status">{{.Status}}</td>
+          <td data-label="Attempts">{{.Attempts}}</td>
+          <td data-label="Failure">{{template "textOrDash" .FailureClass}}</td>
+          <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
+          <td data-label="Updated" class="muted nowrap">{{.UpdatedAbs}}</td>
+          <td class="actions">
+            {{if .Redeliverable}}
+            <form method="post" action="/account/deliveries/{{.ID}}/redeliver">
+              <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+              <input type="hidden" name="endpoint_id" value="{{$.Endpoint.ID}}">
+              <button class="btn sm" type="submit">Redeliver</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}<div class="empty"><h3>No deliveries recorded yet</h3></div>{{end}}
+</div>
+
+<div class="card danger-zone">
+  <div class="card-head"><h2>Danger zone</h2></div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>{{if .Endpoint.Enabled}}Disable{{else}}Enable{{end}} endpoint</strong>
+      <span>A disabled endpoint receives no deliveries, new or retried.</span>
+    </div>
+    <form method="post" action="/account/endpoints/{{.Endpoint.ID}}/enabled">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="enabled" value="{{if .Endpoint.Enabled}}false{{else}}true{{end}}">
+      <button class="btn danger" type="submit">{{if .Endpoint.Enabled}}Disable{{else}}Enable{{end}}</button>
+    </form>
+  </div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Delete endpoint</strong>
+      <span>Permanently removes the endpoint and its delivery history. Cannot be undone.</span>
+    </div>
+    <details class="modal">
+      <summary class="btn solid-danger">Delete…</summary>
+      <div class="modal-panel">
+        <div class="card modal-card">
+          <h2>Delete endpoint</h2>
+          <p class="muted">Permanently removes the endpoint and its delivery history. This cannot be undone.</p>
+          <form method="post" action="/account/endpoints/{{.Endpoint.ID}}/delete">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="delete-confirm">Type <code>{{.Endpoint.Label}}</code> to confirm</label>
+              <input class="input" id="delete-confirm" name="confirm_label" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn solid-danger" type="submit">Delete</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </details>
+  </div>
+</div>
+{{end}}

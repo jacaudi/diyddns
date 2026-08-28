@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -23,12 +24,13 @@ import (
 
 // Server is the fully-resolved server configuration.
 type Server struct {
-	Server    ServerSection
-	Database  DatabaseSection
-	Logging   LoggingSection
-	Auth      Auth
-	Email     EmailSection
-	Retention RetentionSection
+	Server        ServerSection
+	Database      DatabaseSection
+	Logging       LoggingSection
+	Auth          Auth
+	Email         EmailSection
+	Notifications Notifications
+	Retention     RetentionSection
 }
 
 // ServerSection holds HTTP listener settings.
@@ -66,9 +68,10 @@ type EmailSection struct {
 // which disables that policy — retention is opt-in so an upgrade never
 // deletes an operator's history.
 type RetentionSection struct {
-	IPHistoryDays         int `mapstructure:"ip_history_days"`
-	IPHistoryPerDeviceMax int `mapstructure:"ip_history_per_device_max"`
-	AuditLogDays          int `mapstructure:"audit_log_days"`
+	IPHistoryDays              int `mapstructure:"ip_history_days"`
+	IPHistoryPerDeviceMax      int `mapstructure:"ip_history_per_device_max"`
+	AuditLogDays               int `mapstructure:"audit_log_days"`
+	NotificationDeliveriesDays int `mapstructure:"notification_deliveries_days"`
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
@@ -123,6 +126,15 @@ type WebAuthnCfg struct {
 	Timeout       time.Duration `mapstructure:"timeout"`
 }
 
+// Notifications configures the outbound IP-change hook (#65).
+type Notifications struct {
+	Enabled             bool          `mapstructure:"enabled"`
+	AllowedPrivateCIDRs []string      `mapstructure:"allowed_private_cidrs"`
+	Timeout             time.Duration `mapstructure:"timeout"`
+	MaxAttempts         int           `mapstructure:"max_attempts"`
+	MaxEndpointsPerUser int           `mapstructure:"max_endpoints_per_user"`
+}
+
 // keyDefaults enumerates every config key, its default, and its env var. Keys
 // with a corresponding CLI flag (server.listen) still carry a SetDefault here;
 // viper ranks SetDefault above an unchanged flag's default, so a changed flag
@@ -153,24 +165,80 @@ var keyDefaults = map[string]any{
 	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
 	// (viper delivers env values as a single string, not []string). Configure
 	// scopes via YAML or flags; the default covers the common case.
-	"auth.oidc.scopes":                    []string{"openid", "profile", "email"},
-	"auth.oidc.auto_link_by_email":        true,
-	"auth.oidc.allow_oidc_signup":         true,
-	"auth.webauthn.rp_id":                 "",
-	"auth.webauthn.rp_origin":             "",
-	"auth.webauthn.rp_display_name":       "DIYDDNS",
-	"auth.webauthn.timeout":               "120s",
-	"auth.hide_local_login_ui":            false,
-	"email.enabled":                       false,
-	"email.host":                          "",
-	"email.port":                          0,
-	"email.username":                      "",
-	"email.password":                      "",
-	"email.from":                          "",
-	"email.tls":                           "starttls",
-	"retention.ip_history_days":           0,
-	"retention.ip_history_per_device_max": 0,
-	"retention.audit_log_days":            0,
+	"auth.oidc.scopes":                       []string{"openid", "profile", "email"},
+	"auth.oidc.auto_link_by_email":           true,
+	"auth.oidc.allow_oidc_signup":            true,
+	"auth.webauthn.rp_id":                    "",
+	"auth.webauthn.rp_origin":                "",
+	"auth.webauthn.rp_display_name":          "DIYDDNS",
+	"auth.webauthn.timeout":                  "120s",
+	"auth.hide_local_login_ui":               false,
+	"email.enabled":                          false,
+	"email.host":                             "",
+	"email.port":                             0,
+	"email.username":                         "",
+	"email.password":                         "",
+	"email.from":                             "",
+	"email.tls":                              "starttls",
+	"notifications.enabled":                  false,
+	"notifications.allowed_private_cidrs":    []string{},
+	"notifications.timeout":                  "10s",
+	"notifications.max_attempts":             8,
+	"notifications.max_endpoints_per_user":   5,
+	"retention.ip_history_days":              0,
+	"retention.ip_history_per_device_max":    0,
+	"retention.audit_log_days":               0,
+	"retention.notification_deliveries_days": 0,
+}
+
+// sectionPrefixes returns every dotted key prefix that appears as a parent
+// in keyDefaults — e.g. "auth" and "auth.session" for "auth.session.ttl".
+// None of these prefixes is ever itself a valid leaf value in the schema, so
+// seeing one appear as a bare key in a config file (detectNullSections)
+// means every key nested under it was omitted or commented out.
+func sectionPrefixes() map[string]bool {
+	prefixes := make(map[string]bool)
+	for key := range keyDefaults {
+		parts := strings.Split(key, ".")
+		for i := 1; i < len(parts); i++ {
+			prefixes[strings.Join(parts[:i], ".")] = true
+		}
+	}
+	return prefixes
+}
+
+// detectNullSections fails loud when configPath contains a section whose
+// every child key is commented out or omitted, which YAML parses as a
+// nil-valued mapping rather than a mapping with live children.
+//
+// This shape is dangerous, not merely empty: viper's flattening puts the
+// section's BARE dotted name into AllKeys() (flattenAndMergeMap's default
+// branch, viper v1.21.0), and because a bare (non-nested) key skips the
+// config-shadow check that would otherwise stop it (viper.go's find()), that
+// nil value can silently overwrite the env-derived defaults for every key
+// nested under it, depending on Go map iteration order inside viper's own
+// getSettings() — see config.example.yaml's notifications: comment for the
+// full mechanism. Detected here with a second, unconfigured viper.Viper
+// reading the same file: a live config always flattens to fully-dotted leaf
+// keys, so a bare section prefix surviving into ITS AllKeys() is exactly the
+// nil-mapping shape, independent of any SetDefault/BindEnv call order.
+func detectNullSections(configPath string) error {
+	shape := viper.New()
+	shape.SetConfigFile(configPath)
+	if err := shape.ReadInConfig(); err != nil {
+		return fmt.Errorf("config: read %s: %w", configPath, err)
+	}
+	prefixes := sectionPrefixes()
+	for _, key := range shape.AllKeys() {
+		if prefixes[key] {
+			return fmt.Errorf(
+				"config: %q in %s has no live (uncommented) child keys, which viper parses as a "+
+					"null value that can silently override other settings — give it at least one "+
+					"live child, or comment out the whole %q section",
+				key, configPath, key)
+		}
+	}
+	return nil
 }
 
 // Load resolves configuration into a Server. Callers may pre-configure v (e.g.
@@ -191,6 +259,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		if err := v.ReadInConfig(); err != nil {
 			return Server{}, fmt.Errorf("config: read %s: %w", configPath, err)
 		}
+		if err := detectNullSections(configPath); err != nil {
+			return Server{}, err
+		}
 	}
 
 	var cfg Server
@@ -208,6 +279,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, err
 	}
 	if err := validateEmail(cfg); err != nil {
+		return Server{}, err
+	}
+	if err := validateNotifications(cfg); err != nil {
 		return Server{}, err
 	}
 	if err := validateRetention(cfg); err != nil {
@@ -366,6 +440,64 @@ func validateEmail(cfg Server) error {
 	return errors.Join(problems...)
 }
 
+// validateNotifications enforces the notifications.* invariants. Extracted
+// from Load for the same reason validateOIDC and validateEmail are
+// (config.go:203-204): Load's cyclomatic complexity budget.
+//
+// max_attempts is bounded above because the backoff doubles: far beyond 16,
+// 15s*2^n overflows time.Duration's int64 nanoseconds and can yield a
+// negative delay, i.e. a hot retry loop.
+func validateNotifications(cfg Server) error {
+	n := cfg.Notifications
+	for _, c := range n.AllowedPrivateCIDRs {
+		if _, err := netip.ParsePrefix(c); err != nil {
+			return fmt.Errorf("config: notifications.allowed_private_cidrs: %q: %w", c, err)
+		}
+	}
+	if n.Timeout <= 0 {
+		return fmt.Errorf("config: notifications.timeout must be > 0, got %s", n.Timeout)
+	}
+	if n.MaxAttempts < 1 || n.MaxAttempts > 16 {
+		return fmt.Errorf("config: notifications.max_attempts must be 1..16, got %d", n.MaxAttempts)
+	}
+	if n.MaxEndpointsPerUser < 1 {
+		return fmt.Errorf("config: notifications.max_endpoints_per_user must be >= 1, got %d",
+			n.MaxEndpointsPerUser)
+	}
+	return nil
+}
+
+// NotificationsEgressWarning returns a non-empty warning when the operator has
+// permitted a destination prefix broad enough to re-open a whole address
+// family. Returned rather than logged so the binary owns output, exactly like
+// InsecureCookieWarning (config.go:397, called from server.go:73) — Load has no
+// logger and cannot warn.
+func NotificationsEgressWarning(cfg Server) string {
+	if !cfg.Notifications.Enabled {
+		return ""
+	}
+	var broad []string
+	for _, c := range cfg.Notifications.AllowedPrivateCIDRs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			continue // validateNotifications already rejected these
+		}
+		switch {
+		case p.Bits() == 0,
+			p.Addr().Is4() && p.Bits() < 8,
+			p.Addr().Is6() && p.Bits() < 16,
+			p.Masked().String() == "64:ff9b::/96":
+			broad = append(broad, c)
+		}
+	}
+	if len(broad) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"notifications.allowed_private_cidrs contains very broad or sensitive prefixes %v: "+
+			"the server may be directed at internal addresses by any user", broad)
+}
+
 // ResolveWebAuthn derives the WebAuthn Relying Party ID and origin, falling
 // back to baseURL (typically server.base_url) when auth.webauthn.rp_id or
 // auth.webauthn.rp_origin are left empty. It returns an error when a value
@@ -499,6 +631,7 @@ func validateRetention(cfg Server) error {
 		{"retention.ip_history_days", cfg.Retention.IPHistoryDays},
 		{"retention.ip_history_per_device_max", cfg.Retention.IPHistoryPerDeviceMax},
 		{"retention.audit_log_days", cfg.Retention.AuditLogDays},
+		{"retention.notification_deliveries_days", cfg.Retention.NotificationDeliveriesDays},
 	} {
 		if k.value < 0 || k.value > maxRetentionDays {
 			return fmt.Errorf("config: %s must be between 0 and %d (got %d)", k.name, maxRetentionDays, k.value)

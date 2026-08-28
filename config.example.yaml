@@ -213,6 +213,46 @@ email:
   # startup unless host is localhost/127.0.0.1/::1 (see username, above).
   tls: "starttls"
 
+# Outbound IP-change webhook (#65). Notifies operator-configured endpoints when
+# a device's public IP changes. Validation runs unconditionally at startup —
+# even while disabled — so a misconfigured policy fails at boot rather than at
+# switch-on.
+notifications:
+  # Default false. Left live (unlike its four siblings below) because a
+  # null-valued `notifications:` section — every child commented out, so YAML
+  # parses it as a bare nil value rather than a mapping — confuses viper's env
+  # binding. The mechanism (measured against viper v1.21.0, NOT map-iteration
+  # order in config.Load, which changes nothing when made deterministic): a
+  # nil-valued section puts the BARE key "notifications" into AllKeys() via
+  # flattenAndMergeMap's default branch; find() then resolves that bare key to
+  # the *entire defaults sub-map*, because nested==false skips the
+  # config-shadow check that would otherwise stop it; and getSettings()
+  # iterates AllKeys() in Go map order, so if the bare key lands after this
+  # section's dotted child keys, its resolved sub-map overwrites the env-
+  # derived values already written for them. config.Load itself now detects
+  # and rejects this shape at startup (any top-level section with no live
+  # child fails loud, naming the section) — this comment just explains why an
+  # operator would ever hit that error by commenting out every key below.
+  # Every other top-level section already has at least one live child for the
+  # same reason; keep it that way.
+  enabled: false
+
+  # Operator-only allowlist of private/internal CIDR prefixes a notification
+  # endpoint URL is permitted to resolve into. Default [] (empty): no private
+  # destinations are allowed, so an endpoint pointing at an internal address is
+  # rejected at send time. Comma-separated when set via
+  # DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS.
+  # allowed_private_cidrs: []
+
+  # Per-attempt HTTP timeout. Default "10s".
+  # timeout: 10s
+
+  # Maximum delivery attempts (with doubling backoff) before giving up.
+  # Default 8. Must be 1..16 — beyond that the backoff can overflow.
+  # max_attempts: 8
+
+  # Maximum notification endpoints a single user may configure. Default 5.
+  # max_endpoints_per_user: 5
 # Data retention for ip_history and audit_log. Disabled by default: neither
 # table loses a row to this policy until you set one of the three keys below,
 # so upgrading DIYDDNS never destroys history you already have because of
@@ -245,3 +285,13 @@ retention:
   # Delete audit_log rows older than this many days. Default 0 (keep forever).
   # Maximum 36500 (100 years).
   audit_log_days: 0
+
+  # Delete COMPLETED notification deliveries older than this many days — the
+  # history shown on an endpoint's page. Default 0 (keep forever). Maximum
+  # 36500. A delivery still pending or awaiting retry is never removed however
+  # old it is; only finished ones are eligible.
+  #
+  # Worth setting if you use notifications: the table grows with every IP
+  # change, for every configured endpoint. The attempt ledger behind the
+  # per-user rate limit needs no key — it is swept hourly on age alone.
+  # notification_deliveries_days: 0

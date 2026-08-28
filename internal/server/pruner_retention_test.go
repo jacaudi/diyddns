@@ -105,7 +105,7 @@ func TestPruneRetention_Disabled(t *testing.T) {
 	dev := seedRetentionDevice(t, st, "disabled", []int64{100, 200, 300})
 	seedAuditRows(t, st, []int64{100, 200})
 
-	ipRows, auditRows := pruneRetention(t.Context(), st, config.RetentionSection{}, discardLog())
+	ipRows, auditRows, _ := pruneRetention(t.Context(), st, config.RetentionSection{}, discardLog())
 
 	if ipRows != 0 || auditRows != 0 {
 		t.Errorf("ipRows, auditRows = %d, %d; want 0, 0", ipRows, auditRows)
@@ -128,7 +128,7 @@ func TestPruneRetention_AgeOnly(t *testing.T) {
 		old, old, old, old, old, old, recent, recent, recent, recent,
 	})
 
-	ipRows, _ := pruneRetention(t.Context(), st, config.RetentionSection{
+	ipRows, _, _ := pruneRetention(t.Context(), st, config.RetentionSection{
 		IPHistoryDays: 1,
 	}, discardLog())
 
@@ -158,7 +158,7 @@ func TestPruneRetention_CapOnly(t *testing.T) {
 	dev := seedRetentionDevice(t, st, "caponly",
 		[]int64{1000, 900, 800, 700, 600, 500, 400, 300, 200, 100})
 
-	ipRows, auditRows := pruneRetention(t.Context(), st, config.RetentionSection{
+	ipRows, auditRows, _ := pruneRetention(t.Context(), st, config.RetentionSection{
 		IPHistoryPerDeviceMax: 5,
 	}, discardLog())
 
@@ -230,7 +230,7 @@ func TestPruneRetention_AuditLogOnly(t *testing.T) {
 		now - 48*3600, now - 48*3600, now - 48*3600, now - 60, now - 60,
 	})
 
-	ipRows, auditRows := pruneRetention(t.Context(), st, config.RetentionSection{
+	ipRows, auditRows, _ := pruneRetention(t.Context(), st, config.RetentionSection{
 		AuditLogDays: 1,
 	}, discardLog())
 
@@ -264,7 +264,7 @@ func TestPruneRetention_DrainsPastOneBatch(t *testing.T) {
 	pruneBatchSize = 3
 	t.Cleanup(func() { pruneBatchSize = old })
 
-	ipRows, _ := pruneRetention(t.Context(), st, config.RetentionSection{
+	ipRows, _, _ := pruneRetention(t.Context(), st, config.RetentionSection{
 		IPHistoryPerDeviceMax: 2,
 	}, discardLog())
 
@@ -308,7 +308,7 @@ func TestPruneRetention_PerDeviceContinueOnError(t *testing.T) {
 		t.Fatalf("fixture: the failing device must sort first, got %q", devs[0].ID)
 	}
 
-	ipRows, _ := pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, discardLog())
+	ipRows, _, _ := pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, discardLog())
 
 	if got := ipHistoryCount(t, st, failing); got != 4 {
 		t.Errorf("failing device rows = %d, want 4 (its drain aborted)", got)
@@ -354,7 +354,7 @@ func TestPruneRetention_CountsSurviveMidDrainFailure(t *testing.T) {
 		t.Fatalf("create trigger: %v", err)
 	}
 
-	ipRows, _ := pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, discardLog())
+	ipRows, _, _ := pruneRetention(ctx, st, config.RetentionSection{IPHistoryDays: 1}, discardLog())
 
 	if ipRows != 3 {
 		t.Errorf("ipRows = %d, want 3 (the first batch committed before batch 2 failed)", ipRows)
@@ -380,7 +380,7 @@ func TestPruneRetention_AuditLogDrainFailureKeepsIPCounts(t *testing.T) {
 		t.Fatalf("create trigger: %v", err)
 	}
 
-	ipRows, auditRows := pruneRetention(ctx, st, config.RetentionSection{
+	ipRows, auditRows, _ := pruneRetention(ctx, st, config.RetentionSection{
 		IPHistoryDays: 1, AuditLogDays: 1,
 	}, discardLog())
 
@@ -419,7 +419,7 @@ func TestPruneRetention_ListAllFailureStillPrunesAuditLog(t *testing.T) {
 		_, _ = st.DB().ExecContext(context.Background(), `ALTER TABLE devices_x RENAME TO devices`)
 	})
 
-	ipRows, auditRows := pruneRetention(ctx, st, config.RetentionSection{
+	ipRows, auditRows, _ := pruneRetention(ctx, st, config.RetentionSection{
 		IPHistoryDays: 1, AuditLogDays: 1,
 	}, discardLog())
 
