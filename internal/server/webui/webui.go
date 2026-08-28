@@ -38,6 +38,7 @@ type Deps struct {
 	Enroll  *service.EnrollmentService
 	Admin   *service.AdminService
 	Grants  *service.GrantService
+	Notify  *service.NotificationService
 
 	Info      version.Info
 	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
@@ -98,6 +99,21 @@ func New(deps Deps) (http.Handler, []string) {
 		{"GET /static/", http.FileServerFS(staticFS)},
 	}
 
+	// The whole route group is absent — not just guarded — when notifications
+	// are disabled: a server whose worker isn't running must not offer
+	// endpoint management at all (design §8.3/§10.1).
+	if deps.Cfg.Notifications.Enabled {
+		routes = append(routes,
+			route{"GET /account/endpoints", h.requireSession(h.handleEndpoints)},
+			route{"POST /account/endpoints", h.requirePost(h.handleEndpointsCreate)},
+			route{"POST /account/endpoints/{id}/enabled", h.requirePost(h.handleEndpointSetEnabled)},
+			route{"POST /account/endpoints/{id}/test", h.requirePost(h.handleEndpointTest)},
+			route{"POST /account/endpoints/{id}/delete", h.requirePost(h.handleEndpointDelete)},
+			route{"GET /account/endpoints/{id}", h.requireSession(h.handleEndpointDetail)},
+			route{"POST /account/deliveries/{id}/redeliver", h.requirePost(h.handleDeliveryRedeliver)},
+		)
+	}
+
 	mux := http.NewServeMux()
 	patterns := make([]string, 0, len(routes))
 	for _, r := range routes {
@@ -130,4 +146,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-audit", "admin-server", "error"}
+var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-audit", "admin-server", "endpoints", "endpoint-detail", "error"}

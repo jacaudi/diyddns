@@ -68,6 +68,13 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	}
 	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log)
 
+	// maxEndpointsPerUser and allowed (nil = no private destinations, the
+	// same "empty allow-list" default production ships) are arbitrary test
+	// fixtures, not policy under test here — Task 9's tests exercise the
+	// webui routes, not notify's destination policy (that's Task 8's own
+	// test file).
+	notify := service.NewNotificationService(st, key, 5, nil, audit)
+
 	return Deps{
 		Sessions:  sessions,
 		Cfg:       cfg,
@@ -76,6 +83,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Enroll:    service.NewEnrollmentService(st, key, 15*time.Minute, audit),
 		Admin:     service.NewAdminService(st, audit, grants),
 		Grants:    grants,
+		Notify:    notify,
 		Info:      version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
 		StartedAt: time.Now().Add(-2 * time.Hour),
 	}, st

@@ -622,6 +622,217 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 	}
 }
 
+func TestLoad_NotificationsDefaults(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notifications.Enabled {
+		t.Error("notifications.enabled should default to false")
+	}
+	if got := cfg.Notifications.Timeout; got != 10*time.Second {
+		t.Errorf("timeout = %v, want 10s", got)
+	}
+	if got := cfg.Notifications.MaxAttempts; got != 8 {
+		t.Errorf("max_attempts = %d, want 8", got)
+	}
+	if got := cfg.Notifications.MaxEndpointsPerUser; got != 5 {
+		t.Errorf("max_endpoints_per_user = %d, want 5", got)
+	}
+	if len(cfg.Notifications.AllowedPrivateCIDRs) != 0 {
+		t.Errorf("allowed_private_cidrs = %v, want empty", cfg.Notifications.AllowedPrivateCIDRs)
+	}
+}
+
+// The security-critical key must come through the env, comma-separated. This is
+// the measurement issue #98 is about: Unmarshal splits, GetStringSlice does not.
+func TestLoad_AllowedPrivateCIDRsFromEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+	t.Setenv("DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS", "10.42.0.0/16,192.168.1.50/32")
+
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"10.42.0.0/16", "192.168.1.50/32"}
+	if len(cfg.Notifications.AllowedPrivateCIDRs) != len(want) {
+		t.Fatalf("got %v, want %v", cfg.Notifications.AllowedPrivateCIDRs, want)
+	}
+	for i := range want {
+		if cfg.Notifications.AllowedPrivateCIDRs[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, cfg.Notifications.AllowedPrivateCIDRs[i], want[i])
+		}
+	}
+}
+
+func TestLoad_NotificationsValidation(t *testing.T) {
+	tests := []struct {
+		name, key, val string
+	}{
+		{"bad cidr", "DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS", "not-a-cidr"},
+		{"zero timeout", "DIYDDNS_NOTIFICATIONS_TIMEOUT", "0s"},
+		{"zero attempts", "DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS", "0"},
+		{"too many attempts", "DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS", "17"},
+		{"zero endpoints", "DIYDDNS_NOTIFICATIONS_MAX_ENDPOINTS_PER_USER", "0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+			t.Setenv("DIYDDNS_NOTIFICATIONS_ENABLED", "true")
+			t.Setenv(tc.key, tc.val)
+			if _, err := config.Load(viper.New(), ""); err == nil {
+				t.Fatal("Load succeeded, want error")
+			}
+		})
+	}
+}
+
+// TestLoad_NullSectionFailsLoud is the regression guard for B3(b): a
+// top-level section with every child commented out parses as a nil-valued
+// YAML mapping, which viper's env-var binding can silently confuse with that
+// section's whole defaults sub-map (see TestLoad_ExampleConfigNotificationsEnvOverridesApply's
+// doc comment for the mechanism). Rather than rely on every config file
+// keeping at least one live child forever, Load itself must detect the shape
+// and fail loud, naming the section, so an operator who comments out
+// notifications.enabled gets a clear error instead of a config that silently
+// reverts every DIYDDNS_NOTIFICATIONS_* env var to its default.
+func TestLoad_NullSectionFailsLoud(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{
+			name: "null notifications section",
+			content: "database:\n  path: \"/tmp/x.db\"\n" +
+				"notifications:\n  # enabled: false\n",
+			wantErr: "notifications",
+		},
+		{
+			name: "null email section",
+			content: "database:\n  path: \"/tmp/x.db\"\n" +
+				"email:\n  # enabled: false\n",
+			wantErr: "email",
+		},
+		{
+			name: "live child is fine",
+			content: "database:\n  path: \"/tmp/x.db\"\n" +
+				"notifications:\n  enabled: false\n",
+			wantErr: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := config.Load(viper.New(), path)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: unexpected error %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Load succeeded, want an error naming the null section")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoad_ExampleConfigNotificationsEnvOverridesApply is the regression guard
+// for the #65 fix-wave finding: config.Load iterates keyDefaults (a Go map,
+// randomized order per process) to call SetDefault/BindEnv for every key. When
+// the config file's notifications: section has every child commented out, it
+// parses as a nil-valued YAML mapping, and depending on iteration order that
+// nil parent can shadow the DIYDDNS_NOTIFICATIONS_* env bindings underneath
+// it — dropping them roughly half the time. Reproduced empirically: 12
+// separate `go test -count=1` process invocations against the pre-fix
+// shipped config.example.yaml gave PASS=1 FAIL=11 for this exact assertion.
+//
+// A single in-process run of this test CANNOT prove the bug is fixed — the
+// randomization is per-process, so one passing run is not evidence; only a
+// loop of separate process invocations is (see the fix-wave report for the
+// before/after tally). What this test CAN assert in one run, and does:
+//
+//  1. Against the shipped config.example.yaml, the two notifications env
+//     overrides apply in THIS run.
+//  2. The shape guard: config.example.yaml's notifications: section has at
+//     least one live (uncommented) child key, matching every other top-level
+//     section (server, database, logging, auth, email). A null-valued
+//     section is exactly the shape that triggers the shadowing above, so
+//     keeping this assertion green is what keeps the bug from coming back
+//     even though assertion #1 alone can't catch a regression reliably.
+func TestLoad_ExampleConfigNotificationsEnvOverridesApply(t *testing.T) {
+	const examplePath = "../../config.example.yaml"
+
+	t.Setenv("DIYDDNS_NOTIFICATIONS_ENABLED", "true")
+	t.Setenv("DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS", "10.42.0.0/16")
+
+	cfg, err := config.Load(viper.New(), examplePath)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", examplePath, err)
+	}
+	if !cfg.Notifications.Enabled {
+		t.Error("Notifications.Enabled = false, want true (DIYDDNS_NOTIFICATIONS_ENABLED was dropped)")
+	}
+	want := []string{"10.42.0.0/16"}
+	if len(cfg.Notifications.AllowedPrivateCIDRs) != len(want) || cfg.Notifications.AllowedPrivateCIDRs[0] != want[0] {
+		t.Errorf("Notifications.AllowedPrivateCIDRs = %v, want %v (DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS was dropped)",
+			cfg.Notifications.AllowedPrivateCIDRs, want)
+	}
+
+	// Shape guard: read the file with a bare viper instance (no SetDefault
+	// calls at all) so this reflects the file's own shape, not Load's
+	// defaults filling in the gap.
+	shape := viper.New()
+	shape.SetConfigFile(examplePath)
+	if err := shape.ReadInConfig(); err != nil {
+		t.Fatalf("ReadInConfig(%s): %v", examplePath, err)
+	}
+	section, ok := shape.Get("notifications").(map[string]any)
+	if !ok || len(section) == 0 {
+		t.Errorf("config.example.yaml notifications: section has no live children (got %#v) — "+
+			"a null-valued section reproduces the env-drop bug; give it at least one live child, "+
+			"as every other top-level section already has", shape.Get("notifications"))
+	}
+}
+
+func TestNotificationsEgressWarning(t *testing.T) {
+	var cfg config.Server
+	cfg.Notifications.Enabled = true
+	if got := config.NotificationsEgressWarning(cfg); got != "" {
+		t.Errorf("no CIDRs: got %q, want empty", got)
+	}
+	cfg.Notifications.AllowedPrivateCIDRs = []string{"0.0.0.0/0"}
+	if got := config.NotificationsEgressWarning(cfg); got == "" {
+		t.Error("0.0.0.0/0: got empty, want a warning")
+	}
+}
+
+// TestNotificationsEgressWarning_UnmaskedNAT64IsStillFlagged is the
+// regression guard for the minor finding on NotificationsEgressWarning's
+// literal p.String() == "64:ff9b::/96" comparison: ParseAllowed masks every
+// prefix it accepts (host bits cleared), but this function re-parses the raw
+// config strings directly, so an operator-typed "64:ff9b::1/96" (host bits
+// set, same network) parses to a *different* String() and slipped past the
+// comparison entirely — silently skipping the metadata-address warning for
+// exactly the spelling an operator who fat-fingered a host bit would use.
+func TestNotificationsEgressWarning_UnmaskedNAT64IsStillFlagged(t *testing.T) {
+	var cfg config.Server
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.AllowedPrivateCIDRs = []string{"64:ff9b::1/96"}
+	if got := config.NotificationsEgressWarning(cfg); got == "" {
+		t.Error("64:ff9b::1/96 (unmasked NAT64): got empty, want a warning")
+	}
+}
 func loadRetention(t *testing.T) config.Server {
 	t.Helper()
 	v := viper.New()
@@ -696,4 +907,40 @@ func TestRetention_AcceptsBounds(t *testing.T) {
 			t.Errorf("Load(retention.audit_log_days=%s) = %v, want accepted", val, err)
 		}
 	}
+}
+
+// TestLoad_NotificationDeliveriesRetention pins the new retention key: default
+// 0 (disabled, like its siblings), settable via env, and bounded by the same
+// 0..36500 rule.
+func TestLoad_NotificationDeliveriesRetention(t *testing.T) {
+	t.Run("defaults to disabled", func(t *testing.T) {
+		t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+		cfg, err := config.Load(viper.New(), "")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Retention.NotificationDeliveriesDays; got != 0 {
+			t.Errorf("notification_deliveries_days = %d, want 0", got)
+		}
+	})
+	t.Run("settable via env", func(t *testing.T) {
+		t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+		t.Setenv("DIYDDNS_RETENTION_NOTIFICATION_DELIVERIES_DAYS", "30")
+		cfg, err := config.Load(viper.New(), "")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Retention.NotificationDeliveriesDays; got != 30 {
+			t.Errorf("notification_deliveries_days = %d, want 30", got)
+		}
+	})
+	t.Run("rejects out of range", func(t *testing.T) {
+		for _, v := range []string{"-1", "36501"} {
+			t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+			t.Setenv("DIYDDNS_RETENTION_NOTIFICATION_DELIVERIES_DAYS", v)
+			if _, err := config.Load(viper.New(), ""); err == nil {
+				t.Errorf("Load accepted notification_deliveries_days=%s", v)
+			}
+		}
+	})
 }

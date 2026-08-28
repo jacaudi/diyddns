@@ -167,13 +167,20 @@ func (h *handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "register", registerData{Token: r.URL.Query().Get("token")})
 }
 
-// accountData is account.html's template data.
+// accountData is account.html's template data. NotificationsEnabled gates the
+// link to /account/endpoints: those routes are only registered when
+// notifications.enabled is true, so offering the link otherwise would render a
+// dead end.
 type accountData struct {
 	appData
+	NotificationsEnabled bool
 }
 
 // handleAccount renders /account. requireSession has already guaranteed a
 // valid session (usr, sess) by the time this runs.
 func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	h.render(w, r, "account", accountData{appData: h.newAppData(usr, sess, "Account", "account")})
+	h.render(w, r, "account", accountData{
+		appData:              h.newAppData(usr, sess, "Account", "account"),
+		NotificationsEnabled: h.deps.Cfg.Notifications.Enabled,
+	})
 }

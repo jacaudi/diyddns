@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
@@ -16,6 +18,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
+	"github.com/jacaudi/diyddns/internal/server/notify"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/server/webui"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -38,6 +41,7 @@ type Server struct {
 	log        *slog.Logger
 	st         *store.Store
 	oidcMgr    *oidc.Manager
+	notifier   *notify.Worker // nil when notifications are disabled
 	retention  config.RetentionSection
 }
 
@@ -61,10 +65,10 @@ type Server struct {
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
-		return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", err)
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: %w", err)
 	}
 
 	// A warning, not a fail-closed: the operator may be terminating TLS in
@@ -73,6 +77,28 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// say it at boot where it can still be acted on.
 	if w := config.InsecureCookieWarning(cfg); w != "" {
 		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+	// Same rationale as InsecureCookieWarning immediately above: a broad
+	// allowed_private_cidrs entry is a valid operator choice, not a startup
+	// failure, but it re-opens a whole address family and deserves saying so
+	// where it can still be acted on.
+	if w := config.NotificationsEgressWarning(cfg); w != "" {
+		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+
+	// config.validateNotifications already rejected malformed entries at
+	// startup; this is belt-and-braces on the same values, and fails closed
+	// the same way the HMAC-key and required-OIDC checks above do.
+	// service.NewNotificationService (below) is the consumer of the parsed
+	// prefixes.
+	allowedPrivateCIDRs, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs)
+	if err != nil {
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, err
+	}
+
+	var notifier service.Notifier = service.NopNotifier{}
+	if cfg.Notifications.Enabled {
+		notifier = notify.NewEnqueuer(st, log)
 	}
 
 	// Retention deletes user-visible history irreversibly and is opt-in, so say
@@ -92,6 +118,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 	audit := service.NewAuditWriter(st)
 	authSvc := service.NewAuthService(sessions, audit)
+	notifySvc := service.NewNotificationService(st, key, cfg.Notifications.MaxEndpointsPerUser, allowedPrivateCIDRs, audit)
 
 	oidcMgr := oidc.NewManager(cfg.Auth.OIDC, cfg.Server.BaseURL, log)
 	if cfg.Auth.OIDC.Enabled && cfg.Auth.OIDC.Required {
@@ -100,7 +127,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		dctx, cancel := context.WithTimeout(context.Background(), oidcDiscoverTimeout)
 		defer cancel()
 		if err := oidcMgr.Discover(dctx); err != nil {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: oidc required but discovery failed: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
 		}
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
@@ -121,12 +148,12 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	rpID, rpOrigin, rpErr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL)
 	if rpErr != nil {
 		if !cfg.Auth.HideLocalLoginUI {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", rpErr)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: %w", rpErr)
 		}
 	} else {
 		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit, log)
 		if err != nil {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, fmt.Errorf("server: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: %w", err)
 		}
 	}
 
@@ -149,7 +176,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Sessions:  sessions,
 		Enroll:    enrollSvc,
 		Devices:   devicesSvc,
-		Checkin:   service.NewCheckinService(st, audit),
+		Checkin:   service.NewCheckinService(st, notifier),
 		Auth:      authSvc,
 		Bootstrap: service.NewBootstrapService(st, log, audit, nil, passkeySvc, key),
 		OIDC:      oidcSvc,
@@ -181,6 +208,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Enroll:    enrollSvc,
 		Admin:     adminSvc,
 		Grants:    grantSvc,
+		Notify:    notifySvc,
 		Info:      version.Current(),
 		StartedAt: time.Now(),
 	}
@@ -189,30 +217,30 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		mux.Handle(pattern, webHandler)
 	}
 
-	return mux, oidcMgr, apiDeps, webDeps, nil
+	return mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, nil
 }
 
 // handler builds the fully-wrapped handler: buildMux's ServeMux inside the
 // RequestID → AccessLog → Recover middleware chain. It also returns the OIDC
 // manager buildMux constructs, so New/Run can launch its background
 // RetryLoop.
-func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, error) {
-	mux, oidcMgr, _, _, err := buildMux(cfg, st, log)
+func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, []netip.Prefix, error) {
+	mux, oidcMgr, _, _, allowedPrivateCIDRs, err := buildMux(cfg, st, log)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	return middleware.Chain(mux,
 		middleware.RequestID,
 		middleware.AccessLog(log),
 		middleware.Recover(log),
-	), oidcMgr, nil
+	), oidcMgr, allowedPrivateCIDRs, nil
 }
 
 // Handler builds the fully-wrapped http.Handler (see handler). Exported for
 // black-box testing via httptest; the OIDC manager it constructs is only
 // needed by New/Run to launch RetryLoop, so this wrapper discards it.
 func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, error) {
-	h, _, err := handler(cfg, st, log)
+	h, _, _, err := handler(cfg, st, log)
 	return h, err
 }
 
@@ -221,10 +249,29 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 // cfg.Auth.HMAC.SecretKey is missing or invalid, or OIDC is required but
 // unreachable (fail-closed).
 func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) {
-	h, mgr, err := handler(cfg, st, log)
+	// allowedPrivateCIDRs is parsed once inside handler->buildMux and returned
+	// here rather than re-parsed: commit 74930fa claimed this reuse without
+	// actually doing it (New called notify.ParseAllowed a second time on the
+	// same config value), so this is now the genuine single call.
+	h, mgr, allowedPrivateCIDRs, err := handler(cfg, st, log)
 	if err != nil {
 		return nil, err
 	}
+
+	var notifier *notify.Worker
+	if cfg.Notifications.Enabled {
+		key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("server: %w", err)
+		}
+		clients := notify.NewClients(allowedPrivateCIDRs, cfg.Notifications.Timeout)
+		// rand.Float64 here is math/rand/v2, not the legacy math/rand gosec's
+		// G404 flags: it needs no seeding and jitter timing is not
+		// security-sensitive regardless (see poller.go's defaultRandFloat).
+		notifier = notify.NewWorker(st, clients, key, cfg.Notifications.MaxAttempts,
+			service.NewAuditWriter(st), rand.Float64, log)
+	}
+
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.Server.Listen,
@@ -234,6 +281,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 		log:       log,
 		st:        st,
 		oidcMgr:   mgr,
+		notifier:  notifier,
 		retention: cfg.Retention,
 	}, nil
 }
@@ -250,6 +298,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 	go runPruner(ctx, s.st, s.retention, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
+	if s.notifier != nil {
+		go s.notifier.Run(ctx)
+	}
 
 	select {
 	case err := <-errCh:

@@ -59,7 +59,7 @@ func newAgentHarness(t *testing.T) agentHarness {
 	key := agentTestKey32()
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{})
-	checkinSvc := service.NewCheckinService(st, discardAgentAudit{})
+	checkinSvc := service.NewCheckinService(st, service.NopNotifier{})
 
 	mux := http.NewServeMux()
 	api.Build(mux, api.ServerDeps{

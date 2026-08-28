@@ -22,18 +22,39 @@ type CheckinResult struct {
 	Stored                   bool
 }
 
+// Notifier is fired after a check-in that actually changed a device's recorded
+// addresses. It is enqueue-only: implementations must not perform network I/O
+// and must not return errors to the check-in path, because /agent/v1/checkin is
+// the device liveness path and must survive a broken or hostile hook.
+//
+// Declared here, at its consumer, and parameterised on store.IPChangeEvent —
+// so implementations satisfy it structurally and never import this package.
+//
+// This is deliberately NOT an AuditSink. An AuditSink records security-relevant
+// events; a Notifier says "this address changed, go tell someone". Same shape,
+// different knowledge — see the design's §11 and issue #11.
+type Notifier interface {
+	IPChanged(ctx context.Context, ev store.IPChangeEvent)
+}
+
+// NopNotifier is wired when notifications are disabled, so Checkin never
+// nil-checks.
+type NopNotifier struct{}
+
+// IPChanged does nothing.
+func (NopNotifier) IPChanged(context.Context, store.IPChangeEvent) {}
+
 // CheckinService records device check-ins, persisting a new ip_history row
 // only when the reported IP addresses differ from what's already stored.
 type CheckinService struct {
-	st    *store.Store
-	audit AuditSink
+	st     *store.Store
+	notify Notifier
 }
 
-// NewCheckinService constructs a CheckinService. audit is accepted for
-// Shared Contract / wiring consistency with the other services; routine
-// check-ins are not audited (see Checkin).
-func NewCheckinService(st *store.Store, audit AuditSink) *CheckinService {
-	return &CheckinService{st: st, audit: audit}
+// NewCheckinService constructs a CheckinService. notify is fired only when a
+// check-in actually changes the device's recorded addresses.
+func NewCheckinService(st *store.Store, notify Notifier) *CheckinService {
+	return &CheckinService{st: st, notify: notify}
 }
 
 // Checkin records a device's reported IP addresses using merge-on-empty
@@ -85,15 +106,29 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 	if err := s.st.Devices().UpdateIP(ctx, dev.ID, effV4, effV6, r.ClientVersion, r.Hostname, r.OS, store.NowUnix()); err != nil {
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
 	}
-	if _, err := s.st.IPHistory().Append(ctx, store.IPHistory{
+	row, err := s.st.IPHistory().Append(ctx, store.IPHistory{
 		DeviceID:      dev.ID,
 		IPv4:          effV4,
 		IPv6:          effV6,
 		ObservedAt:    store.NowUnix(),
 		ClientVersion: r.ClientVersion,
-	}); err != nil {
+	})
+	if err != nil {
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
 	}
+
+	// Best-effort by design: IPChanged returns nothing, so a failed enqueue is
+	// logged by the implementation and the check-in still succeeds. Durability
+	// starts at the outbox row, not at the check-in.
+	s.fireNotify(ctx, store.IPChangeEvent{
+		EventID:    row.ID,
+		OccurredAt: row.ObservedAt,
+		Device:     dev,
+		PrevIPv4:   dev.CurrentIPv4,
+		PrevIPv6:   dev.CurrentIPv6,
+		CurrIPv4:   effV4,
+		CurrIPv6:   effV6,
+	})
 
 	return CheckinResult{
 		DeviceID:    dev.ID,
@@ -101,6 +136,19 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 		CurrentIPv6: effV6,
 		Stored:      true,
 	}, nil
+}
+
+// fireNotify calls the notifier and swallows a panic from it. A Notifier
+// returning no error is not enough on its own: a nil logger or nil repository
+// inside an implementation panics, and without this recover it would propagate
+// out of Checkin and turn a device's liveness call into a 500 — the one thing
+// /agent/v1/checkin must never do.
+//
+// The recover wraps ONLY the notifier call. Putting `defer recover()` at the
+// top of Checkin instead would also swallow store panics, which must surface.
+func (s *CheckinService) fireNotify(ctx context.Context, ev store.IPChangeEvent) {
+	defer func() { _ = recover() }()
+	s.notify.IPChanged(ctx, ev)
 }
 
 // Self returns the device identified by deviceID.
