@@ -46,7 +46,8 @@ func TestAccessLog_EmitsLine(t *testing.T) {
 	h := middleware.RequestID(middleware.AccessLog(log)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})))
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/foo", nil))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/foo", nil))
 
 	var line map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
@@ -58,8 +59,25 @@ func TestAccessLog_EmitsLine(t *testing.T) {
 	if line["status"].(float64) != 418 {
 		t.Errorf("status = %v, want 418", line["status"])
 	}
-	if line["request_id"] == "" {
-		t.Error("request_id missing from access log")
+	// request_id is no longer an access-log attr (D3) -- the wrapper adds it.
+	// What AccessLog still owes the caller is the echoed response header.
+	if rec.Header().Get("X-Request-Id") == "" {
+		t.Error("response is missing the correlation header")
+	}
+}
+
+// D3: the wrapper supplies request_id, so AccessLog must not add its own.
+// slog's JSON handler does not deduplicate, so both would appear.
+func TestAccessLog_NoHandWrittenRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	h := middleware.AccessLog(log)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if n := strings.Count(buf.String(), `"request_id"`); n != 0 {
+		t.Fatalf("AccessLog emitted %d request_id attrs; the wrapper owns that field now: %s", n, buf.String())
 	}
 }
 

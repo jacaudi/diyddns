@@ -79,7 +79,6 @@ func AccessLog(log *slog.Logger) func(http.Handler) http.Handler {
 				rec.status = http.StatusOK
 			}
 			log.LogAttrs(r.Context(), slog.LevelInfo, "request",
-				slog.String("request_id", RequestIDFromContext(r.Context())),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", rec.status),
@@ -98,7 +97,6 @@ func Recover(log *slog.Logger) func(http.Handler) http.Handler {
 			defer func() {
 				if rec := recover(); rec != nil {
 					log.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
-						slog.String("request_id", RequestIDFromContext(r.Context())),
 						slog.Any("panic", rec),
 					)
 					w.WriteHeader(http.StatusInternalServerError)
