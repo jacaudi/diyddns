@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -455,5 +457,65 @@ func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "retention enabled") {
 		t.Errorf("all-zero retention must warn about nothing:\n%s", buf.String())
+	}
+}
+
+// D8 rests on r.Pattern resolving for every route-registration surface: the
+// two huma groups, the plain-mux health handlers, and the webui's NESTED mux.
+// A hand-rolled mux cannot show that; only the real handler can.
+func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log.json")
+	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path})
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	h, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log)
+	if err != nil {
+		t.Fatalf("server.Handler: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	tests := []struct{ name, method, target, wantRoute string }{
+		{"plain mux health", "GET", "/healthz", "GET /healthz"},
+		{"huma api group", "GET", "/api/v1/devices/dev_01J8WABCDEF", "GET /api/v1/devices/{id}"},
+		{"huma agent group", "POST", "/agent/v1/checkin", "POST /agent/v1/checkin"},
+		{"webui nested mux", "GET", "/devices/dev_01J8WABCDEF", "GET /devices/{id}"},
+		{"webui static prefix", "GET", "/static/app.css", "GET /static/"},
+		{"unmatched (404)", "GET", "/nope/not/a/route", ""},
+		// 405: the mux registers PATCH/DELETE on this path, not GET. Design
+		// 11.4 lists it, and only the real handler has a route table where a
+		// method mismatch is possible.
+		{"method mismatch (405)", "GET", "/api/v1/admin/users/usr_01J8WZZZ", ""},
+	}
+	for _, tt := range tests {
+		req, _ := http.NewRequest(tt.method, srv.URL+tt.target, strings.NewReader("{}"))
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	got := map[string]string{} // target -> route
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil || rec["msg"] != "request" {
+			continue
+		}
+		route, _ := rec["route"].(string)
+		got[rec["method"].(string)+" "+route] = route
+	}
+	for _, tt := range tests {
+		if _, ok := got[tt.method+" "+tt.wantRoute]; !ok {
+			t.Errorf("%s: no access-log record with route %q; got %v", tt.name, tt.wantRoute, got)
+		}
+	}
+	if strings.Contains(string(raw), "dev_01J8WABCDEF") {
+		t.Errorf("a device id reached the access log")
 	}
 }

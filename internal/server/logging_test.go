@@ -49,16 +49,15 @@ func logRecords(t *testing.T, fn func(*slog.Logger)) []map[string]any {
 // reqCtx returns a context carrying a request id, produced by the real
 // middleware rather than by reaching into its unexported context key.
 //
-// NOTE: written against today's middleware.RequestID(next http.Handler)
-// signature (one argument). Task 3 changes RequestID to take a header-name
-// argument; that task updates this helper to match.
+// The header name is passed explicitly because RequestID is now configured
+// from observability.request_id_header; "X-Request-Id" is that key's default.
 func reqCtx(t *testing.T, id string) context.Context {
 	t.Helper()
 	var got context.Context
-	h := middleware.RequestID(http.HandlerFunc(
+	h := middleware.RequestID("X-Request-Id")(http.HandlerFunc(
 		func(_ http.ResponseWriter, r *http.Request) { got = r.Context() }))
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set(middleware.RequestIDHeader, id)
+	req.Header.Set("X-Request-Id", id)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	return got
 }

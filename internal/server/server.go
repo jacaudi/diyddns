@@ -230,7 +230,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		return nil, nil, nil, err
 	}
 	return middleware.Chain(mux,
-		middleware.RequestID,
+		middleware.RequestID(cfg.Observability.RequestIDHeader),
 		middleware.AccessLog(log),
 		middleware.Recover(log),
 	), oidcMgr, allowedPrivateCIDRs, nil
