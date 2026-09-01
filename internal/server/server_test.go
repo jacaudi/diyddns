@@ -460,9 +460,18 @@ func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 	}
 }
 
-// D8 rests on r.Pattern resolving for every route-registration surface: the
-// two huma groups, the plain-mux health handlers, and the webui's NESTED mux.
-// A hand-rolled mux cannot show that; only the real handler can.
+// D8 rests on r.Pattern resolving through the REAL handler for every route
+// registration surface: the plain-mux health handlers, both huma groups, and
+// the webui patterns. A hand-rolled mux cannot show that; only the real
+// handler can. (It does not isolate the webui's NESTED mux -- server.go
+// forwards webui.New's own pattern strings onto the OUTER mux, so the outer
+// one resolves the template before the inner mux ever runs.)
+//
+// Every row is checked against the record its OWN request produced,
+// correlated by the request id the response echoes back. An existential
+// "some record carries this route" check cannot tell the 404 row from the
+// 405 row -- both log an empty route -- so it would pass even if the 405
+// request had 404'd, had leaked a template, or had never reached AccessLog.
 func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log.json")
 	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path})
@@ -476,46 +485,78 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
-	tests := []struct{ name, method, target, wantRoute string }{
-		{"plain mux health", "GET", "/healthz", "GET /healthz"},
-		{"huma api group", "GET", "/api/v1/devices/dev_01J8WABCDEF", "GET /api/v1/devices/{id}"},
-		{"huma agent group", "POST", "/agent/v1/checkin", "POST /agent/v1/checkin"},
-		{"webui nested mux", "GET", "/devices/dev_01J8WABCDEF", "GET /devices/{id}"},
-		{"webui static prefix", "GET", "/static/app.css", "GET /static/"},
-		{"unmatched (404)", "GET", "/nope/not/a/route", ""},
+	// One request per row, so redirects must not be followed: /devices/{id}
+	// answers 303 to /login when unauthenticated (webui/auth.go:34), and a
+	// followed redirect returns /login's request id -- correlating the row to
+	// the wrong record.
+	client := srv.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	tests := []struct {
+		name, method, target, wantRoute string
+		wantStatus                      float64
+	}{
+		{"plain mux health", "GET", "/healthz", "GET /healthz", 200},
+		{"huma api group", "GET", "/api/v1/devices/dev_01J8WABCDEF", "GET /api/v1/devices/{id}", 401},
+		{"huma agent group", "POST", "/agent/v1/checkin", "POST /agent/v1/checkin", 401},
+		{"webui nested mux", "GET", "/devices/dev_01J8WABCDEF", "GET /devices/{id}", 303},
+		{"webui static prefix", "GET", "/static/app.css", "GET /static/", 200},
+		{"unmatched (404)", "GET", "/nope/not/a/route", "", 404},
 		// 405: the mux registers PATCH/DELETE on this path, not GET. Design
 		// 11.4 lists it, and only the real handler has a route table where a
-		// method mismatch is possible.
-		{"method mismatch (405)", "GET", "/api/v1/admin/users/usr_01J8WZZZ", ""},
+		// method mismatch is possible. wantStatus is what separates this row
+		// from the 404 row above; both log an empty route.
+		{"method mismatch (405)", "GET", "/api/v1/admin/users/usr_01J8WZZZ", "", 405},
 	}
-	for _, tt := range tests {
+
+	ids := make([]string, len(tests)) // row -> the id its response echoed
+	for i, tt := range tests {
 		req, _ := http.NewRequest(tt.method, srv.URL+tt.target, strings.NewReader("{}"))
-		resp, err := srv.Client().Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("%s: %v", tt.name, err)
 		}
 		_ = resp.Body.Close()
+		ids[i] = resp.Header.Get("X-Request-Id")
+		if ids[i] == "" {
+			t.Fatalf("%s: response echoed no correlation header", tt.name)
+		}
 	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	got := map[string]string{} // target -> route
+	byID := map[string]map[string]any{}
 	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
 		var rec map[string]any
 		if json.Unmarshal([]byte(line), &rec) != nil || rec["msg"] != "request" {
 			continue
 		}
-		route, _ := rec["route"].(string)
-		got[rec["method"].(string)+" "+route] = route
+		id, _ := rec["request_id"].(string)
+		byID[id] = rec
 	}
-	for _, tt := range tests {
-		if _, ok := got[tt.method+" "+tt.wantRoute]; !ok {
-			t.Errorf("%s: no access-log record with route %q; got %v", tt.name, tt.wantRoute, got)
+	for i, tt := range tests {
+		rec, ok := byID[ids[i]]
+		if !ok {
+			t.Errorf("%s: no access-log record for request id %q", tt.name, ids[i])
+			continue
+		}
+		if got := rec["route"]; got != tt.wantRoute {
+			t.Errorf("%s: route = %v, want %q", tt.name, got, tt.wantRoute)
+		}
+		if got := rec["status"]; got != tt.wantStatus {
+			t.Errorf("%s: status = %v, want %v", tt.name, got, tt.wantStatus)
+		}
+		if got := rec["method"]; got != tt.method {
+			t.Errorf("%s: method = %v, want %q", tt.name, got, tt.method)
 		}
 	}
-	if strings.Contains(string(raw), "dev_01J8WABCDEF") {
-		t.Errorf("a device id reached the access log")
+	// The privacy rationale for D8 names device ids AND the user ids on
+	// /api/v1/admin/users/{id}; both are driven through above, so pin both.
+	for _, id := range []string{"dev_01J8WABCDEF", "usr_01J8WZZZ"} {
+		if strings.Contains(string(raw), id) {
+			t.Errorf("%q reached the access log", id)
+		}
 	}
 }
