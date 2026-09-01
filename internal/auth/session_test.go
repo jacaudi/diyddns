@@ -165,6 +165,125 @@ func TestSession_AuthenticateRequest(t *testing.T) {
 	})
 }
 
+// errSessions injects a session-lookup failure that is NOT store.ErrNotFound,
+// so session_store_error is reachable separately from unknown_session.
+type errSessions struct{ err error }
+
+func (e errSessions) Create(context.Context, store.Session) (store.Session, error) {
+	return store.Session{}, e.err
+}
+
+func (e errSessions) GetByID(context.Context, string) (store.Session, error) {
+	return store.Session{}, e.err
+}
+
+func (e errSessions) Touch(context.Context, string, int64) error { return e.err }
+
+func (e errSessions) Delete(context.Context, string) error { return e.err }
+
+// newLiveSession mints a session in a fresh memSessions so a case that needs a
+// custom UserReader can still reach the user lookup.
+func newLiveSession(t *testing.T, u UserReader) (*SessionManager, string) {
+	t.Helper()
+	ms := &memSessions{m: map[string]store.Session{}}
+	seed := NewSessionManager(ms, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour)
+	sess, err := seed.Create(t.Context(), "u", "", "")
+	if err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+	return NewSessionManager(ms, u, 720*time.Hour, 7*24*time.Hour), sess.ID
+}
+
+// All seven Authenticate/AuthenticateRequest reasons. newSM hardcodes both
+// stores, so the store-failure cases build the SessionManager directly.
+func TestAuthenticate_ReasonPerBranch(t *testing.T) {
+	errBoom := errors.New("database is on fire")
+
+	expiredSM, expiredMS := newSM(store.User{ID: "u"})
+	expiredSess, err := expiredSM.Create(t.Context(), "u", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	s := expiredMS.m[expiredSess.ID]
+	s.ExpiresAt = 1
+	expiredMS.m[expiredSess.ID] = s
+
+	disabledSM, disabledID := newLiveSession(t, fakeUsers{u: store.User{ID: "u", Disabled: true}})
+	unknownUserSM, unknownUserID := newLiveSession(t, fakeUsers{err: store.ErrNotFound})
+	userErrSM, userErrID := newLiveSession(t, fakeUsers{err: errBoom})
+
+	tests := []struct {
+		name       string
+		sm         *SessionManager
+		sessionID  string
+		wantReason string
+	}{
+		{"unknown_session", NewSessionManager(errSessions{err: store.ErrNotFound}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "unknown_session"},
+		{"session_store_error", NewSessionManager(errSessions{err: errBoom}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "session_store_error"},
+		{"session_expired", expiredSM, expiredSess.ID, "session_expired"},
+		{"unknown_user", unknownUserSM, unknownUserID, "unknown_user"},
+		{"user_store_error", userErrSM, userErrID, "user_store_error"},
+		{"user_disabled", disabledSM, disabledID, "user_disabled"},
+	}
+
+	seen := map[string]bool{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := tt.sm.Authenticate(t.Context(), tt.sessionID)
+			// The property that must survive: one sentinel for every reason.
+			if !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("errors.Is(err, ErrUnauthorized) = false (err=%v)", err)
+			}
+			if err.Error() != ErrUnauthorized.Error() {
+				t.Fatalf("Error() = %q, want %q", err.Error(), ErrUnauthorized.Error())
+			}
+			if got := ReasonOf(err); got != tt.wantReason {
+				t.Fatalf("ReasonOf = %q, want %q", got, tt.wantReason)
+			}
+		})
+		seen[tt.wantReason] = true
+	}
+
+	// The seventh reason belongs to AuthenticateRequest, not Authenticate.
+	t.Run("no_cookie", func(t *testing.T) {
+		sm, _ := newSM(store.User{ID: "u"})
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		_, _, err := sm.AuthenticateRequest(r, "diyddns_session")
+		if !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("errors.Is(err, ErrUnauthorized) = false (err=%v)", err)
+		}
+		if got := ReasonOf(err); got != "no_cookie" {
+			t.Fatalf("ReasonOf = %q, want no_cookie", got)
+		}
+	})
+	seen["no_cookie"] = true
+
+	if len(seen) != 7 {
+		t.Fatalf("covered %d distinct reasons, want 7", len(seen))
+	}
+}
+
+// Design §11 item 8: "revoked" is not a reachable reason. Destroy deletes the
+// row, so a logged-out session is indistinguishable from one that never
+// existed and must report unknown_session.
+func TestAuthenticate_NoRevokedReason(t *testing.T) {
+	sm, _ := newSM(store.User{ID: "u"})
+	sess, err := sm.Create(t.Context(), "u", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sm.Destroy(t.Context(), sess.ID); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	_, _, err = sm.Authenticate(t.Context(), sess.ID)
+	if got := ReasonOf(err); got == "revoked" {
+		t.Fatal(`reason "revoked" is unreachable: Destroy deletes the row, so a logged-out session is indistinguishable from an unknown one`)
+	}
+	if got := ReasonOf(err); got != "unknown_session" {
+		t.Fatalf("ReasonOf = %q, want unknown_session", got)
+	}
+}
+
 func TestGenerateCSRFToken_Distinct(t *testing.T) {
 	a, _ := GenerateCSRFToken()
 	b, _ := GenerateCSRFToken()

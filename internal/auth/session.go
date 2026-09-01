@@ -76,15 +76,26 @@ func (m *SessionManager) Create(ctx context.Context, userID, ip, ua string) (sto
 func (m *SessionManager) Authenticate(ctx context.Context, sessionID string) (store.User, store.Session, error) {
 	sess, err := m.sessions.GetByID(ctx, sessionID)
 	if err != nil {
-		return store.User{}, store.Session{}, ErrUnauthorized
+		// An absent session is a client problem (stale or forged cookie); a
+		// failing store is an operator problem. Same 401, different log line.
+		if errors.Is(err, store.ErrNotFound) {
+			return store.User{}, store.Session{}, &rejection{reason: "unknown_session"}
+		}
+		return store.User{}, store.Session{}, &rejection{reason: "session_store_error"}
 	}
 	now := m.now()
 	if sess.ExpiresAt <= now {
-		return store.User{}, store.Session{}, ErrUnauthorized
+		return store.User{}, store.Session{}, &rejection{reason: "session_expired"}
 	}
 	usr, err := m.users.GetByID(ctx, sess.UserID)
-	if err != nil || usr.Disabled {
-		return store.User{}, store.Session{}, ErrUnauthorized
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.User{}, store.Session{}, &rejection{reason: "unknown_user"}
+		}
+		return store.User{}, store.Session{}, &rejection{reason: "user_store_error"}
+	}
+	if usr.Disabled {
+		return store.User{}, store.Session{}, &rejection{reason: "user_disabled"}
 	}
 	// Slide: if last seen more than `slide` ago, extend expiry.
 	if now-sess.LastSeenAt >= int64(m.slide.Seconds()) {
@@ -105,7 +116,7 @@ func (m *SessionManager) Authenticate(ctx context.Context, sessionID string) (st
 func (m *SessionManager) AuthenticateRequest(r *http.Request, cookieName string) (store.User, store.Session, error) {
 	c, err := r.Cookie(cookieName)
 	if err != nil || c.Value == "" {
-		return store.User{}, store.Session{}, ErrUnauthorized
+		return store.User{}, store.Session{}, &rejection{reason: "no_cookie"}
 	}
 	return m.Authenticate(r.Context(), c.Value)
 }
