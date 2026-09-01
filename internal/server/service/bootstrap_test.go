@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -366,4 +367,62 @@ func TestBootstrapService_BeginClaim_AdminAlreadyExists_ReturnsClosed(t *testing
 	if _, _, err := svc.BeginClaim(t.Context(), "any-token", "new-admin@example.com"); !errors.Is(err, ErrBootstrapClosed) {
 		t.Fatalf("BeginClaim (admin exists): got %v, want ErrBootstrapClosed", err)
 	}
+}
+
+// bootstrap.go:284 fires when Users().Create conflicts. FinishClaim only
+// requires that no ADMIN exists, so seeding a non-admin user on the claim
+// email satisfies the precondition and collides at the create.
+func TestFinishClaim_CriticalRecordUsesErrorKey(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	// newTestBootstrapServiceWithPasskeys (bootstrap_test.go:41) hardcodes
+	// discardLogger(), so construct directly -- NewBootstrapService is exported
+	// and takes the logger as its second parameter.
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	svc := NewBootstrapService(st, log, discardAudit{},
+		func(tok string) { token = tok }, passkeys, testKey32())
+
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	if _, err := st.Users().Create(t.Context(), store.User{Email: "admin@example.com", Role: "user"}); err != nil {
+		t.Fatalf("seed non-admin: %v", err)
+	}
+
+	if _, err := driveClaim(t, svc, token, "admin@example.com", "My Key", testRP()); err == nil {
+		t.Fatal("expected FinishClaim to fail at the admin-create step")
+	}
+
+	line := findRecordPrefix(t, &buf, "BOOTSTRAP CRITICAL")
+	if _, stale := line["err"]; stale {
+		t.Error(`attr key "err" survived; every LogAttrs site in the tree uses "error"`)
+	}
+	if _, ok := line["error"]; !ok {
+		t.Error(`attr key "error" missing`)
+	}
+}
+
+// findRecordPrefix matches on a PREFIX, because the CRITICAL messages are long
+// recovery instructions. The exact-match findRecord used elsewhere would never
+// match them.
+func findRecordPrefix(t *testing.T, buf *bytes.Buffer, prefix string) map[string]any {
+	t.Helper()
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line not JSON: %v (%s)", err, line)
+		}
+		if msg, _ := rec["msg"].(string); strings.HasPrefix(msg, prefix) {
+			return rec
+		}
+	}
+	t.Fatalf("no record with msg prefix %q in:\n%s", prefix, buf.String())
+	return nil
 }

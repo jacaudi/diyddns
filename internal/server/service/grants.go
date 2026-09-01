@@ -142,7 +142,7 @@ func (s *GrantService) deliver(ctx context.Context, actorID string, u store.User
 	d := Delivery{Attempted: true, To: u.Email}
 	if err := s.mailer.Send(sendCtx, u.Email, subject, body); err != nil {
 		d.Err = err
-		s.log.ErrorContext(ctx, "grant link delivery failed", "err", err, "user_id", u.ID)
+		s.log.ErrorContext(ctx, "grant link delivery failed", "error", err, "user_id", u.ID)
 		s.auditSendFailure(ctx, store.AuditEntry{
 			ActorUserID: actorID,
 			EventType:   EventEmailSendFailed,
@@ -386,7 +386,7 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 
 	link, err := s.mintRecoveryGrant(ctx, u.ID, u.ID)
 	if err != nil {
-		s.log.Error("self-service recovery: issue failed", "err", err)
+		s.log.Error("self-service recovery: issue failed", "error", err)
 		return
 	}
 
@@ -414,10 +414,10 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 		// context remain.
 		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			s.log.Error("self-service recovery: delivery budget exhausted before notifying admins; admins were NOT notified",
-				"err", err, "budget", s.selfServiceTimeout)
+				"error", err, "budget", s.selfServiceTimeout)
 			return
 		}
-		s.log.Error("self-service recovery: list admins failed", "err", err)
+		s.log.Error("self-service recovery: list admins failed", "error", err)
 		return
 	}
 	adminSubj, adminBody := email.AdminNotifyBody(u.Email)
@@ -516,15 +516,17 @@ func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie str
 
 	if grant.Reason == "recovery" {
 		if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, grant.UserID); err != nil {
-			s.log.Error("GRANT CRITICAL: recovery grant consumed but passkey revoke failed; admin must re-issue",
-				"err", err, "user_id", grant.UserID)
+			s.log.LogAttrs(ctx, slog.LevelError,
+				"GRANT CRITICAL: recovery grant consumed but passkey revoke failed; admin must re-issue",
+				slog.Any("error", err), slog.String("user_id", grant.UserID))
 			return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)
 		}
 	}
 
 	if _, err := s.passkeys.persistCredential(ctx, grant.UserID, sess.UserID, cred, name); err != nil {
-		s.log.Error("GRANT CRITICAL: grant consumed but credential persist failed; admin must re-issue",
-			"err", err, "user_id", grant.UserID)
+		s.log.LogAttrs(ctx, slog.LevelError,
+			"GRANT CRITICAL: grant consumed but credential persist failed; admin must re-issue",
+			slog.Any("error", err), slog.String("user_id", grant.UserID))
 		return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)
 	}
 
