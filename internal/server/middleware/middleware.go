@@ -45,6 +45,13 @@ func RequestIDFromContext(ctx context.Context) string {
 // is set by what this server writes; this one is set by what upstream proxies
 // emit. They are different rules over different values and are expected to
 // diverge.
+//
+// It is likewise not shared with api.claimedDeviceID, which applies the same
+// 128-byte printable-ASCII bound to the agent device header. That one's limit
+// is set by what this server mints, this one's by what upstream proxies emit,
+// and internal/server/api does not import this package — unifying them would
+// buy a cross-package edge for a rule the two sides do not co-own. Identical
+// today; keep them in step or diverge them deliberately.
 func validRequestID(s string) bool {
 	if s == "" || len(s) > maxRequestIDLen {
 		return false
