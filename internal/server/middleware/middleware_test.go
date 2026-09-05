@@ -27,19 +27,6 @@ func TestRequestID_GeneratesWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestRequestID_HonorsIncoming(t *testing.T) {
-	var seen string
-	h := middleware.RequestID("X-Request-Id")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = middleware.RequestIDFromContext(r.Context())
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Request-Id", "incoming-123")
-	h.ServeHTTP(httptest.NewRecorder(), req)
-	if seen != "incoming-123" {
-		t.Errorf("request id = %q, want incoming-123", seen)
-	}
-}
-
 func TestRequestID_HonorsConfiguredHeader(t *testing.T) {
 	var seen string
 	h := middleware.RequestID("X-Correlation-Id")(http.HandlerFunc(
