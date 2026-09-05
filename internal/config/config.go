@@ -21,6 +21,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/viper"
+
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // Server is the fully-resolved server configuration.
@@ -654,11 +656,12 @@ func validateRetention(cfg Server) error {
 }
 
 // validateObservability rejects a request_id_header that is empty, is not an
-// RFC 7230 field-name token, or is a header the server itself writes. The
-// value is echoed on every response, and net/http drops an invalid field name
-// silently rather than erroring, so the failure has to be caught at startup or
-// not at all. The reserved list is not exhaustive against merely unwise names
-// (Server, Date); it is exhaustive against the names that corrupt the protocol.
+// RFC 7230 field-name token, or is reserved -- either because the server
+// writes it on every response (overwriting it corrupts the response), or
+// because it carries a credential (its value becomes request_id on every log
+// record of the request, at INFO, and is echoed back in the response). Neither
+// list is exhaustive against merely unwise names (Server, Date); each is
+// exhaustive against the names that actually break something.
 func validateObservability(cfg Server) error {
 	h := cfg.Observability.RequestIDHeader
 	if h == "" {
@@ -676,10 +679,18 @@ func validateObservability(cfg Server) error {
 	}
 	switch textproto.CanonicalMIMEHeaderKey(h) {
 	case "Content-Length", "Content-Type", "Content-Encoding",
-		"Transfer-Encoding", "Connection", "Trailer", "Upgrade", "Location":
+		"Transfer-Encoding", "Connection", "Trailer", "Upgrade", "Location",
+		"Cookie", "Set-Cookie", "Authorization", "Proxy-Authorization", "X-Csrf-Token",
+		// Canonicalized rather than restated so the agent envelope has one
+		// spelling (internal/shared) and renaming a header cannot silently
+		// drop it out of this list.
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderDevice),
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderTimestamp),
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderNonce),
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderSignature):
 		return fmt.Errorf(
-			`config: observability.request_id_header %q is reserved; the server writes this `+
-				`header on every response and overwriting it corrupts the response`, h)
+			`config: observability.request_id_header %q is reserved: the server writes it on `+
+				`every response, or it carries a credential`, h)
 	}
 	return nil
 }

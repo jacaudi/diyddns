@@ -14,6 +14,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/email"
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // loadWithDB is a test helper that sets the required database.path and calls
@@ -959,12 +960,19 @@ func TestLoad_ObservabilityDefault(t *testing.T) {
 
 func TestLoad_ObservabilityRejectsBadHeaderNames(t *testing.T) {
 	// Reserved names are all legal RFC 7230 tokens, so a charset check alone
-	// accepts them. Each one corrupts every response; see design 5.1.
+	// accepts them. Two classes: names that corrupt every response (design
+	// 5.1), and names that carry a credential -- the configured header's value
+	// is copied into request_id on every record of the request at INFO and
+	// echoed back in the response, so pointing it at Cookie publishes the
+	// session cookie to the log.
 	bad := []string{
 		"", "X Request Id", "foo:bar", "hdr\nname",
 		"Content-Length", "Content-Type", "Content-Encoding", "Transfer-Encoding",
 		"Connection", "Trailer", "Upgrade", "Location",
 		"content-length", "CONTENT-LENGTH", // canonicalized before comparison
+		"Cookie", "Set-Cookie", "Authorization", "Proxy-Authorization", "X-CSRF-Token",
+		shared.HeaderDevice, shared.HeaderTimestamp, shared.HeaderNonce, shared.HeaderSignature,
+		"cookie", "AUTHORIZATION", "x-csrf-token", // canonicalized before comparison
 	}
 	for _, name := range bad {
 		t.Run(name, func(t *testing.T) {

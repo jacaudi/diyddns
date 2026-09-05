@@ -302,8 +302,6 @@ observability:
   # DIYDDNS log records join the proxy's. Values longer than 128 bytes or
   # containing non-printable characters are ignored and a fresh id is minted.
   #
-  # Names the server itself writes (Content-Length, Content-Type,
-  # Transfer-Encoding, Connection, Trailer, Upgrade, Content-Encoding,
-  # Location) are rejected at startup: echoing the id onto one of them
-  # corrupts every response.
+  # Some header names are rejected at startup -- see the README's
+  # "Observability" section for the reserved list and why.
   request_id_header: X-Request-Id
