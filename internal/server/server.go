@@ -229,6 +229,13 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// This order is load-bearing, not stylistic. AccessLog reads r.Pattern
+	// AFTER next.ServeHTTP returns, and that works only because
+	// ServeMux.ServeHTTP sets Pattern on the very *http.Request the caller
+	// handed it. Insert any middleware between AccessLog and mux that calls
+	// r.WithContext or r.Clone and the mux annotates a copy instead: route
+	// silently goes empty on every access-log record, with nothing failing.
+	// (Recover is safe here precisely because it forwards r untouched.)
 	return middleware.Chain(mux,
 		middleware.RequestID(cfg.Observability.RequestIDHeader),
 		middleware.AccessLog(log),

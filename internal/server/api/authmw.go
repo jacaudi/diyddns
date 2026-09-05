@@ -117,8 +117,9 @@ func hmacMiddleware(api huma.API, v *auth.Verifier, maxBody int64, log *slog.Log
 
 // claimedDeviceID bounds an unauthenticated, attacker-controlled header value
 // before it reaches a log record: over-long or non-printable-ASCII input logs
-// as "" rather than letting a caller inject a forged second record. Unlike a
-// correlation id there is nothing sensible to mint in its place.
+// as "" instead. Unlike a correlation id there is nothing sensible to mint in
+// its place. See middleware.validRequestID for what this bound is actually
+// defending against (it is not what it looks like).
 //
 // Same limit as middleware.validRequestID, deliberately by its own predicate
 // rather than a shared one: internal/server/api does not import

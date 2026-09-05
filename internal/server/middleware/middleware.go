@@ -36,9 +36,15 @@ func RequestIDFromContext(ctx context.Context) string {
 // validRequestID accepts a correlation id from an untrusted client: non-empty,
 // at most maxRequestIDLen bytes, and printable ASCII only.
 //
-// Printable-ASCII is what keeps the value safe to embed in every log record it
-// now reaches: a control byte would let an unauthenticated caller inject a
-// newline (a forged second record in a line-oriented log) or a NUL.
+// The bound is what keeps the value safe to embed in every log record it now
+// reaches -- but not for the reason it looks like. It is NOT log injection:
+// both slog handlers escape a newline inside a value, so the record stays one
+// line, and net/http answers 400 for a control byte in a header value before
+// this middleware ever runs. What actually reaches here is obs-text
+// (httpguts.ValidHeaderFieldValue permits 0x80-0xFF, so arbitrary non-ASCII
+// arrives intact) and an over-length value, whole, up to MaxHeaderBytes.
+// Bounding those two is the real job: an unauthenticated caller must not get
+// to write unbounded or non-ASCII bytes into every record of its request.
 //
 // This bound is deliberately NOT shared with config.validateObservability's
 // check on the header NAME. That one enforces an RFC 7230 field-name token and

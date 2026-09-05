@@ -380,8 +380,19 @@ proxy's for the same request.
 
 An inbound value is honoured only if it is at most 128 bytes of printable ASCII;
 anything else is discarded and a fresh UUIDv7 is minted, so an untrusted client
-cannot write unbounded data into the log. Header names the server itself writes
-(`Content-Length`, `Content-Type`, `Location`, ...) are refused at startup.
+cannot write unbounded data into the log.
+
+The id is nonetheless **client-supplied and untrusted** unless a proxy you
+control overwrites the header on the way in: any unauthenticated caller can send
+every request under one id, or under an id it saw in someone else's bug report.
+Treat it as a correlation aid, never as attribution.
+
+Two kinds of header name are refused at startup: ones the server itself writes
+(`Content-Length`, `Content-Type`, `Location`, ...), and ones that carry a
+credential (`Cookie`, `Authorization`, `X-CSRF-Token`, the agent's
+`X-Diyddns-*` signing headers) — the configured header's value is copied into
+`request_id` on every record, so pointing it at `Cookie` would publish the
+session cookie to the log.
 
 ## Documentation
 
