@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -194,10 +195,17 @@ func newLiveSession(t *testing.T, u UserReader) (*SessionManager, string) {
 	return NewSessionManager(ms, u, 720*time.Hour, 7*24*time.Hour), sess.ID
 }
 
-// All seven Authenticate/AuthenticateRequest reasons. newSM hardcodes both
+// All nine Authenticate/AuthenticateRequest reasons. newSM hardcodes both
 // stores, so the store-failure cases build the SessionManager directly.
 func TestAuthenticate_ReasonPerBranch(t *testing.T) {
 	errBoom := errors.New("database is on fire")
+
+	// *_lookup_cancelled: net/http cancels the request context when a browser
+	// disconnects mid-request, and the store wraps whatever the driver returns
+	// (internal/store/devices.go: `devices.GetByID: %w`). The fake reproduces
+	// that wrap so the classification is tested against the shape the real
+	// store produces, not against a bare context.Canceled.
+	errCancelled := fmt.Errorf("sessions.GetByID: %w", context.Canceled)
 
 	expiredSM, expiredMS := newSM(store.User{ID: "u"})
 	expiredSess, err := expiredSM.Create(t.Context(), "u", "", "")
@@ -212,24 +220,35 @@ func TestAuthenticate_ReasonPerBranch(t *testing.T) {
 	unknownUserSM, unknownUserID := newLiveSession(t, fakeUsers{err: store.ErrNotFound})
 	userErrSM, userErrID := newLiveSession(t, fakeUsers{err: errBoom})
 
+	userCancelledSM, userCancelledID := newLiveSession(t, fakeUsers{err: errCancelled})
+
 	tests := []struct {
 		name       string
 		sm         *SessionManager
 		sessionID  string
 		wantReason string
+		cancelCtx  bool // run with an already-cancelled context
 	}{
-		{"unknown_session", NewSessionManager(errSessions{err: store.ErrNotFound}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "unknown_session"},
-		{"session_store_error", NewSessionManager(errSessions{err: errBoom}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "session_store_error"},
-		{"session_expired", expiredSM, expiredSess.ID, "session_expired"},
-		{"unknown_user", unknownUserSM, unknownUserID, "unknown_user"},
-		{"user_store_error", userErrSM, userErrID, "user_store_error"},
-		{"user_disabled", disabledSM, disabledID, "user_disabled"},
+		{"unknown_session", NewSessionManager(errSessions{err: store.ErrNotFound}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "unknown_session", false},
+		{"session_lookup_cancelled", NewSessionManager(errSessions{err: errCancelled}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "session_lookup_cancelled", true},
+		{"session_store_error", NewSessionManager(errSessions{err: errBoom}, fakeUsers{u: store.User{ID: "u"}}, 720*time.Hour, 7*24*time.Hour), "sid", "session_store_error", false},
+		{"session_expired", expiredSM, expiredSess.ID, "session_expired", false},
+		{"unknown_user", unknownUserSM, unknownUserID, "unknown_user", false},
+		{"user_lookup_cancelled", userCancelledSM, userCancelledID, "user_lookup_cancelled", true},
+		{"user_store_error", userErrSM, userErrID, "user_store_error", false},
+		{"user_disabled", disabledSM, disabledID, "user_disabled", false},
 	}
 
 	seen := map[string]bool{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := tt.sm.Authenticate(t.Context(), tt.sessionID)
+			ctx := t.Context()
+			if tt.cancelCtx {
+				c, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = c
+			}
+			_, _, err := tt.sm.Authenticate(ctx, tt.sessionID)
 			// The property that must survive: one sentinel for every reason.
 			if !errors.Is(err, ErrUnauthorized) {
 				t.Fatalf("errors.Is(err, ErrUnauthorized) = false (err=%v)", err)
@@ -258,8 +277,10 @@ func TestAuthenticate_ReasonPerBranch(t *testing.T) {
 	})
 	seen["no_cookie"] = true
 
-	if len(seen) != 7 {
-		t.Fatalf("covered %d distinct reasons, want 7", len(seen))
+	// Counted outside the subtests on purpose: a Fatalf-ing subtest must not
+	// also trip this guard and bury the real failure under a second one.
+	if len(seen) != 9 {
+		t.Fatalf("table covers %d distinct reasons, want 9", len(seen))
 	}
 }
 

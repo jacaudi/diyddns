@@ -35,6 +35,23 @@ func ReasonOf(err error) string {
 	return "unknown"
 }
 
+// storeRejection classifies one failed store lookup three ways: the row is
+// missing, the request went away, or the store is broken. ctx.Err() is
+// consulted rather than errors.Is(err, context.Canceled) so a deadline is
+// caught alongside a cancellation. store.ErrNotFound is checked first so a
+// lookup that genuinely found nothing before the client hung up still reports
+// as missing.
+func storeRejection(ctx context.Context, err error, missing, cancelled, broken string) *rejection {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return &rejection{reason: missing}
+	case ctx.Err() != nil:
+		return &rejection{reason: cancelled}
+	default:
+		return &rejection{reason: broken}
+	}
+}
+
 // DeviceReader is the narrow device-lookup surface Verify depends on.
 type DeviceReader interface {
 	GetByID(ctx context.Context, id string) (store.Device, error)
@@ -85,23 +102,17 @@ func NewVerifier(d DeviceReader, u UserReader, n NonceInserter, key []byte, skew
 func (v *Verifier) Verify(ctx context.Context, p RequestParts, now int64) (string, error) {
 	dev, err := v.devices.GetByID(ctx, p.Device)
 	if err != nil {
-		// A missing device is a client problem; a failing store is an
-		// operator problem. They produce the same 401 and must not produce
-		// the same log line.
-		if errors.Is(err, store.ErrNotFound) {
-			return "", &rejection{reason: "unknown_device"}
-		}
-		return "", &rejection{reason: "device_store_error"}
+		// A missing device is a client problem, an abandoned request is
+		// nobody's, and a failing store is an operator problem. All three
+		// produce the same 401 and must not produce the same log line.
+		return "", storeRejection(ctx, err, "unknown_device", "device_lookup_cancelled", "device_store_error")
 	}
 	if dev.Disabled {
 		return "", &rejection{reason: "device_disabled"}
 	}
 	usr, err := v.users.GetByID(ctx, dev.UserID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return "", &rejection{reason: "unknown_user"}
-		}
-		return "", &rejection{reason: "user_store_error"}
+		return "", storeRejection(ctx, err, "unknown_user", "user_lookup_cancelled", "user_store_error")
 	}
 	if usr.Disabled {
 		return "", &rejection{reason: "user_disabled"}

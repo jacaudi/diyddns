@@ -76,12 +76,10 @@ func (m *SessionManager) Create(ctx context.Context, userID, ip, ua string) (sto
 func (m *SessionManager) Authenticate(ctx context.Context, sessionID string) (store.User, store.Session, error) {
 	sess, err := m.sessions.GetByID(ctx, sessionID)
 	if err != nil {
-		// An absent session is a client problem (stale or forged cookie); a
-		// failing store is an operator problem. Same 401, different log line.
-		if errors.Is(err, store.ErrNotFound) {
-			return store.User{}, store.Session{}, &rejection{reason: "unknown_session"}
-		}
-		return store.User{}, store.Session{}, &rejection{reason: "session_store_error"}
+		// An absent session is a client problem (stale or forged cookie), an
+		// abandoned request is nobody's, and a failing store is an operator
+		// problem. Same 401, three different log lines.
+		return store.User{}, store.Session{}, storeRejection(ctx, err, "unknown_session", "session_lookup_cancelled", "session_store_error")
 	}
 	now := m.now()
 	if sess.ExpiresAt <= now {
@@ -89,10 +87,7 @@ func (m *SessionManager) Authenticate(ctx context.Context, sessionID string) (st
 	}
 	usr, err := m.users.GetByID(ctx, sess.UserID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return store.User{}, store.Session{}, &rejection{reason: "unknown_user"}
-		}
-		return store.User{}, store.Session{}, &rejection{reason: "user_store_error"}
+		return store.User{}, store.Session{}, storeRejection(ctx, err, "unknown_user", "user_lookup_cancelled", "user_store_error")
 	}
 	if usr.Disabled {
 		return store.User{}, store.Session{}, &rejection{reason: "user_disabled"}
