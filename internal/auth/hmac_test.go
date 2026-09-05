@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -209,5 +210,132 @@ func TestVerify_CorruptSecretHash(t *testing.T) { // OpenSecret fails in secretF
 	p := RequestParts{Device: "dev1", Timestamp: "1720000000", Nonce: "n", Signature: "x", Method: "GET", Path: "/agent/v1/self"}
 	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("corrupt secret_hash must be rejected, got %v", err)
+	}
+}
+
+// D11: every reason still collapses to the one exported sentinel, and its
+// Error() string is unchanged, so a caller that formats the error into a
+// response body cannot leak the distinction even by accident.
+func TestReasonOf_PreservesSentinelIdentity(t *testing.T) {
+	err := &rejection{reason: "device_disabled"}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatal("errors.Is(err, ErrUnauthorized) = false; every caller in the tree relies on this")
+	}
+	if err.Error() != ErrUnauthorized.Error() {
+		t.Fatalf("Error() = %q, want %q", err.Error(), ErrUnauthorized.Error())
+	}
+	if got := ReasonOf(err); got != "device_disabled" {
+		t.Fatalf("ReasonOf = %q, want device_disabled", got)
+	}
+	// Survives wrapping, and degrades rather than panicking.
+	if got := ReasonOf(fmt.Errorf("context: %w", err)); got != "device_disabled" {
+		t.Fatalf("ReasonOf through %%w = %q, want device_disabled", got)
+	}
+	if got := ReasonOf(ErrUnauthorized); got != "unknown" {
+		t.Fatalf("ReasonOf(bare sentinel) = %q, want unknown", got)
+	}
+	if got := ReasonOf(nil); got != "unknown" {
+		t.Fatalf("ReasonOf(nil) = %q, want unknown", got)
+	}
+}
+
+// errNonces is a NonceInserter that fails with something other than
+// store.ErrConflict, so the nonce_store_error branch is reachable. The
+// existing fakeNonces returns ErrConflict, which is the replay branch.
+type errNonces struct{ err error }
+
+func (e errNonces) Insert(context.Context, string, int64) error { return e.err }
+
+// All fourteen Verify reasons, each driven by the one condition that produces
+// it. Built on this file's existing fakeDevices/fakeUsers/fakeNonces and
+// signedParts helpers.
+func TestVerify_ReasonPerBranch(t *testing.T) {
+	key := make([]byte, 32)
+	secret, _ := GenerateSecret()
+	sealed, _ := SealSecret(key, secret)
+
+	goodDev := store.Device{ID: "dev1", UserID: "u", SecretHash: sealed}
+	goodUsr := store.User{ID: "u"}
+	errBoom := errors.New("database is on fire")
+	const ts = 1720000000
+
+	newV := func(d DeviceReader, u UserReader, n NonceInserter) *Verifier {
+		return NewVerifier(d, u, n, key, 120*time.Second, 120*time.Second)
+	}
+	fresh := func() *fakeNonces { return &fakeNonces{seen: map[string]bool{}} }
+	ok := func() RequestParts { return signedParts(secret, ts, nil) }
+
+	// replay: the same signature already recorded.
+	replayed := fresh()
+	_ = replayed.Insert(t.Context(), ok().Signature, 0)
+
+	// secret_unavailable: a device whose sealed secret cannot be opened.
+	corrupt := goodDev
+	corrupt.SecretHash = "not-a-sealed-secret"
+
+	badTS := ok()
+	badTS.Timestamp = "not-a-number"
+
+	badSig := ok()
+	badSig.Signature = "0000000000000000000000000000000000000000000000000000000000000000"
+
+	// *_lookup_cancelled: net/http cancels the request context when a client
+	// disconnects mid-request, and store.DeviceRepo.GetByID wraps whatever the
+	// driver returns (internal/store/devices.go: `devices.GetByID: %w`). The
+	// fake reproduces that exact wrap so the classification is tested against
+	// the shape the real store produces, not against a bare context.Canceled.
+	errCancelled := fmt.Errorf("devices.GetByID: %w", context.Canceled)
+
+	tests := []struct {
+		name       string
+		v          *Verifier
+		parts      RequestParts
+		now        int64
+		wantReason string
+		cancelCtx  bool // run with an already-cancelled context
+	}{
+		{"unknown_device", newV(fakeDevices{err: store.ErrNotFound}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "unknown_device", false},
+		{"device_lookup_cancelled", newV(fakeDevices{err: errCancelled}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "device_lookup_cancelled", true},
+		{"device_store_error", newV(fakeDevices{err: errBoom}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "device_store_error", false},
+		{"device_disabled", newV(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed, Disabled: true}}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "device_disabled", false},
+		{"unknown_user", newV(fakeDevices{d: goodDev}, fakeUsers{err: store.ErrNotFound}, fresh()), ok(), ts, "unknown_user", false},
+		{"user_lookup_cancelled", newV(fakeDevices{d: goodDev}, fakeUsers{err: errCancelled}, fresh()), ok(), ts, "user_lookup_cancelled", true},
+		{"user_store_error", newV(fakeDevices{d: goodDev}, fakeUsers{err: errBoom}, fresh()), ok(), ts, "user_store_error", false},
+		{"user_disabled", newV(fakeDevices{d: goodDev}, fakeUsers{u: store.User{ID: "u", Disabled: true}}, fresh()), ok(), ts, "user_disabled", false},
+		{"bad_timestamp", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh()), badTS, ts, "bad_timestamp", false},
+		{"clock_skew", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh()), ok(), ts + 3600, "clock_skew", false},
+		{"secret_unavailable", newV(fakeDevices{d: corrupt}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "secret_unavailable", false},
+		{"bad_signature", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh()), badSig, ts, "bad_signature", false},
+		{"replay", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, replayed), ok(), ts, "replay", false},
+		{"nonce_store_error", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, errNonces{err: errBoom}), ok(), ts, "nonce_store_error", false},
+	}
+
+	seen := map[string]bool{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			if tt.cancelCtx {
+				c, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = c
+			}
+			_, err := tt.v.Verify(ctx, tt.parts, tt.now)
+			// The property that must survive: one sentinel for every reason.
+			if !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("errors.Is(err, ErrUnauthorized) = false (err=%v)", err)
+			}
+			if err.Error() != ErrUnauthorized.Error() {
+				t.Fatalf("Error() = %q, want %q", err.Error(), ErrUnauthorized.Error())
+			}
+			if got := ReasonOf(err); got != tt.wantReason {
+				t.Fatalf("ReasonOf = %q, want %q", got, tt.wantReason)
+			}
+		})
+		seen[tt.wantReason] = true
+	}
+	// Counted outside the subtest on purpose: a Fatalf-ing subtest must not
+	// also trip this guard and bury the real failure under a second one.
+	if len(seen) != 14 {
+		t.Fatalf("table covers %d distinct reasons, want 14", len(seen))
 	}
 }

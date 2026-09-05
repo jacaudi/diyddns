@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +68,193 @@ func seedDeviceWithSecret(t *testing.T, st *store.Store, key []byte, label, user
 	return dev, secret
 }
 
+// captureLogger returns a JSON logger writing into the returned buffer, so a
+// probe can assert on the records its middleware emits. api_test.go's
+// discardLogger is in package api_test and is unreachable from these
+// white-box tests.
+func captureLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+}
+
+// findRecord returns the first JSON record in buf whose msg matches, or fails.
+func findRecord(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
+	t.Helper()
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line not JSON: %v (%s)", err, line)
+		}
+		if rec["msg"] == msg {
+			return rec
+		}
+	}
+	t.Fatalf("no record with msg %q in:\n%s", msg, buf.String())
+	return nil
+}
+
+// hmacProbe wires a throwaway operation behind hmacMiddleware, mirroring
+// TestHMACMiddleware_ProbesBodyRestoreAndAuth. It returns a signed-request
+// builder, the middleware's log buffer, and the seeded device with its
+// plaintext secret so a caller can break exactly one input.
+func hmacProbe(t *testing.T) (build func(*testing.T, []byte, string) *http.Request, buf *bytes.Buffer, dev store.Device, secret []byte) {
+	t.Helper()
+	const path = "/agent/v1/probe"
+
+	st := openTestStore(t)
+	key := testKey32()
+	dev, secret = seedDeviceWithSecret(t, st, key, "probe", "probe@example.test")
+	v := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
+
+	log, buf := captureLogger()
+
+	mux := http.NewServeMux()
+	probeAPI := humago.New(mux, huma.DefaultConfig("probe", "1"))
+	type out struct {
+		Body struct {
+			OK bool `json:"ok"`
+		}
+	}
+	huma.Register(probeAPI, huma.Operation{
+		Method:      http.MethodPost,
+		Path:        path,
+		Middlewares: huma.Middlewares{hmacMiddleware(probeAPI, v, maxAgentBody, log)},
+	}, func(context.Context, *struct{}) (*out, error) { return &out{}, nil })
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// build signs with the given secret and claims the given device header, so
+	// a caller can break exactly one of them.
+	build = func(t *testing.T, sec []byte, deviceHeader string) *http.Request {
+		t.Helper()
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := "n-" + deviceHeader
+		canonical := shared.CanonicalRequest(http.MethodPost, path, ts, nonce, shared.BodyHashHex(nil))
+		req, err := http.NewRequest(http.MethodPost, srv.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set(shared.HeaderDevice, deviceHeader)
+		req.Header.Set(shared.HeaderTimestamp, ts)
+		req.Header.Set(shared.HeaderNonce, nonce)
+		req.Header.Set(shared.HeaderSignature, shared.Sign(sec, canonical))
+		return req
+	}
+	return build, buf, dev, secret
+}
+
+// TestHMACMiddleware_LogsRejectionReason is D12 at the agent door: the log
+// names which check failed; the response does not.
+func TestHMACMiddleware_LogsRejectionReason(t *testing.T) {
+	build, buf, _, _ := hmacProbe(t)
+
+	// An unknown device id: the claimed id is attacker-controlled and
+	// unauthenticated, which is why the attr is named claimed_device_id.
+	resp, err := http.DefaultClient.Do(build(t, []byte("wrong-secret"), "dev_does_not_exist"))
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	rec := findRecord(t, buf, "agent auth rejected")
+	if rec["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", rec["level"])
+	}
+	if rec["reason"] != "unknown_device" {
+		t.Errorf("reason = %v, want unknown_device", rec["reason"])
+	}
+	if rec["claimed_device_id"] != "dev_does_not_exist" {
+		t.Errorf("claimed_device_id = %v", rec["claimed_device_id"])
+	}
+	if rec["route"] != "POST /agent/v1/probe" {
+		t.Errorf("route = %v, want the route template", rec["route"])
+	}
+}
+
+// TestHMACMiddleware_BoundsClaimedDeviceID proves an oversized claimed device
+// id is bounded before it reaches the record.
+func TestHMACMiddleware_BoundsClaimedDeviceID(t *testing.T) {
+	build, buf, _, _ := hmacProbe(t)
+
+	resp, err := http.DefaultClient.Do(build(t, []byte("wrong"), strings.Repeat("d", 129)))
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	rec := findRecord(t, buf, "agent auth rejected")
+	if rec["claimed_device_id"] != "" {
+		t.Errorf("claimed_device_id = %q, want empty for an over-long value", rec["claimed_device_id"])
+	}
+}
+
+// TestHMACMiddleware_401BodyIdenticalAcrossReasons is the enumeration guard.
+// It asserts the RAW BYTES, not a decoded struct: the failure mode being
+// guarded against (passing err to huma.WriteErr) ADDS a field rather than
+// changing one, and a struct decode would not notice.
+//
+// The two cases must take DIFFERENT branches, or this compares a body to
+// itself: a nonexistent device id and a real device with a wrong secret hit
+// unknown_device and bad_signature respectively. hmacProbe returns the seeded
+// device and secret for exactly this reason.
+func TestHMACMiddleware_401BodyIdenticalAcrossReasons(t *testing.T) {
+	build, buf, dev, secret := hmacProbe(t)
+
+	cases := []struct {
+		name, deviceHeader, reason string
+		secret                     []byte
+	}{
+		{"nonexistent device", "dev_does_not_exist", "unknown_device", secret},
+		{"wrong secret", dev.ID, "bad_signature", []byte("a-different-secret-entirely-32b!")},
+	}
+
+	bodies := make([]string, 0, len(cases))
+	for _, c := range cases {
+		resp, err := http.DefaultClient.Do(build(t, c.secret, c.deviceHeader))
+		if err != nil {
+			t.Fatalf("%s: Do: %v", c.name, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s: status = %d, want 401", c.name, resp.StatusCode)
+		}
+		bodies = append(bodies, string(b))
+	}
+
+	// Prove the two cases really took different branches — otherwise the body
+	// comparison below is vacuous.
+	reasons := map[string]bool{}
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "agent auth rejected" {
+			reason, _ := rec["reason"].(string)
+			reasons[reason] = true
+		}
+	}
+	for _, c := range cases {
+		if !reasons[c.reason] {
+			t.Fatalf("%s did not log reason %q; observed %v", c.name, c.reason, reasons)
+		}
+	}
+
+	if bodies[0] != bodies[1] {
+		t.Fatalf("401 body differs:\n  %s: %q\n  %s: %q", cases[0].name, bodies[0], cases[1].name, bodies[1])
+	}
+	for _, leak := range []string{"device", "signature", "disabled", "unknown"} {
+		if strings.Contains(strings.ToLower(bodies[0]), leak) {
+			t.Fatalf("401 body names a rejection reason (%q): %s", leak, bodies[0])
+		}
+	}
+}
+
 // TestHMACMiddleware_ProbesBodyRestoreAndAuth is the P1/P3 probe: it registers
 // a throwaway guarded operation on a real humago API with hmacMiddleware
 // attached, and proves (a) a correctly-signed request reaches the handler AND
@@ -100,7 +289,7 @@ func TestHMACMiddleware_ProbesBodyRestoreAndAuth(t *testing.T) {
 	huma.Register(probeAPI, huma.Operation{
 		Method:      http.MethodPost,
 		Path:        path,
-		Middlewares: huma.Middlewares{hmacMiddleware(probeAPI, v, maxAgentBody)},
+		Middlewares: huma.Middlewares{hmacMiddleware(probeAPI, v, maxAgentBody, slog.New(slog.NewJSONHandler(io.Discard, nil)))},
 	}, func(ctx context.Context, i *in) (*out, error) {
 		o := &out{}
 		o.Body.Echo = i.Body.IPv4
@@ -193,8 +382,9 @@ const testCookieName = "diyddns_session"
 
 // registerSessionProbe wires a throwaway guarded op with sessionMiddleware
 // (and csrfMiddleware, when withCSRF is true, chained after — the required
-// ordering) and returns the server plus the seeded user/session.
-func registerSessionProbe(t *testing.T, withCSRF bool) (*httptest.Server, store.User, store.Session) {
+// ordering) and returns the server, the seeded user/session, and the
+// middlewares' log buffer.
+func registerSessionProbe(t *testing.T, withCSRF bool) (*httptest.Server, store.User, store.Session, *bytes.Buffer) {
 	t.Helper()
 	st := openTestStore(t)
 	usr, err := st.Users().Create(context.Background(), store.User{Email: "session@example.com", Role: "user"})
@@ -218,9 +408,10 @@ func registerSessionProbe(t *testing.T, withCSRF bool) (*httptest.Server, store.
 		}
 	}
 
-	mws := huma.Middlewares{sessionMiddleware(probeAPI, sm, testCookieName)}
+	log, buf := captureLogger()
+	mws := huma.Middlewares{sessionMiddleware(probeAPI, sm, testCookieName, log)}
 	if withCSRF {
-		mws = append(mws, csrfMiddleware(probeAPI))
+		mws = append(mws, csrfMiddleware(probeAPI, log))
 	}
 
 	huma.Register(probeAPI, huma.Operation{
@@ -236,11 +427,11 @@ func registerSessionProbe(t *testing.T, withCSRF bool) (*httptest.Server, store.
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, usr, sess
+	return srv, usr, sess, buf
 }
 
 func TestSessionMiddleware_CookieAuthForwardsUserAndSession(t *testing.T) {
-	srv, usr, sess := registerSessionProbe(t, false)
+	srv, usr, sess, _ := registerSessionProbe(t, false)
 
 	t.Run("valid cookie reaches handler with user and session", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/probe", nil)
@@ -305,8 +496,9 @@ func TestSessionMiddleware_CookieAuthForwardsUserAndSession(t *testing.T) {
 
 // registerAdminProbe wires a throwaway guarded op behind sessionMiddleware +
 // adminMiddleware (the required ordering) and returns the server plus an
-// admin-role session and a non-admin-role session.
-func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess store.Session) {
+// admin-role session and a non-admin-role session, plus the middlewares' log
+// buffer.
+func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess store.Session, buf *bytes.Buffer) {
 	t.Helper()
 	st := openTestStore(t)
 	admin, err := st.Users().Create(context.Background(), store.User{Email: "admin@example.com", Role: "admin"})
@@ -337,12 +529,13 @@ func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess
 		}
 	}
 
+	log, buf := captureLogger()
 	huma.Register(probeAPI, huma.Operation{
 		Method: http.MethodGet,
 		Path:   path,
 		Middlewares: huma.Middlewares{
-			sessionMiddleware(probeAPI, sm, testCookieName),
-			adminMiddleware(probeAPI),
+			sessionMiddleware(probeAPI, sm, testCookieName, log),
+			adminMiddleware(probeAPI, log),
 		},
 	}, func(ctx context.Context, _ *struct{}) (*out, error) {
 		o := &out{}
@@ -352,11 +545,11 @@ func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess
 
 	srv = httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, adminSess, userSess
+	return srv, adminSess, userSess, buf
 }
 
 func TestAdminMiddleware_ForbidsNonAdmin(t *testing.T) {
-	srv, adminSess, userSess := registerAdminProbe(t)
+	srv, adminSess, userSess, _ := registerAdminProbe(t)
 
 	t.Run("admin session succeeds", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodGet, srv.URL+"/admin/v1/probe", nil)
@@ -395,7 +588,7 @@ func TestAdminMiddleware_ForbidsNonAdmin(t *testing.T) {
 }
 
 func TestCSRFMiddleware_RunsAfterSessionAndComparesConstantTime(t *testing.T) {
-	srv, _, sess := registerSessionProbe(t, true)
+	srv, _, sess, _ := registerSessionProbe(t, true)
 
 	t.Run("matching csrf token succeeds", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/probe", nil)
@@ -450,4 +643,150 @@ func TestCSRFMiddleware_RunsAfterSessionAndComparesConstantTime(t *testing.T) {
 			t.Fatalf("status = %d, want 403", resp.StatusCode)
 		}
 	})
+}
+
+// TestSessionMiddleware_LogsRejectionReason is D12 at the session door. It
+// also proves the record names no subject: the request is unauthenticated by
+// definition, and the session cookie value must never reach a log record.
+func TestSessionMiddleware_LogsRejectionReason(t *testing.T) {
+	tests := []struct {
+		name, cookie, reason string
+	}{
+		{"missing cookie", "", "no_cookie"},
+		{"unknown session id", "not-a-real-session", "unknown_session"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _, buf := registerSessionProbe(t, false)
+
+			req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/probe", nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			if tc.cookie != "" {
+				req.AddCookie(&http.Cookie{Name: testCookieName, Value: tc.cookie})
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+
+			rec := findRecord(t, buf, "session auth rejected")
+			if rec["level"] != "WARN" {
+				t.Errorf("level = %v, want WARN", rec["level"])
+			}
+			if rec["reason"] != tc.reason {
+				t.Errorf("reason = %v, want %s", rec["reason"], tc.reason)
+			}
+			if rec["route"] != "GET /api/v1/probe" {
+				t.Errorf("route = %v, want the route template", rec["route"])
+			}
+			if tc.cookie != "" && strings.Contains(buf.String(), tc.cookie) {
+				t.Errorf("session cookie value reached the log:\n%s", buf.String())
+			}
+		})
+	}
+}
+
+// TestCSRFMiddleware_LogsRejection is D13 at the CSRF door. It runs after
+// sessionMiddleware, so the subject is a real authenticated user.
+func TestCSRFMiddleware_LogsRejection(t *testing.T) {
+	srv, usr, sess, buf := registerSessionProbe(t, true)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/probe", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: testCookieName, Value: sess.ID})
+	req.Header.Set("X-CSRF-Token", "wrong-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+
+	rec := findRecord(t, buf, "csrf rejected")
+	if rec["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", rec["level"])
+	}
+	if rec["user_id"] != usr.ID {
+		t.Errorf("user_id = %v, want %s", rec["user_id"], usr.ID)
+	}
+	if rec["route"] != "GET /api/v1/probe" {
+		t.Errorf("route = %v, want the route template", rec["route"])
+	}
+}
+
+// TestAdminMiddleware_LogsRejection is D13 at the admin door: the record names
+// the user and the role that was insufficient.
+func TestAdminMiddleware_LogsRejection(t *testing.T) {
+	srv, _, userSess, buf := registerAdminProbe(t)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/admin/v1/probe", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: testCookieName, Value: userSess.ID})
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+
+	rec := findRecord(t, buf, "admin role required")
+	if rec["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", rec["level"])
+	}
+	if rec["user_id"] != userSess.UserID {
+		t.Errorf("user_id = %v, want %s", rec["user_id"], userSess.UserID)
+	}
+	if rec["role"] != "user" {
+		t.Errorf("role = %v, want user", rec["role"])
+	}
+	if rec["route"] != "GET /admin/v1/probe" {
+		t.Errorf("route = %v, want the route template", rec["route"])
+	}
+}
+
+// TestAuthMiddleware_SuccessLogsNothing pins the reason logging inside the
+// rejection branch. auth.ReasonOf(nil) degrades to "unknown", so a door that
+// logged outside its error branch would stamp reason=unknown on every
+// successful authentication.
+func TestAuthMiddleware_SuccessLogsNothing(t *testing.T) {
+	srv, _, sess, buf := registerSessionProbe(t, true)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/probe", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: testCookieName, Value: sess.ID})
+	req.Header.Set("X-CSRF-Token", sess.CSRFToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200, body=%s", resp.StatusCode, body)
+	}
+
+	if buf.Len() != 0 {
+		t.Errorf("successful auth wrote log records:\n%s", buf.String())
+	}
 }

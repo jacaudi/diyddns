@@ -69,7 +69,7 @@ func registerCheckinOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodPost,
 		Path:        "/agent/v1/checkin",
-		Middlewares: huma.Middlewares{hmacMiddleware(a, deps.Verifier, maxAgentBody)},
+		Middlewares: huma.Middlewares{hmacMW(a, deps)},
 	}, func(ctx context.Context, in *checkinInput) (*checkinOutput, error) {
 		deviceID := DeviceIDFrom(ctx)
 		res, err := deps.Checkin.Checkin(ctx, deviceID, service.CheckinReport{
@@ -95,7 +95,7 @@ func registerCheckinOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/agent/v1/self",
-		Middlewares: huma.Middlewares{hmacMiddleware(a, deps.Verifier, maxAgentBody)},
+		Middlewares: huma.Middlewares{hmacMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*selfOutput, error) {
 		deviceID := DeviceIDFrom(ctx)
 		dev, err := deps.Checkin.Self(ctx, deviceID)

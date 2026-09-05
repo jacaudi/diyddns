@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/mail"
 	"net/netip"
+	"net/textproto"
 	"net/url"
 	"slices"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/viper"
+
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // Server is the fully-resolved server configuration.
@@ -31,6 +34,7 @@ type Server struct {
 	Email         EmailSection
 	Notifications Notifications
 	Retention     RetentionSection
+	Observability ObservabilitySection
 }
 
 // ServerSection holds HTTP listener settings.
@@ -72,6 +76,13 @@ type RetentionSection struct {
 	IPHistoryPerDeviceMax      int `mapstructure:"ip_history_per_device_max"`
 	AuditLogDays               int `mapstructure:"audit_log_days"`
 	NotificationDeliveriesDays int `mapstructure:"notification_deliveries_days"`
+}
+
+// ObservabilitySection holds diagnostic settings that are not log output
+// itself. The mapstructure tag is REQUIRED: viper lowercases field names but
+// does not split them, so without it RequestIDHeader binds to nothing.
+type ObservabilitySection struct {
+	RequestIDHeader string `mapstructure:"request_id_header"`
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
@@ -189,6 +200,7 @@ var keyDefaults = map[string]any{
 	"retention.ip_history_per_device_max":    0,
 	"retention.audit_log_days":               0,
 	"retention.notification_deliveries_days": 0,
+	"observability.request_id_header":        "X-Request-Id",
 }
 
 // sectionPrefixes returns every dotted key prefix that appears as a parent
@@ -285,6 +297,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, err
 	}
 	if err := validateRetention(cfg); err != nil {
+		return Server{}, err
+	}
+	if err := validateObservability(cfg); err != nil {
 		return Server{}, err
 	}
 	return cfg, nil
@@ -636,6 +651,46 @@ func validateRetention(cfg Server) error {
 		if k.value < 0 || k.value > maxRetentionDays {
 			return fmt.Errorf("config: %s must be between 0 and %d (got %d)", k.name, maxRetentionDays, k.value)
 		}
+	}
+	return nil
+}
+
+// validateObservability rejects a request_id_header that is empty, is not an
+// RFC 7230 field-name token, or is reserved -- either because the server
+// writes it on every response (overwriting it corrupts the response), or
+// because it carries a credential (its value becomes request_id on every log
+// record of the request, at INFO, and is echoed back in the response). Neither
+// list is exhaustive against merely unwise names (Server, Date); each is
+// exhaustive against the names that actually break something.
+func validateObservability(cfg Server) error {
+	h := cfg.Observability.RequestIDHeader
+	if h == "" {
+		return errors.New(`config: observability.request_id_header must not be empty`)
+	}
+	for i := range len(h) {
+		c := h[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0: // RFC 7230 tchar
+		default:
+			return fmt.Errorf(
+				`config: observability.request_id_header %q is not a valid HTTP header name`, h)
+		}
+	}
+	switch textproto.CanonicalMIMEHeaderKey(h) {
+	case "Content-Length", "Content-Type", "Content-Encoding",
+		"Transfer-Encoding", "Connection", "Trailer", "Upgrade", "Location",
+		"Cookie", "Set-Cookie", "Authorization", "Proxy-Authorization", "X-Csrf-Token",
+		// Canonicalized rather than restated so the agent envelope has one
+		// spelling (internal/shared) and renaming a header cannot silently
+		// drop it out of this list.
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderDevice),
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderTimestamp),
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderNonce),
+		textproto.CanonicalMIMEHeaderKey(shared.HeaderSignature):
+		return fmt.Errorf(
+			`config: observability.request_id_header %q is reserved: the server writes it on `+
+				`every response, or it carries a credential`, h)
 	}
 	return nil
 }

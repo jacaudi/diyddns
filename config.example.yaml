@@ -295,3 +295,13 @@ retention:
   # change, for every configured endpoint. The attempt ledger behind the
   # per-user rate limit needs no key — it is swept hourly on age alone.
   # notification_deliveries_days: 0
+
+observability:
+  # Request/response header carrying the correlation id. Set this to match the
+  # header your reverse proxy already stamps (X-Correlation-Id, CF-Ray, ...) so
+  # DIYDDNS log records join the proxy's. Values longer than 128 bytes or
+  # containing non-printable characters are ignored and a fresh id is minted.
+  #
+  # Some header names are rejected at startup -- see the README's
+  # "Observability" section for the reserved list and why.
+  request_id_header: X-Request-Id

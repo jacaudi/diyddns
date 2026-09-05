@@ -249,12 +249,12 @@ type registerGrantBeginInput struct {
 // deps.Grants are non-nil.
 func registerPasskeyOps(a huma.API, deps ServerDeps) {
 	session := func() huma.Middlewares {
-		return huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName)}
+		return huma.Middlewares{sessionMW(a, deps)}
 	}
 	sessionCSRF := func() huma.Middlewares {
 		return huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			csrfMiddleware(a),
+			sessionMW(a, deps),
+			csrfMW(a, deps),
 		}
 	}
 
@@ -294,7 +294,7 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/account/passkeys/register/begin",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName), loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{sessionMW(a, deps), loginMetaMiddleware()},
 	}, func(ctx context.Context, _ *struct{}) (*passkeyOptionsOutput, error) {
 		u := UserFrom(ctx)
 		meta := loginMetaFrom(ctx)
@@ -310,8 +310,8 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Path:          "/api/v1/account/passkeys/register/finish",
 		DefaultStatus: http.StatusOK,
 		Middlewares: huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			csrfMiddleware(a),
+			sessionMW(a, deps),
+			csrfMW(a, deps),
 			webauthnMetaMiddleware(),
 		},
 	}, func(ctx context.Context, in *webauthnFinishInput) (*sessionCookieOutput, error) {

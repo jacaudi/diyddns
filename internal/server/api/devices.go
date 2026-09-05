@@ -96,8 +96,8 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 		Path:          "/api/v1/devices",
 		DefaultStatus: http.StatusOK,
 		Middlewares: huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			csrfMiddleware(a),
+			sessionMW(a, deps),
+			csrfMW(a, deps),
 		},
 	}, func(ctx context.Context, in *mintCodeInput) (*mintCodeOutput, error) {
 		u := UserFrom(ctx)
@@ -113,7 +113,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/devices",
-		Middlewares: huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName)},
+		Middlewares: huma.Middlewares{sessionMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*listDevicesOutput, error) {
 		u := UserFrom(ctx)
 		devices, err := deps.Devices.List(ctx, u.ID)
@@ -132,7 +132,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/devices/{id}",
-		Middlewares: huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName)},
+		Middlewares: huma.Middlewares{sessionMW(a, deps)},
 	}, func(ctx context.Context, in *getDeviceInput) (*getDeviceOutput, error) {
 		u := UserFrom(ctx)
 		dev, err := deps.Devices.Get(ctx, u.ID, in.ID)
@@ -208,12 +208,12 @@ type historyOutput struct {
 // (foreign device → 404) is enforced by service.DeviceService.
 func registerDeviceMgmtOps(a huma.API, deps ServerDeps) {
 	session := func() huma.Middlewares {
-		return huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName)}
+		return huma.Middlewares{sessionMW(a, deps)}
 	}
 	sessionCSRF := func() huma.Middlewares {
 		return huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			csrfMiddleware(a),
+			sessionMW(a, deps),
+			csrfMW(a, deps),
 		}
 	}
 
