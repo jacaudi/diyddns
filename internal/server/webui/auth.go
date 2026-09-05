@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/jacaudi/diyddns/internal/auth"
@@ -31,6 +32,14 @@ func (h *handler) requireSession(next sessionHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		usr, sess, err := authenticateBrowser(h.deps.Sessions, r, h.deps.Cfg.Auth.Session.CookieName)
 		if err != nil {
+			// The browser half of the same gap the API doors have: a user
+			// whose session expired is bounced to /login with no
+			// server-side record of why. No subject to name -- the request
+			// is unauthenticated by definition, and the cookie value must
+			// never be logged.
+			h.deps.Log.LogAttrs(r.Context(), slog.LevelWarn, "session auth rejected",
+				slog.String("reason", auth.ReasonOf(err)),
+				slog.String("route", r.Pattern))
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
@@ -45,6 +54,10 @@ func (h *handler) requireSession(next sessionHandler) http.HandlerFunc {
 func (h *handler) adminOnly(next sessionHandler) sessionHandler {
 	return func(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 		if usr.Role != "admin" {
+			h.deps.Log.LogAttrs(r.Context(), slog.LevelWarn, "admin role required",
+				slog.String("user_id", usr.ID),
+				slog.String("role", usr.Role),
+				slog.String("route", r.Pattern))
 			h.renderError(w, r, usr, http.StatusForbidden, "Admin access is required for that page.")
 			return
 		}
@@ -65,10 +78,16 @@ func (h *handler) requireAdmin(next sessionHandler) http.HandlerFunc {
 func (h *handler) requirePost(next sessionHandler) http.HandlerFunc {
 	return h.requireSession(func(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 		if err := r.ParseForm(); err != nil {
+			h.deps.Log.LogAttrs(r.Context(), slog.LevelWarn, "malformed form",
+				slog.String("user_id", usr.ID),
+				slog.String("route", r.Pattern))
 			h.renderError(w, r, usr, http.StatusBadRequest, "That form submission was malformed. Reload the page and try again.")
 			return
 		}
 		if !auth.ValidCSRF(sess, r.PostFormValue("csrf")) {
+			h.deps.Log.LogAttrs(r.Context(), slog.LevelWarn, "csrf rejected",
+				slog.String("user_id", usr.ID),
+				slog.String("route", r.Pattern))
 			h.renderError(w, r, usr, http.StatusForbidden, "Your session expired or the form was stale. Reload the page and try again.")
 			return
 		}

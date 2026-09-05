@@ -185,15 +185,15 @@ type serverInfoOutput struct{ Body serverInfoResponse }
 func registerAdminOps(a huma.API, deps ServerDeps) {
 	adminRead := func() huma.Middlewares {
 		return huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			adminMiddleware(a),
+			sessionMW(a, deps),
+			adminMW(a, deps),
 		}
 	}
 	adminWrite := func() huma.Middlewares {
 		return huma.Middlewares{
-			sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName),
-			adminMiddleware(a),
-			csrfMiddleware(a),
+			sessionMW(a, deps),
+			adminMW(a, deps),
+			csrfMW(a, deps),
 		}
 	}
 

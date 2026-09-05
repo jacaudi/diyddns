@@ -367,6 +367,33 @@ SQLite reuses freed pages internally rather than returning them to the
 filesystem. To reclaim the disk space after a large prune, stop the server and
 run a manual `VACUUM` on the database file.
 
+### Observability
+
+Every log record emitted while serving a request carries a `request_id`, and the
+same id is returned in the response header so a client can quote it in a bug
+report. DIYDDNS honours an incoming id, which lets its logs join a reverse
+proxy's for the same request.
+
+| Key | Env var | Notes |
+|---|---|---|
+| `observability.request_id_header` | `DIYDDNS_OBSERVABILITY_REQUEST_ID_HEADER` | `X-Request-Id` by default. Set it to whatever your proxy stamps |
+
+An inbound value is honoured only if it is at most 128 bytes of printable ASCII;
+anything else is discarded and a fresh UUIDv7 is minted, so an untrusted client
+cannot write unbounded data into the log.
+
+The id is nonetheless **client-supplied and untrusted** unless a proxy you
+control overwrites the header on the way in: any unauthenticated caller can send
+every request under one id, or under an id it saw in someone else's bug report.
+Treat it as a correlation aid, never as attribution.
+
+Two kinds of header name are refused at startup: ones the server itself writes
+(`Content-Length`, `Content-Type`, `Location`, ...), and ones that carry a
+credential (`Cookie`, `Authorization`, `X-CSRF-Token`, the agent's
+`X-Diyddns-*` signing headers) — the configured header's value is copied into
+`request_id` on every record, so pointing it at `Cookie` would publish the
+session cookie to the log.
+
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md)

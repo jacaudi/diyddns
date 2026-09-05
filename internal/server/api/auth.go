@@ -107,7 +107,7 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/auth/logout",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName)},
+		Middlewares:   huma.Middlewares{sessionMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*sessionCookieOutput, error) {
 		sess := SessionFrom(ctx)
 		if err := deps.Auth.Logout(ctx, sess.ID); err != nil {
@@ -120,7 +120,7 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/auth/me",
-		Middlewares: huma.Middlewares{sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName)},
+		Middlewares: huma.Middlewares{sessionMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*meOutput, error) {
 		u := UserFrom(ctx)
 		sess := SessionFrom(ctx)

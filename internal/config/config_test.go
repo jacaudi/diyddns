@@ -14,6 +14,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/email"
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // loadWithDB is a test helper that sets the required database.path and calls
@@ -943,4 +944,74 @@ func TestLoad_NotificationDeliveriesRetention(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestLoad_ObservabilityDefault(t *testing.T) {
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if got := cfg.Observability.RequestIDHeader; got != "X-Request-Id" {
+		t.Fatalf("RequestIDHeader = %q, want %q", got, "X-Request-Id")
+	}
+}
+
+func TestLoad_ObservabilityRejectsBadHeaderNames(t *testing.T) {
+	// Reserved names are all legal RFC 7230 tokens, so a charset check alone
+	// accepts them. Two classes: names that corrupt every response (design
+	// 5.1), and names that carry a credential -- the configured header's value
+	// is copied into request_id on every record of the request at INFO and
+	// echoed back in the response, so pointing it at Cookie publishes the
+	// session cookie to the log.
+	bad := []string{
+		"", "X Request Id", "foo:bar", "hdr\nname",
+		"Content-Length", "Content-Type", "Content-Encoding", "Transfer-Encoding",
+		"Connection", "Trailer", "Upgrade", "Location",
+		"content-length", "CONTENT-LENGTH", // canonicalized before comparison
+		"Cookie", "Set-Cookie", "Authorization", "Proxy-Authorization", "X-CSRF-Token",
+		shared.HeaderDevice, shared.HeaderTimestamp, shared.HeaderNonce, shared.HeaderSignature,
+		"cookie", "AUTHORIZATION", "x-csrf-token", // canonicalized before comparison
+	}
+	for _, name := range bad {
+		t.Run(name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("observability.request_id_header", name)
+			if _, err := config.Load(v, ""); err == nil {
+				t.Fatalf("config.Load(request_id_header=%q) = nil error, want rejection", name)
+			}
+		})
+	}
+}
+
+func TestLoad_ObservabilityAcceptsProxyHeaderNames(t *testing.T) {
+	for _, name := range []string{"X-Request-Id", "CF-Ray", "traceparent", "X-Correlation-Id", "Server"} {
+		t.Run(name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("observability.request_id_header", name)
+			cfg, err := config.Load(v, "")
+			if err != nil {
+				t.Fatalf("config.Load(request_id_header=%q): %v", name, err)
+			}
+			if cfg.Observability.RequestIDHeader != name {
+				t.Fatalf("RequestIDHeader = %q, want %q", cfg.Observability.RequestIDHeader, name)
+			}
+		})
+	}
+}
+
+// The smoke gate boots the real binary against config.example.yaml, but it is
+// behind //go:build smoke. Catch a malformed section in unit tests too.
+func TestLoad_AcceptsShippedExampleConfig(t *testing.T) {
+	v := viper.New()
+	cfg, err := config.Load(v, filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("config.Load(config.example.yaml): %v", err)
+	}
+	if cfg.Observability.RequestIDHeader != "X-Request-Id" {
+		t.Fatalf("RequestIDHeader = %q, want X-Request-Id", cfg.Observability.RequestIDHeader)
+	}
 }

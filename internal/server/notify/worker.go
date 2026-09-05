@@ -158,11 +158,24 @@ func (w *Worker) deliverOne(ctx context.Context, d store.DueDelivery) {
 	switch {
 	case class == store.DeliveryDelivered:
 		status = store.DeliveryDelivered
+		w.log.LogAttrs(ctx, slog.LevelInfo, "notify: delivered",
+			slog.Int64("delivery_id", d.ID),
+			slog.String("endpoint_id", d.EndpointID),
+			slog.Int("attempts", attempts))
 	// 410 is terminal on the first attempt regardless of attempts remaining;
 	// everything else is retried until attempts is exhausted.
 	case class == FailureGone, attempts >= maxAttempts:
 		status = store.DeliveryFailed
 		lastFailure = class
+		// Warn on the TERMINAL outcome only, never per attempt: at
+		// max_attempts=8 and 5 endpoints per user, per-attempt Warn would emit
+		// 40 records for one flapping IP. The raw error stays at Debug in
+		// logFailure -- an operator acts on the class, not the text.
+		w.log.LogAttrs(ctx, slog.LevelWarn, "notify: delivery failed permanently",
+			slog.Int64("delivery_id", d.ID),
+			slog.String("endpoint_id", d.EndpointID),
+			slog.String("class", class),
+			slog.Int("attempts", attempts))
 	default:
 		status = store.DeliveryPending
 		lastFailure = class

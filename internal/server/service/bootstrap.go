@@ -281,14 +281,18 @@ func (s *BootstrapService) FinishClaim(ctx context.Context, sealedCookie string,
 
 	u, err := s.st.Users().Create(ctx, store.User{Email: cs.Email, Role: "admin"})
 	if err != nil {
-		s.log.Error("BOOTSTRAP CRITICAL: token consumed but admin creation failed; recover by deleting the bootstrap row and restarting", "err", err)
+		s.log.LogAttrs(ctx, slog.LevelError,
+			"BOOTSTRAP CRITICAL: token consumed but admin creation failed; recover by deleting the bootstrap row and restarting",
+			slog.Any("error", err))
 		return store.User{}, fmt.Errorf("service.FinishClaim: %w", err)
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "user.created", TargetType: "user", TargetID: u.ID})
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: u.ID, EventType: "bootstrap.consumed", TargetType: "user", TargetID: u.ID})
 
 	if _, err := s.passkeys.persistCredential(ctx, u.ID, cs.Session.UserID, cred, name); err != nil {
-		s.log.Error("BOOTSTRAP CRITICAL: admin created but credential persist failed; recover by deleting the admin + bootstrap rows and restarting", "err", err, "user_id", u.ID)
+		s.log.LogAttrs(ctx, slog.LevelError,
+			"BOOTSTRAP CRITICAL: admin created but credential persist failed; recover by deleting the admin + bootstrap rows and restarting",
+			slog.Any("error", err), slog.String("user_id", u.ID))
 		return store.User{}, fmt.Errorf("service.FinishClaim: %w", err)
 	}
 	return u, nil

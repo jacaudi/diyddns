@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -198,6 +199,38 @@ func newTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts int) *Wor
 	}
 	clients := NewClients(allowed, 2*time.Second)
 	return NewWorker(st, clients, testKey(), maxAttempts, nopAudit{}, halfJitter, discardLog())
+}
+
+// newLoggingTestWorker mirrors newTestWorker above, but takes a logger, since
+// that helper hardcodes discardLog().
+func newLoggingTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts int, log *slog.Logger) *Worker {
+	allowed, err := ParseAllowed(allowedCIDRs)
+	if err != nil {
+		panic(err)
+	}
+	return NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), maxAttempts, nopAudit{}, halfJitter, log)
+}
+
+// findRecord returns the first JSON record in buf whose msg matches, or fails.
+func findRecord(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
+	t.Helper()
+	// SplitSeq, not Split: golangci-lint runs `modernize`, and its test-file
+	// exclusion list is [gocyclo dupl gosec errcheck unparam prealloc] -- so
+	// `stringsseq` fires on a range over strings.Split in a _test.go file.
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line not JSON: %v (%s)", err, line)
+		}
+		if rec["msg"] == msg {
+			return rec
+		}
+	}
+	t.Fatalf("no record with msg %q in:\n%s", msg, buf.String())
+	return nil
 }
 
 // Backoff: the published schedule, the clamp, and the jitter order.
@@ -735,5 +768,100 @@ func TestDeliver_BlockedTargetAuditsRejection(t *testing.T) {
 	}
 	if got.TargetID != ep {
 		t.Errorf("TargetID = %q, want %q", got.TargetID, ep)
+	}
+}
+
+func TestDeliver_LogsInfoOnDelivered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	seedDelivery(t, st, ep, EventIPChanged)
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log).sweep(t.Context())
+
+	line := findRecord(t, &buf, "notify: delivered")
+	if line["level"] != "INFO" {
+		t.Errorf("level = %v, want INFO", line["level"])
+	}
+	for _, k := range []string{"delivery_id", "endpoint_id", "attempts"} {
+		if _, ok := line[k]; !ok {
+			t.Errorf("missing attr %q in %v", k, line)
+		}
+	}
+}
+
+// 410 Gone is terminal on the FIRST attempt and logs nothing at all today.
+func TestDeliver_LogsWarnOn410Gone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	seedDelivery(t, st, ep, EventIPChanged)
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log).sweep(t.Context())
+
+	line := findRecord(t, &buf, "notify: delivery failed permanently")
+	if line["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", line["level"])
+	}
+	if line["class"] != FailureGone {
+		t.Errorf("class = %v, want %v", line["class"], FailureGone)
+	}
+}
+
+// D10's load-bearing property: a delivery that will be RETRIED emits nothing
+// at Info or above. maxAttempts=5 with a 500 means attempt 1 is not terminal.
+func TestDeliver_SilentWhileRetrying(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	seedDelivery(t, st, ep, EventIPChanged)
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log).sweep(t.Context())
+
+	if strings.Contains(buf.String(), "delivery failed permanently") {
+		t.Errorf("emitted a terminal record while still retrying: %s", buf.String())
+	}
+}
+
+// The terminal record fires once the attempts are exhausted. maxAttempts=1
+// makes the first 500 terminal.
+func TestDeliver_LogsWarnWhenAttemptsExhausted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	seedDelivery(t, st, ep, EventIPChanged)
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 1, log).sweep(t.Context())
+
+	line := findRecord(t, &buf, "notify: delivery failed permanently")
+	if line["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", line["level"])
+	}
+	if line["attempts"].(float64) != 1 {
+		t.Errorf("attempts = %v, want 1", line["attempts"])
 	}
 }
