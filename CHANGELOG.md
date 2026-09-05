@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/jacaudi/diyddns/compare/v0.3.0...v0.4.0) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **email:** the server now refuses to start when email.enabled is true and email.from or server.base_url is non-ASCII or not already in canonical form (email.from with a display name or surrounding whitespace, e.g. "DIYDDNS <noreply@example.com>" instead of "noreply@example.com", is rejected even though it parses). A previously-working config using such a value must be corrected before startup will succeed.
+
+### Features
+
+* **admin:** do not email a recovery link to a disabled account ([#84](https://github.com/jacaudi/diyddns/issues/84)) ([a47401c](https://github.com/jacaudi/diyddns/commit/a47401c5529404c7995d36ed377a52a6084f2212))
+* **notify:** notify configured endpoints when a device's public IP changes ([#99](https://github.com/jacaudi/diyddns/issues/99)) ([91da398](https://github.com/jacaudi/diyddns/commit/91da3983e388820d9bd4071d74b66b594d17e9f5))
+* **server:** add opt-in retention pruning for ip_history and audit_log ([#96](https://github.com/jacaudi/diyddns/issues/96)) ([1618d8c](https://github.com/jacaudi/diyddns/commit/1618d8c4a754002aa2080b60c4b3af33c9e8f116))
+
+
+### Bug Fixes
+
+* **ci:** make the lint and e2e gates watch what they claim to watch ([#85](https://github.com/jacaudi/diyddns/issues/85)) ([5fa122d](https://github.com/jacaudi/diyddns/commit/5fa122dffdaabc1513384d5965ed2014515b36f3))
+* **email:** reject non-ASCII and malformed addresses at every route onto the wire ([#87](https://github.com/jacaudi/diyddns/issues/87)) ([cafd6ef](https://github.com/jacaudi/diyddns/commit/cafd6ef7135fb9d6b39e8353a5ec5784f7586c9e))
+* **service:** pin the self-service audit repairs and stop blaming the database ([#86](https://github.com/jacaudi/diyddns/issues/86)) ([3eed9f8](https://github.com/jacaudi/diyddns/commit/3eed9f8af4bdeff467c917df8ae397a909942a1e))
+
 ## [0.3.0](https://github.com/jacaudi/diyddns/compare/v0.2.0...v0.3.0) (2026-08-19)
 
 
