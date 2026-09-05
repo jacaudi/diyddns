@@ -559,4 +559,25 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 			t.Errorf("%q reached the access log", id)
 		}
 	}
+
+	// Row 1 (huma api group) is unauthenticated, so sessionMiddleware also
+	// emits a "session auth rejected" record for it. This is the branch's
+	// headline property: a rejection record joins to the request that caused
+	// it. Pinning it here, rather than in its own test, is what forces it
+	// through the real server.NewLogger and the real server.Handler -- a bare
+	// slog.New(slog.NewJSONHandler(...)) has no request_id ContextHandler, so
+	// request_id could never appear in a hand-built buffer, and a door that
+	// logs with context.Background() instead of the request context would
+	// otherwise pass the entire suite while this join went silently missing.
+	var rejectedID string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && m["msg"] == "session auth rejected" {
+			rejectedID, _ = m["request_id"].(string)
+			break
+		}
+	}
+	if rejectedID != ids[1] {
+		t.Errorf("session auth rejected: request_id = %q, want %q (huma api group's echoed id)", rejectedID, ids[1])
+	}
 }
