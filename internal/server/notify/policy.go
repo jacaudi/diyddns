@@ -1,4 +1,4 @@
-// Package notify delivers outbound IP-change events to user-configured HTTPS
+// Package notify delivers outbound device events to admin-configured HTTPS
 // endpoints. It owns the destination policy, the guarded HTTP clients, and the
 // background delivery worker.
 package notify
