@@ -1,50 +1,10 @@
 package store
 
 import (
-	"context"
-	"database/sql"
 	"errors"
 	"sync"
 	"testing"
 )
-
-// tableExists reports whether name is a table in the open database.
-func tableExists(t *testing.T, ctx context.Context, s *Store, name string) bool {
-	t.Helper()
-	var got string
-	err := s.DB().QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&got)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false
-	}
-	if err != nil {
-		t.Fatalf("sqlite_master lookup %q: %v", name, err)
-	}
-	return true
-}
-
-// columnExists reports whether table has a column named column.
-func columnExists(t *testing.T, ctx context.Context, s *Store, table, column string) bool {
-	t.Helper()
-	rows, err := s.DB().QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
-	if err != nil {
-		t.Fatalf("table_info %s: %v", table, err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			t.Fatalf("scan table_info: %v", err)
-		}
-		if name == column {
-			return true
-		}
-	}
-	return false
-}
 
 // TestMigration007_Shape asserts the schema after Open (which runs every
 // embedded migration): endpoints have no user_id, the attempts ledger and the
@@ -53,17 +13,17 @@ func columnExists(t *testing.T, ctx context.Context, s *Store, table, column str
 func TestMigration007_Shape(t *testing.T) {
 	s, ctx := newTestStore(t)
 
-	if columnExists(t, ctx, s, "notification_endpoints", "user_id") {
+	if dbColumnExists(t, ctx, s.DB(), "notification_endpoints", "user_id") {
 		t.Error("notification_endpoints.user_id still exists after 00007")
 	}
-	if columnExists(t, ctx, s, "notification_deliveries", "user_initiated_at") {
+	if dbColumnExists(t, ctx, s.DB(), "notification_deliveries", "user_initiated_at") {
 		t.Error("notification_deliveries.user_initiated_at still exists after 00007")
 	}
-	if tableExists(t, ctx, s, "notification_attempts") {
+	if dbTableExists(t, ctx, s.DB(), "notification_attempts") {
 		t.Error("notification_attempts still exists after 00007")
 	}
 	for _, tbl := range []string{"feed_tokens", "feed_state"} {
-		if !tableExists(t, ctx, s, tbl) {
+		if !dbTableExists(t, ctx, s.DB(), tbl) {
 			t.Errorf("table %q missing after 00007", tbl)
 		}
 	}
