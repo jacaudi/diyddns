@@ -3,7 +3,9 @@ package middleware_test
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -248,5 +250,45 @@ func TestChain_OrdersOuterToInner(t *testing.T) {
 	want := []string{"a", "b", "c", "handler"}
 	if strings.Join(order, ",") != strings.Join(want, ",") {
 		t.Errorf("order = %v, want %v", order, want)
+	}
+}
+
+// TestAccessLog_ResponseWriterUnwrapsToHijacker is the regression guard for
+// the #106 design's §5.1: AccessLog wraps the ResponseWriter in a
+// statusRecorder, and a WebSocket upgrade (github.com/coder/websocket's
+// Accept) reaches http.Hijacker only by walking Unwrap(). Without Unwrap
+// every upgrade through the real middleware chain answers 501. This drives
+// the real chain over a real TCP listener, because httptest.NewRecorder
+// cannot be hijacked at all.
+func TestAccessLog_ResponseWriterUnwrapsToHijacker(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hijacked := make(chan error, 1)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			hijacked <- err
+			http.Error(w, "no hijack", http.StatusNotImplemented)
+			return
+		}
+		_ = conn.Close()
+		hijacked <- nil
+	})
+	srv := httptest.NewServer(middleware.Chain(inner,
+		middleware.RequestID("X-Request-Id"),
+		middleware.AccessLog(log),
+		middleware.Recover(log),
+	))
+	t.Cleanup(srv.Close)
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := <-hijacked; err != nil {
+		t.Fatalf("Hijack through the AccessLog wrapper failed: %v (statusRecorder must implement Unwrap)", err)
 	}
 }
