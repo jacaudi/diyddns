@@ -16,6 +16,8 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
 // fakeAuth answers Authenticate from a map of plaintext -> token, or with a
 // caller-supplied error, so middleware tests need no FeedService.
 type fakeAuth struct {
@@ -45,23 +47,6 @@ func newTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-// seedMember inserts an enabled user and an enabled device with an IPv4.
-func seedMember(t *testing.T, st *store.Store, id, v4 string) {
-	t.Helper()
-	ctx := t.Context()
-	now := store.NowUnix()
-	if _, err := st.DB().ExecContext(ctx,
-		`INSERT OR IGNORE INTO users (id, email, role, disabled, created_at, updated_at)
-		 VALUES ('u1', 'u1@example.com', 'user', 0, ?, ?)`, now, now); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	if _, err := st.DB().ExecContext(ctx,
-		`INSERT INTO devices (id, user_id, label, secret_hash, current_ipv4, last_seen_at, disabled, created_at, updated_at)
-		 VALUES (?, 'u1', ?, 'h', ?, ?, 0, ?, ?)`, id, id, v4, now, now, now); err != nil {
-		t.Fatalf("seed device: %v", err)
-	}
-}
-
 // newFeedServer serves the two REST routes through TokenMiddleware over a
 // real listener. httptest.NewServer, not NewRecorder: a recorder records the
 // body a HEAD handler writes, a real server suppresses it (design §4.6).
@@ -76,7 +61,7 @@ func newFeedServer(t *testing.T, st *store.Store, auth Authenticator, logBuf *by
 	}
 	log := slog.New(slog.NewJSONHandler(w, nil))
 	mux := http.NewServeMux()
-	Register(mux, Deps{Store: st, Auth: auth, Log: log})
+	Register(mux, Deps{Store: st, Auth: auth, Hub: New(), Log: log})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -171,8 +156,8 @@ func TestTokenMiddleware_RejectionsAreUniformAndLogged(t *testing.T) {
 
 func TestDocuments_TextAndJSON(t *testing.T) {
 	st := newTestStore(t)
-	seedMember(t, st, "dev-a", "203.0.113.9")
-	seedMember(t, st, "dev-b", "203.0.113.9")
+	SeedMember(t, st, "dev-a", "203.0.113.9")
+	SeedMember(t, st, "dev-b", "203.0.113.9")
 	auth := fakeAuth{tokens: map[string]store.FeedToken{goodToken: {ID: "tok1"}}}
 	srv := newFeedServer(t, st, auth, nil)
 
@@ -217,7 +202,7 @@ func TestDocuments_TextAndJSON(t *testing.T) {
 
 func TestDocuments_ConditionalRequests(t *testing.T) {
 	st := newTestStore(t)
-	seedMember(t, st, "dev-a", "203.0.113.9")
+	SeedMember(t, st, "dev-a", "203.0.113.9")
 	auth := fakeAuth{tokens: map[string]store.FeedToken{goodToken: {ID: "tok1"}}}
 	srv := newFeedServer(t, st, auth, nil)
 
@@ -266,7 +251,7 @@ func TestDocuments_ConditionalRequests(t *testing.T) {
 // let a JSON poller keep a 304 against its old tag.
 func TestDocuments_PerDocumentETags(t *testing.T) {
 	st := newTestStore(t)
-	seedMember(t, st, "dev-a", "203.0.113.9")
+	SeedMember(t, st, "dev-a", "203.0.113.9")
 	auth := fakeAuth{tokens: map[string]store.FeedToken{goodToken: {ID: "tok1"}}}
 	srv := newFeedServer(t, st, auth, nil)
 
@@ -305,7 +290,7 @@ func TestDocuments_PerDocumentETags(t *testing.T) {
 // server, because httptest.NewRecorder would record the body.
 func TestDocuments_HEAD(t *testing.T) {
 	st := newTestStore(t)
-	seedMember(t, st, "dev-a", "203.0.113.9")
+	SeedMember(t, st, "dev-a", "203.0.113.9")
 	auth := fakeAuth{tokens: map[string]store.FeedToken{goodToken: {ID: "tok1"}}}
 	srv := newFeedServer(t, st, auth, nil)
 

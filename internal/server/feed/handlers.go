@@ -12,10 +12,12 @@ import (
 )
 
 // Deps are the dependencies the feed routes need. Store is read for the
-// member list and feed_state; Auth authenticates tokens; Log follows #100.
+// member list and feed_state; Auth authenticates tokens; Hub fans live
+// events out to stream subscribers; Log follows #100.
 type Deps struct {
 	Store *store.Store
 	Auth  Authenticator
+	Hub   *Hub
 	Log   *slog.Logger
 }
 
@@ -24,6 +26,7 @@ type Deps struct {
 var Routes = []string{
 	"GET /feed/v1/devices.txt",
 	"GET /feed/v1/devices.json",
+	"GET /feed/v1/stream",
 }
 
 // Register mounts the feed routes on mux behind TokenMiddleware. Called only
@@ -35,6 +38,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mw := TokenMiddleware(deps.Auth, deps.Log)
 	mux.Handle("GET /feed/v1/devices.txt", mw(http.HandlerFunc(h.serveText)))
 	mux.Handle("GET /feed/v1/devices.json", mw(http.HandlerFunc(h.serveJSON)))
+	mux.Handle("GET /feed/v1/stream", mw(http.HandlerFunc(h.serveStream)))
 }
 
 type handler struct {
