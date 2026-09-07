@@ -210,10 +210,17 @@ func (s *AdminService) applyRole(ctx context.Context, actorID, targetID string, 
 // u is the target's PRE-WRITE row, handed in by UpdateUser. Do not re-read
 // the user here: after the write the row already carries the new flag, so
 // "before" would be computed wrong and every removed event would vanish
-// (design #106 §7.2).
+// (design #106 §7.2). The device list is read BEFORE SetDisabled, too: the
+// membership seam must never leave the primary write applied (user disabled,
+// sessions revoked) while reporting the request as failed (design D13) — a
+// failure here now aborts cleanly before anything is written.
 func (s *AdminService) applyDisabled(ctx context.Context, actorID, targetID string, u store.User, p UpdateUserParams) error {
 	if p.Disabled == nil {
 		return nil
+	}
+	devices, err := s.st.Devices().ListByUser(ctx, targetID)
+	if err != nil {
+		return err
 	}
 	if err := s.st.Users().SetDisabled(ctx, targetID, *p.Disabled); err != nil {
 		return err
@@ -233,10 +240,6 @@ func (s *AdminService) applyDisabled(ctx context.Context, actorID, targetID stri
 
 	after := u
 	after.Disabled = *p.Disabled
-	devices, err := s.st.Devices().ListByUser(ctx, targetID)
-	if err != nil {
-		return err
-	}
 	for _, d := range devices {
 		emitMembership(ctx, s.notify, d, inFeed(d, u), inFeed(d, after))
 	}

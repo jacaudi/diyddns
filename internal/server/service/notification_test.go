@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/auth"
@@ -75,10 +76,19 @@ func seedTerminalDelivery(t *testing.T, st *store.Store, endpointID, status stri
 	return id
 }
 
+// TestCreate_RejectsNonHTTPScheme also asserts notification.target_rejected,
+// using a real audit writer, since a rejected Create must still leave an
+// audit trail of the attempt.
 func TestCreate_RejectsNonHTTPScheme(t *testing.T) {
-	st, actorID, svc := newNotificationServiceTest(t)
+	st := openTestStore(t)
+	usr := seedUser(t, st, "admin@b.co", "admin")
+	allowed, err := notify.ParseAllowed(nil)
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	svc := NewNotificationService(st, testKey32(), allowed, NewAuditWriter(st))
 
-	if _, _, err := svc.Create(t.Context(), actorID, "bad", "ftp://example.com/hook"); err == nil {
+	if _, _, err := svc.Create(t.Context(), usr.ID, "bad", "ftp://example.com/hook"); err == nil {
 		t.Fatal("expected an error for a non-http(s) scheme")
 	}
 	eps, err := st.NotificationEndpoints().List(t.Context())
@@ -88,12 +98,27 @@ func TestCreate_RejectsNonHTTPScheme(t *testing.T) {
 	if len(eps) != 0 {
 		t.Fatalf("expected no endpoint written, got %d", len(eps))
 	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "notification.target_rejected"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].ActorUserID != usr.ID {
+		t.Fatalf("notification.target_rejected entries = %+v, want one by %s", page.Rows, usr.ID)
+	}
 }
 
+// TestCreate_RejectsDeniedIPLiteral also asserts notification.target_rejected,
+// using a real audit writer, for the same reason as the scheme-rejection case.
 func TestCreate_RejectsDeniedIPLiteral(t *testing.T) {
-	st, actorID, svc := newNotificationServiceTest(t)
+	st := openTestStore(t)
+	usr := seedUser(t, st, "admin@b.co", "admin")
+	allowed, err := notify.ParseAllowed(nil)
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	svc := NewNotificationService(st, testKey32(), allowed, NewAuditWriter(st))
 
-	_, _, err := svc.Create(t.Context(), actorID, "metadata", "https://169.254.169.254/")
+	_, _, err = svc.Create(t.Context(), usr.ID, "metadata", "https://169.254.169.254/")
 	if !errors.Is(err, notify.ErrDenied) {
 		t.Fatalf("err = %v, want notify.ErrDenied", err)
 	}
@@ -103,6 +128,13 @@ func TestCreate_RejectsDeniedIPLiteral(t *testing.T) {
 	}
 	if len(eps) != 0 {
 		t.Fatalf("expected no endpoint written, got %d", len(eps))
+	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "notification.target_rejected"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].ActorUserID != usr.ID {
+		t.Fatalf("notification.target_rejected entries = %+v, want one by %s", page.Rows, usr.ID)
 	}
 }
 
@@ -196,12 +228,20 @@ func TestRedeliver_RefusedOnNonTerminalRow(t *testing.T) {
 	}
 }
 
+// TestRedeliver_CopiesTerminalRow also asserts notification.redelivered,
+// using a real audit writer, targeting the original delivery id.
 func TestRedeliver_CopiesTerminalRow(t *testing.T) {
-	st, actorID, svc := newNotificationServiceTest(t)
+	st := openTestStore(t)
+	usr := seedUser(t, st, "admin@b.co", "admin")
+	allowed, err := notify.ParseAllowed(nil)
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	svc := NewNotificationService(st, testKey32(), allowed, NewAuditWriter(st))
 	ep := seedEndpoint(t, st, "https://example.com/hook", true)
 	deliveryID := seedTerminalDelivery(t, st, ep.ID, store.DeliveryFailed)
 
-	ok, err := svc.Redeliver(t.Context(), actorID, deliveryID)
+	ok, err := svc.Redeliver(t.Context(), usr.ID, deliveryID)
 	if err != nil || !ok {
 		t.Fatalf("Redeliver = %v, %v; want true, nil", ok, err)
 	}
@@ -211,6 +251,14 @@ func TestRedeliver_CopiesTerminalRow(t *testing.T) {
 	}
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2 (the terminal source and its copy)", len(rows))
+	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "notification.redelivered"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	wantTarget := strconv.FormatInt(deliveryID, 10)
+	if len(page.Rows) != 1 || page.Rows[0].ActorUserID != usr.ID || page.Rows[0].TargetID != wantTarget {
+		t.Fatalf("notification.redelivered entries = %+v, want one by %s targeting %s", page.Rows, usr.ID, wantTarget)
 	}
 }
 
@@ -287,11 +335,20 @@ func TestCreate_AuditsSecretRevealed(t *testing.T) {
 	}
 }
 
+// TestSetEnabledAndDelete also asserts notification.endpoint_disabled,
+// notification.endpoint_enabled, and notification.endpoint_deleted, each
+// exactly once and targeting ep.ID, using a real audit writer.
 func TestSetEnabledAndDelete(t *testing.T) {
-	st, actorID, svc := newNotificationServiceTest(t)
+	st := openTestStore(t)
+	usr := seedUser(t, st, "admin@b.co", "admin")
+	allowed, err := notify.ParseAllowed(nil)
+	if err != nil {
+		t.Fatalf("ParseAllowed: %v", err)
+	}
+	svc := NewNotificationService(st, testKey32(), allowed, NewAuditWriter(st))
 	ep := seedEndpoint(t, st, "https://example.com/hook", true)
 
-	if err := svc.SetEnabled(t.Context(), actorID, ep.ID, false); err != nil {
+	if err := svc.SetEnabled(t.Context(), usr.ID, ep.ID, false); err != nil {
 		t.Fatalf("SetEnabled: %v", err)
 	}
 	got, err := svc.Get(t.Context(), ep.ID)
@@ -301,13 +358,73 @@ func TestSetEnabledAndDelete(t *testing.T) {
 	if got.Enabled {
 		t.Error("still enabled after SetEnabled(false)")
 	}
-	if err := svc.Delete(t.Context(), actorID, ep.ID); err != nil {
+
+	if err := svc.SetEnabled(t.Context(), usr.ID, ep.ID, true); err != nil {
+		t.Fatalf("SetEnabled(true): %v", err)
+	}
+	got, err = svc.Get(t.Context(), ep.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Enabled {
+		t.Error("still disabled after SetEnabled(true)")
+	}
+
+	if err := svc.Delete(t.Context(), usr.ID, ep.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if _, err := svc.Get(t.Context(), ep.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Get after delete err = %v, want ErrNotFound", err)
 	}
-	if err := svc.Delete(t.Context(), actorID, ep.ID); !errors.Is(err, store.ErrNotFound) {
+	if err := svc.Delete(t.Context(), usr.ID, ep.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Delete(again) err = %v, want ErrNotFound", err)
+	}
+
+	for _, ev := range []string{"notification.endpoint_disabled", "notification.endpoint_enabled", "notification.endpoint_deleted"} {
+		page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: ev}, "", 10)
+		if err != nil {
+			t.Fatalf("ListPaginated(%s): %v", ev, err)
+		}
+		if len(page.Rows) != 1 || page.Rows[0].TargetID != ep.ID || page.Rows[0].ActorUserID != usr.ID {
+			t.Errorf("%s entries = %+v, want one row targeting %s by %s", ev, page.Rows, ep.ID, usr.ID)
+		}
+	}
+}
+
+// TestListAndDeliveries covers the two read paths List and Deliveries, which
+// no other test in this file exercises. Deliveries against an unknown
+// endpoint id is a plain empty result, not an error: not-found is the
+// caller's job (the webui/api layer), not the service's.
+func TestListAndDeliveries(t *testing.T) {
+	st, actorID, svc := newNotificationServiceTest(t)
+	ep, _, err := svc.Create(t.Context(), actorID, "ep", "https://example.com/hook")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	seedTerminalDelivery(t, st, ep.ID, store.DeliveryFailed)
+	seedTerminalDelivery(t, st, ep.ID, store.DeliveryDelivered)
+
+	eps, err := svc.List(t.Context())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(eps) != 1 || eps[0].ID != ep.ID {
+		t.Fatalf("List = %+v, want exactly [%s]", eps, ep.ID)
+	}
+
+	rows, err := svc.Deliveries(t.Context(), ep.ID, 10)
+	if err != nil {
+		t.Fatalf("Deliveries: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("Deliveries(%s) = %d rows, want 2", ep.ID, len(rows))
+	}
+
+	rows, err = svc.Deliveries(t.Context(), "no-such-id", 10)
+	if err != nil {
+		t.Fatalf("Deliveries(unknown): unexpected error %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("Deliveries(unknown) = %d rows, want 0", len(rows))
 	}
 }

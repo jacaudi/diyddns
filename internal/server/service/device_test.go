@@ -228,6 +228,9 @@ func TestDeviceService_SetEnabled_EmitsMembershipEvents(t *testing.T) {
 	if len(n.removed) != 1 {
 		t.Errorf("removed = %+v, want no event for a device with no address", n.removed)
 	}
+	if len(n.added) != 1 {
+		t.Errorf("added = %+v, want still just the one re-enable event", n.added)
+	}
 }
 
 // TestDeviceService_SetEnabled_OwnerDisabledEmitsNothing: the owner check

@@ -345,6 +345,9 @@ func TestAdminService_DisableUser_EmitsRemovedPerMemberDevice(t *testing.T) {
 	if len(n.added) != 1 || n.added[0].ID != member.ID {
 		t.Fatalf("added = %+v, want exactly [%s]", n.added, member.ID)
 	}
+	if len(n.removed) != 1 {
+		t.Errorf("removed = %+v, want still just the one disable-time event", n.removed)
+	}
 }
 
 // TestAdminService_DeleteUser_EmitsRemovedBeforeCascade: devices.user_id is
