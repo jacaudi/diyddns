@@ -401,7 +401,7 @@ is `500` with a body, never an empty `200`: keep your last good copy.
 
 ```sh
 curl -fsS -H "Authorization: Bearer $TOKEN" --etag-compare etag --etag-save etag \
-  https://ddns.example.com/feed/v1/devices.txt -o new.lst && ! cmp -s new.lst cur.lst \
+  https://ddns.example.com/feed/v1/devices.txt -o new.lst && [ -s new.lst ] && ! cmp -s new.lst cur.lst \
   && mv new.lst cur.lst && nginx -s reload
 ```
 

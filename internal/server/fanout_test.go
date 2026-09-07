@@ -37,9 +37,18 @@ func seedEnabledEndpoint(t *testing.T, st *store.Store, id string) {
 }
 
 // streamClient opens a stream against a mux serving only the feed routes
-// and returns a reader that yields decoded frames.
+// and returns a reader that yields decoded frames. It seeds the row
+// tokenAuth's fixed id names: the stream handler's post-subscribe revoke
+// re-check (finding S1) reads the token from the store, so tokenAuth's
+// answer must be backed by a real row even though tokenAuth itself never
+// touches the store.
 func streamClient(t *testing.T, st *store.Store, hub *feed.Hub) func() map[string]any {
 	t.Helper()
+	if err := st.FeedTokens().Create(t.Context(), store.FeedToken{
+		ID: "tok", Label: "fanout-test", TokenHash: "unused", CreatedAt: store.NowUnix(),
+	}); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
 	mux := http.NewServeMux()
 	feed.Register(mux, feed.Deps{Store: st, Auth: tokenAuth{}, Hub: hub, Log: discardLog()})
 	srv := httptest.NewServer(mux)

@@ -85,6 +85,23 @@ func (r *FeedTokenRepo) GetByHash(ctx context.Context, hash string) (FeedToken, 
 	return t, nil
 }
 
+// GetByID looks a token up by its primary key. Returns ErrNotFound when no
+// live token matches — a revoked token is deleted, so it is simply absent.
+// Used by the stream handler's post-subscribe revoke re-check (design #106,
+// finding S1).
+func (r *FeedTokenRepo) GetByID(ctx context.Context, id string) (FeedToken, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+feedAuthColumns+` FROM feed_tokens WHERE id = ?`, id)
+	t, err := scanFeedToken(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return FeedToken{}, fmt.Errorf("feed_tokens.GetByID: %w", ErrNotFound)
+		}
+		return FeedToken{}, fmt.Errorf("feed_tokens.GetByID: %w", err)
+	}
+	return t, nil
+}
+
 // List returns every live token, oldest first.
 func (r *FeedTokenRepo) List(ctx context.Context) ([]FeedToken, error) {
 	rows, err := r.db.QueryContext(ctx,

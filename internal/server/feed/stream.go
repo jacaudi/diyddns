@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/jacaudi/diyddns/internal/store"
 )
 
 // beforeSnapshot is a test seam: when non-nil the stream handler calls it
@@ -49,6 +51,10 @@ func (h *handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.deps.Hub.unsubscribe(sub) // the ONLY unsubscribe site in this handler
 
+	if !h.tokenStillLive(w, r, tokenID) {
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{}) // no OriginPatterns: a service client, not a browser
 	if err != nil {
 		// Accept has already written its own error response.
@@ -64,6 +70,39 @@ func (h *handler) serveStream(w http.ResponseWriter, r *http.Request) {
 	logCtx := context.WithoutCancel(r.Context())
 
 	h.runStream(logCtx, conn, sub, tokenID)
+}
+
+// tokenStillLive re-checks the token row right after subscribe succeeds but
+// before Accept (finding S1): service.FeedService.RevokeToken deletes the
+// row BEFORE calling Hub.CloseToken, so a revoke landing strictly between
+// TokenMiddleware's Authenticate and this subscribe is invisible to
+// CloseToken — the subscriber isn't in the hub's map yet for CloseToken to
+// find. This re-check closes that window: a revoke before this call is
+// caught here (the row is already gone), and a revoke from this call onward
+// is caught by CloseToken, because the subscriber is now in the map. On
+// refusal it writes the response itself (the same uniform 401 body the
+// middleware uses, or the feed's store-failure 503) and returns false so
+// serveStream returns without ever calling Accept; the deferred unsubscribe
+// still runs.
+func (h *handler) tokenStillLive(w http.ResponseWriter, r *http.Request, tokenID string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	_, err := h.deps.Store.FeedTokens().GetByID(ctx, tokenID)
+	if err == nil {
+		return true
+	}
+
+	reason, status, body := "store_error", http.StatusServiceUnavailable, []byte(`{"error":"feed unavailable"}`)
+	if errors.Is(err, store.ErrNotFound) {
+		reason, status, body = "revoked", http.StatusUnauthorized, []byte(unauthorizedBody)
+	}
+	h.deps.Log.LogAttrs(r.Context(), slog.LevelWarn, "feed stream refused",
+		slog.String("token_id", tokenID), slog.String("reason", reason))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+	return false
 }
 
 // runStream is the pump plus its two goroutines, and the exit sequence. The

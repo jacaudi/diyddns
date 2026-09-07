@@ -143,7 +143,9 @@ func (h *Hub) unsubscribe(s *subscriber) {
 // Broadcast delivers payload to every subscriber's buffer without blocking.
 // A subscriber whose buffer is full is collected under the lock and, after
 // the lock is released, cancelled with causeSlowConsumer and unsubscribed —
-// never while holding mu, which unsubscribe takes itself.
+// never while holding mu, which unsubscribe takes itself. payload is shared
+// by reference with every subscriber; callers must not mutate it after this
+// call.
 func (h *Hub) Broadcast(payload []byte) {
 	var overflowed []*subscriber
 	h.mu.Lock()

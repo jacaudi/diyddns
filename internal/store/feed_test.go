@@ -152,6 +152,35 @@ func TestFeedTokens_CRUD(t *testing.T) {
 	}
 }
 
+// TestFeedTokens_GetByID: the primary-key lookup the stream handler's
+// revoke re-check uses (finding S1) returns the live row, and ErrNotFound
+// once the row is deleted — the same "revoked is simply absent" contract
+// GetByHash already has.
+func TestFeedTokens_GetByID(t *testing.T) {
+	s, ctx := newTestStore(t)
+	now := NowUnix()
+
+	tok := FeedToken{ID: NewID(), Label: "envoy", TokenHash: "hash-1", CreatedAt: now}
+	if err := s.FeedTokens().Create(ctx, tok); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.FeedTokens().GetByID(ctx, tok.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.ID != tok.ID || got.Label != "envoy" {
+		t.Errorf("GetByID = %+v, want id %s label envoy", got, tok.ID)
+	}
+
+	if err := s.FeedTokens().Delete(ctx, tok.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := s.FeedTokens().GetByID(ctx, tok.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByID after delete err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestFeedTokens_CreatedBySurvivesUserDeletion: created_by is ON DELETE SET
 // NULL, so deleting the minting admin keeps the token and blanks the field.
 func TestFeedTokens_CreatedBySurvivesUserDeletion(t *testing.T) {
