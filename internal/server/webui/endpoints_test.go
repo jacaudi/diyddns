@@ -565,6 +565,79 @@ func TestAccount_NoLongerLinksToEndpoints(t *testing.T) {
 	}
 }
 
+// TestEndpoints_EmptyStateFoldsFormIntoSingleCard: with zero endpoints, the
+// page renders exactly one .empty card, and the create form lives inside
+// that same card rather than a separate one below it.
+func TestEndpoints_EmptyStateFoldsFormIntoSingleCard(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "empty-endpoints@example.com")
+
+	body := getPage(t, h, cookie, "/admin/endpoints").Body.String()
+	if n := strings.Count(body, `<div class="empty">`); n != 1 {
+		t.Fatalf("got %d <div class=\"empty\"> blocks, want exactly 1:\n%s", n, body)
+	}
+	emptyStart := strings.Index(body, `<div class="empty">`)
+	formIdx := strings.Index(body, `<form method="post" action="/admin/endpoints"`)
+	if formIdx == -1 || formIdx < emptyStart {
+		t.Error("the create form is not inside the empty-state card")
+	}
+	if !strings.Contains(body, "Endpoints receive a signed webhook whenever a device's address changes, or a device joins or leaves the feed.") {
+		t.Error("empty state is missing the lead sentence")
+	}
+}
+
+// TestEndpoints_BodyHasNoInlineMaxWidthStyles: narrow cards use the .card.narrow
+// class, never an inline style attribute.
+func TestEndpoints_BodyHasNoInlineMaxWidthStyles(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "no-inline-endpoints@example.com")
+
+	body := getPage(t, h, cookie, "/admin/endpoints").Body.String()
+	if strings.Contains(body, `style="max-width`) {
+		t.Error("body still contains an inline max-width style")
+	}
+}
+
+// TestEndpoints_NonEmptyStateListsBeforeForm: once an endpoint exists, the
+// list card renders before the "Add an endpoint" form card, and no empty
+// state is present.
+func TestEndpoints_NonEmptyStateListsBeforeForm(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "nonempty-endpoints@example.com")
+	seedEndpoint(t, st, "hook", "https://example.com/hook", true)
+
+	body := getPage(t, h, cookie, "/admin/endpoints").Body.String()
+	if strings.Contains(body, `<div class="empty">`) {
+		t.Error("body still contains the empty-state card with an endpoint seeded")
+	}
+	tableIdx := strings.Index(body, `<table class="grid-table responsive">`)
+	headIdx := strings.Index(body, "Add an endpoint")
+	if tableIdx == -1 || headIdx == -1 || tableIdx > headIdx {
+		t.Errorf("table index = %d, \"Add an endpoint\" index = %d, want table first", tableIdx, headIdx)
+	}
+}
+
+// TestEndpoints_ZeroStateOmitsCountSubtitle: the subtitle count is redundant
+// with the empty-state heading, so it is omitted when there are zero
+// endpoints.
+func TestEndpoints_ZeroStateOmitsCountSubtitle(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "zero-sub-endpoints@example.com")
+
+	body := getPage(t, h, cookie, "/admin/endpoints").Body.String()
+	if strings.Contains(body, "0 endpoints") {
+		t.Error("zero-state body still renders the \"0 endpoints\" subtitle")
+	}
+}
+
 // TestNav_AdminEntriesFollowTheSwitches: the Endpoints and Feed nav entries
 // appear for an admin exactly when their route groups exist.
 func TestNav_AdminEntriesFollowTheSwitches(t *testing.T) {

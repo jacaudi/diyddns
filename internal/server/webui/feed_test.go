@@ -101,6 +101,80 @@ func TestFeedTokens_MintRevealsOnceThenRevoke(t *testing.T) {
 	}
 }
 
+// TestFeedTokens_EmptyStateFoldsFormIntoSingleCard: with zero tokens, the
+// page renders exactly one .empty card, and the mint form lives inside that
+// same card rather than a separate one below it.
+func TestFeedTokens_EmptyStateFoldsFormIntoSingleCard(t *testing.T) {
+	deps, st := testDeps(t)
+	enableFeed(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "empty-feed@example.com")
+
+	body := getPage(t, h, cookie, "/admin/feed").Body.String()
+	if n := strings.Count(body, `<div class="empty">`); n != 1 {
+		t.Fatalf("got %d <div class=\"empty\"> blocks, want exactly 1:\n%s", n, body)
+	}
+	emptyStart := strings.Index(body, `<div class="empty">`)
+	formIdx := strings.Index(body, `<form method="post" action="/admin/feed/tokens"`)
+	if formIdx == -1 || formIdx < emptyStart {
+		t.Error("the mint form is not inside the empty-state card")
+	}
+	if !strings.Contains(body, "A token lets a gateway read the feed. Mint one per consumer so each can be revoked on its own.") {
+		t.Error("empty state is missing the lead sentence")
+	}
+}
+
+// TestFeedTokens_BodyHasNoInlineMaxWidthStyles: narrow cards use the
+// .card.narrow class, never an inline style attribute.
+func TestFeedTokens_BodyHasNoInlineMaxWidthStyles(t *testing.T) {
+	deps, st := testDeps(t)
+	enableFeed(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "no-inline-feed@example.com")
+
+	body := getPage(t, h, cookie, "/admin/feed").Body.String()
+	if strings.Contains(body, `style="max-width`) {
+		t.Error("body still contains an inline max-width style")
+	}
+}
+
+// TestFeedTokens_NonEmptyStateListsBeforeForm: once a token exists, the list
+// card renders before the "Mint a token" form card, and no empty state is
+// present.
+func TestFeedTokens_NonEmptyStateListsBeforeForm(t *testing.T) {
+	deps, st := testDeps(t)
+	enableFeed(&deps)
+	h, _ := New(deps)
+	cookie, sess := adminSession(t, deps, st, "nonempty-feed@example.com")
+	if rec := postForm(t, h, cookie, "/admin/feed/tokens", url.Values{"csrf": {sess.CSRFToken}, "label": {"envoy"}}); rec.Code != http.StatusOK {
+		t.Fatalf("mint = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := getPage(t, h, cookie, "/admin/feed").Body.String()
+	if strings.Contains(body, `<div class="empty">`) {
+		t.Error("body still contains the empty-state card with a token seeded")
+	}
+	tableIdx := strings.Index(body, `<table class="grid-table responsive">`)
+	headIdx := strings.Index(body, "Mint a token")
+	if tableIdx == -1 || headIdx == -1 || tableIdx > headIdx {
+		t.Errorf("table index = %d, \"Mint a token\" index = %d, want table first", tableIdx, headIdx)
+	}
+}
+
+// TestFeedTokens_ZeroStateOmitsCountSubtitle: the subtitle count is redundant
+// with the empty-state heading, so it is omitted when there are zero tokens.
+func TestFeedTokens_ZeroStateOmitsCountSubtitle(t *testing.T) {
+	deps, st := testDeps(t)
+	enableFeed(&deps)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "zero-sub-feed@example.com")
+
+	body := getPage(t, h, cookie, "/admin/feed").Body.String()
+	if strings.Contains(body, "0 tokens") {
+		t.Error("zero-state body still renders the \"0 tokens\" subtitle")
+	}
+}
+
 func TestFeedTokens_DuplicateLabelReRendersWithMessage(t *testing.T) {
 	deps, st := testDeps(t)
 	enableFeed(&deps)
