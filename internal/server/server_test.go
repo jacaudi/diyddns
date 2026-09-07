@@ -87,7 +87,7 @@ func TestNew_FailsClosedOnBadSecretKey(t *testing.T) {
 
 func TestServer_AllEndpoints(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
-	handler, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard())
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestServer_OIDCDegradesWhenNotRequired(t *testing.T) {
 		Scopes:       []string{"openid"},
 	}
 
-	handler, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard())
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestServer_OIDCFailsClosedWhenRequired(t *testing.T) {
 		Scopes:       []string{"openid"},
 	}
 
-	if _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when oidc required but discovery fails")
 	}
 }
@@ -222,7 +222,7 @@ func TestHandler_FailsClosedOnUnresolvableWebAuthnRP(t *testing.T) {
 		t.Fatalf("test setup: expected empty base_url/rp_origin, got %q/%q", cfg.Server.BaseURL, cfg.Auth.WebAuthn.RPOrigin)
 	}
 
-	if _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when passkey login is available but the WebAuthn RP is unresolvable")
 	}
 }
@@ -243,7 +243,7 @@ func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	if _, err := server.Handler(cfg, memStore(t), discard()); err != nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard()); err != nil {
 		t.Fatalf("server.Handler() = %v, want no error when hide_local_login_ui tolerates an unresolvable RP", err)
 	}
 }
@@ -255,7 +255,7 @@ func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing
 // Task-8-era placeholder).
 func TestServer_PasskeyRoutesWired(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
-	handler, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard())
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
-	h, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log)
+	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log)
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}

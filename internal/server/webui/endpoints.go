@@ -78,7 +78,7 @@ func endpointRows(eps []store.NotificationEndpoint) []endpointRow {
 // list view model. Callers needing the create-form or reveal fields set them
 // on the returned value before rendering.
 func (h *handler) newEndpointsData(r *http.Request, usr store.User, sess store.Session) (endpointsData, error) {
-	eps, err := h.deps.Notify.List(r.Context(), usr.ID)
+	eps, err := h.deps.Notify.List(r.Context())
 	if err != nil {
 		return endpointsData{}, err
 	}
@@ -185,7 +185,7 @@ func createErrorMessage(err error) (msg string, ok bool) {
 // that indistinguishability is the authorization boundary — do not render a
 // different message or status for the two cases (mirrors ownedDevice).
 func (h *handler) ownedEndpoint(w http.ResponseWriter, r *http.Request, usr store.User) (store.NotificationEndpoint, bool) {
-	ep, err := h.deps.Notify.Get(r.Context(), usr.ID, r.PathValue("id"))
+	ep, err := h.deps.Notify.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.renderError(w, r, usr, http.StatusNotFound, "That notification endpoint does not exist.")
@@ -289,7 +289,7 @@ func (h *handler) handleDeliveryRedeliver(w http.ResponseWriter, r *http.Request
 	}
 	dest := "/account/endpoints"
 	if endpointID := r.PostFormValue("endpoint_id"); endpointID != "" {
-		if _, err := h.deps.Notify.Get(r.Context(), usr.ID, endpointID); err == nil {
+		if _, err := h.deps.Notify.Get(r.Context(), endpointID); err == nil {
 			dest = "/account/endpoints/" + endpointID
 		}
 	}
@@ -380,7 +380,7 @@ type endpointDetailData struct {
 // newEndpointDetailData assembles the detail view model, including the
 // endpoint's delivery history (design §10.4).
 func (h *handler) newEndpointDetailData(r *http.Request, usr store.User, sess store.Session, ep store.NotificationEndpoint) (endpointDetailData, error) {
-	deliveries, err := h.deps.Notify.Deliveries(r.Context(), usr.ID, ep.ID, deliveryHistoryLimit)
+	deliveries, err := h.deps.Notify.Deliveries(r.Context(), ep.ID, deliveryHistoryLimit)
 	if err != nil {
 		return endpointDetailData{}, err
 	}

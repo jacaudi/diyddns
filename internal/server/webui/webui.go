@@ -39,6 +39,7 @@ type Deps struct {
 	Admin   *service.AdminService
 	Grants  *service.GrantService
 	Notify  *service.NotificationService
+	Feed    *service.FeedService
 
 	Info      version.Info
 	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
