@@ -1197,6 +1197,11 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	if !strings.Contains(body, "localhost was rewritten to host.docker.internal") {
 		t.Error("the container-host rewrite hint is missing")
 	}
+	// The Linux --add-host flag is needed on both docker run commands (step 1
+	// enroll and step 2 run), not just the one the hint renders under.
+	if !strings.Contains(body, "--add-host=host.docker.internal:host-gateway to both docker run commands (enroll and run)") {
+		t.Error("the container-host rewrite hint no longer scopes the Linux --add-host flag to both docker run commands")
+	}
 	if !strings.Contains(body, "--name diyddns-client-run") {
 		t.Error("the container run command is missing")
 	}

@@ -200,7 +200,7 @@ func clientImage(v version.Info) (ref, note string) {
 // use for it.
 const containerHostNote = "localhost was rewritten to host.docker.internal because, inside a container, " +
 	"localhost is the container itself. On Docker Desktop this alias just works; on Linux add " +
-	"--add-host=host.docker.internal:host-gateway to the docker run command."
+	"--add-host=host.docker.internal:host-gateway to both docker run commands (enroll and run)."
 
 // containerBaseURL rewrites base for use in the container enroll command
 // only: inside a container, localhost/127.0.0.1/::1 resolve to the container

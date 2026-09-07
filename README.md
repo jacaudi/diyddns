@@ -70,8 +70,8 @@ the `http://localhost:8080` the server block above uses: inside the container
 either put both containers on one user-defined network and use the server's
 container name, or run the client with
 `--add-host=host.docker.internal:host-gateway`. The web UI already does this
-rewrite for you: when the server's base URL is a loopback address, the
-container command it shows uses host.docker.internal.
+rewrite for you: when the server's base URL has a loopback host (localhost,
+127.0.0.1, ::1), the container command it shows uses host.docker.internal.
 
 If enroll fails, read the message before retrying. `credentials already exist`
 means this host is already enrolled and your code is **not** spent — reuse it
