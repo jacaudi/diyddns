@@ -105,7 +105,10 @@ func RenderIPChanged(ev store.IPChangeEvent) ([]byte, error) {
 // RenderAdded produces a device.added event: d has just joined the feed
 // (re-enabled, or its owner re-enabled), so previous is all-null and current
 // is d's addresses. seq is the feed_state seq the fan-out obtained for it —
-// the event's id under the (type, id) dedupe rule.
+// the event's id under the (type, id) dedupe rule. Callers must pass only a
+// device that satisfies the feed-membership predicate (design D18), which
+// requires at least one current address — otherwise current would be
+// all-null too, indistinguishable from a delete.
 func RenderAdded(seq, now int64, d store.Device) ([]byte, error) {
 	return marshal(event{
 		Version:    payloadVersion,
