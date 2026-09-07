@@ -1094,17 +1094,57 @@ func TestDevices_RequiresSession(t *testing.T) {
 	}
 }
 
+// TestContainerBaseURL pins the loopback rewrite used only for the container
+// enroll command: inside a container, localhost/127.0.0.1/::1 resolve to the
+// container itself rather than the host running the server, so those hosts
+// are rewritten to host.docker.internal. Every other host, and anything that
+// fails to parse as a URL, passes through unchanged.
+func TestContainerBaseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		base string
+		want string
+	}{
+		{"localhost with port", "http://localhost:8080", "http://host.docker.internal:8080"},
+		{"IPv4 loopback", "http://127.0.0.1:8080", "http://host.docker.internal:8080"},
+		{"IPv6 loopback", "http://[::1]:8080", "http://host.docker.internal:8080"},
+		{"localhost without port keeps scheme and path", "https://localhost/x", "https://host.docker.internal/x"},
+		{"localhost is matched case-insensitively", "http://LOCALHOST:8080", "http://host.docker.internal:8080"},
+		{"configured domain is unchanged", "https://ddns.example.com", "https://ddns.example.com"},
+		{"private IPv4 is unchanged", "http://192.168.1.10:8080", "http://192.168.1.10:8080"},
+		{"private IPv4 without port is unchanged", "http://10.0.0.5", "http://10.0.0.5"},
+		{"unparseable input is returned unchanged", "http://[::1", "http://[::1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containerBaseURL(tt.base); got != tt.want {
+				t.Errorf("containerBaseURL(%q) = %q, want %q", tt.base, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestDeviceNew_RevealsCodeAndCommand asserts the reveal step renders in the
 // POST response itself: the code, the ready-to-paste client command, the
 // shown-once warning, and no-store caching, without ever claiming a device
 // was created (CreateCode mints a code; the device row appears only when a
 // client redeems it).
 //
+// The configured base URL is loopback here deliberately: it exercises the
+// container-command rewrite (containerBaseURL) alongside everything else this
+// test already pins, while the bare binary command must keep the unrewritten
+// host — that command runs on the device itself, not inside a container.
+//
 // Deliberately not t.Parallel() — see TestAccount_RendersInAppShell: testDeps
 // calls store.Open, and store.Migrate mutates goose's package-level globals
 // with no synchronization, so concurrent store opens race under -race.
 func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	deps, st := testDeps(t)
+	deps.Cfg.Server.BaseURL = "http://localhost:8080"
 	h, _ := New(deps)
 	usr := seedUser(t, st, "new@example.com", "user")
 	cookie := signIn(t, deps, usr)
@@ -1143,6 +1183,20 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	if !strings.Contains(body, "docker run --rm -v diyddns-client:/home/nonroot/.config") {
 		t.Error("the container enroll command is missing")
 	}
+	// The configured base URL above is loopback, so the container command must
+	// carry the host.docker.internal rewrite — a bare "localhost" there would
+	// resolve to the container itself, not the host running the server.
+	if !strings.Contains(body, "--server http://host.docker.internal:") {
+		t.Error("the container enroll command was not rewritten for the loopback base URL")
+	}
+	// The bare-binary command runs directly on the device, not inside a
+	// container, so it must keep the configured host as-is.
+	if !strings.Contains(body, "--server http://localhost:") {
+		t.Error("the bare-binary enroll command lost its configured (unrewritten) host")
+	}
+	if !strings.Contains(body, "localhost was rewritten to host.docker.internal") {
+		t.Error("the container-host rewrite hint is missing")
+	}
 	if !strings.Contains(body, "--name diyddns-client-run") {
 		t.Error("the container run command is missing")
 	}
@@ -1161,6 +1215,39 @@ func TestDeviceNew_RevealsCodeAndCommand(t *testing.T) {
 	// the device row appears only when a client redeems it.
 	if strings.Contains(body, "Device created") {
 		t.Error("the reveal claims a device was created")
+	}
+}
+
+// TestDeviceNew_ContainerCommandKeepsNonLoopbackHost pins the other half of
+// the container-command rewrite: a configured base URL that already names a
+// reachable host (testDeps' default, https://ddns.test) is not touched, and
+// the host.docker.internal hint — which would be actively misleading here —
+// does not render.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestDeviceNew_ContainerCommandKeepsNonLoopbackHost(t *testing.T) {
+	deps, st := testDeps(t) // testDeps sets Cfg.Server.BaseURL = "https://ddns.test".
+	h, _ := New(deps)
+	usr := seedUser(t, st, "nonloopback@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"reachable-pi"}}
+	req := httptest.NewRequest(http.MethodPost, "/devices/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "--server https://ddns.test") {
+		t.Error("the container enroll command lost the configured non-loopback host")
+	}
+	if strings.Contains(body, "host.docker.internal") {
+		t.Error("a reachable base URL should not trigger the container-host rewrite or its hint")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -136,16 +137,17 @@ func (h *handler) logAndFailMessage(w http.ResponseWriter, r *http.Request, usr 
 // step and populated on the reveal step; the template branches on it.
 type deviceNewData struct {
 	appData
-	Label           string
-	FieldErr        string
-	Code            string
-	Command         string
-	ContainerEnroll string
-	ContainerRun    string
-	DevImageNote    string
-	ExpiresIn       string
-	ExpiresAt       string
-	BaseURLWarning  string
+	Label             string
+	FieldErr          string
+	Code              string
+	Command           string
+	ContainerEnroll   string
+	ContainerRun      string
+	DevImageNote      string
+	ExpiresIn         string
+	ExpiresAt         string
+	BaseURLWarning    string
+	ContainerHostNote string
 }
 
 // clientImageRepo is the client image published by this project's CI. The
@@ -190,6 +192,46 @@ func clientImage(v version.Info) (ref, note string) {
 	return clientImageRepo + ":latest",
 		"This server is a development build, so the command pins :latest, which tracks main " +
 			"rather than the newest release. Pin a released tag in production."
+}
+
+// containerHostNote explains the containerBaseURL rewrite to whoever is about
+// to paste the enroll command. It is rendered only when the rewrite actually
+// happened — an operator whose base URL already names a reachable host has no
+// use for it.
+const containerHostNote = "localhost was rewritten to host.docker.internal because, inside a container, " +
+	"localhost is the container itself. On Docker Desktop this alias just works; on Linux add " +
+	"--add-host=host.docker.internal:host-gateway to the docker run command."
+
+// containerBaseURL rewrites base for use in the container enroll command
+// only: inside a container, localhost/127.0.0.1/::1 resolve to the container
+// itself, not the host running the server, so an enroll against those hosts
+// fails with a connection refused even though it is the server's own
+// base_url (see README.md's Containers section). host.docker.internal is the
+// documented workaround, resolving out of the box on Docker Desktop and, on
+// Linux, with --add-host=host.docker.internal:host-gateway.
+//
+// Any other host, and any base that fails to parse, is returned unchanged.
+func containerBaseURL(base string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	host := u.Hostname()
+	loopback := strings.EqualFold(host, "localhost")
+	if !loopback {
+		if ip := net.ParseIP(host); ip != nil {
+			loopback = ip.IsLoopback()
+		}
+	}
+	if !loopback {
+		return base
+	}
+	port := u.Port()
+	u.Host = "host.docker.internal"
+	if port != "" {
+		u.Host += ":" + port
+	}
+	return u.String()
 }
 
 // handleDeviceNewForm renders step 1: name the device.
@@ -251,9 +293,13 @@ func (h *handler) handleDeviceNewCreate(w http.ResponseWriter, r *http.Request, 
 	// newline would render as a space while the Copy button still copied a real
 	// newline — displayed and copied text would differ.
 	ref, note := clientImage(h.deps.Info)
+	containerBase := containerBaseURL(base)
 	data.ContainerEnroll = fmt.Sprintf(
 		"docker run --rm -v %s:/home/nonroot/.config %s enroll --server %s --code %s",
-		clientVolume, ref, base, code)
+		clientVolume, ref, containerBase, code)
+	if containerBase != base {
+		data.ContainerHostNote = containerHostNote
+	}
 	// No subcommand and no flags: CMD ["run"] is the image default, and `run`
 	// reads server_url back out of credentials.json.
 	data.ContainerRun = fmt.Sprintf(
