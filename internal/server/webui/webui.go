@@ -100,18 +100,26 @@ func New(deps Deps) (http.Handler, []string) {
 		{"GET /static/", http.FileServerFS(staticFS)},
 	}
 
-	// The whole route group is absent — not just guarded — when notifications
-	// are disabled: a server whose worker isn't running must not offer
-	// endpoint management at all (design §8.3/§10.1).
+	// Each route group is absent — not just guarded — when its feature is
+	// off: a server whose worker isn't running must not offer endpoint
+	// management, and a server with no feed must not offer tokens for it
+	// (design #65 §8.3/§10.1, #106 §8.1). Both groups are admin-only.
 	if deps.Cfg.Notifications.Enabled {
 		routes = append(routes,
-			route{"GET /account/endpoints", h.requireSession(h.handleEndpoints)},
-			route{"POST /account/endpoints", h.requirePost(h.handleEndpointsCreate)},
-			route{"POST /account/endpoints/{id}/enabled", h.requirePost(h.handleEndpointSetEnabled)},
-			route{"POST /account/endpoints/{id}/test", h.requirePost(h.handleEndpointTest)},
-			route{"POST /account/endpoints/{id}/delete", h.requirePost(h.handleEndpointDelete)},
-			route{"GET /account/endpoints/{id}", h.requireSession(h.handleEndpointDetail)},
-			route{"POST /account/deliveries/{id}/redeliver", h.requirePost(h.handleDeliveryRedeliver)},
+			route{"GET /admin/endpoints", h.requireAdmin(h.handleEndpoints)},
+			route{"POST /admin/endpoints", h.requirePostAdmin(h.handleEndpointsCreate)},
+			route{"POST /admin/endpoints/{id}/enabled", h.requirePostAdmin(h.handleEndpointSetEnabled)},
+			route{"POST /admin/endpoints/{id}/test", h.requirePostAdmin(h.handleEndpointTest)},
+			route{"POST /admin/endpoints/{id}/delete", h.requirePostAdmin(h.handleEndpointDelete)},
+			route{"GET /admin/endpoints/{id}", h.requireAdmin(h.handleEndpointDetail)},
+			route{"POST /admin/deliveries/{id}/redeliver", h.requirePostAdmin(h.handleDeliveryRedeliver)},
+		)
+	}
+	if deps.Cfg.Feed.Enabled {
+		routes = append(routes,
+			route{"GET /admin/feed", h.requireAdmin(h.handleAdminFeed)},
+			route{"POST /admin/feed/tokens", h.requirePostAdmin(h.handleFeedTokenMint)},
+			route{"POST /admin/feed/tokens/{id}/revoke", h.requirePostAdmin(h.handleFeedTokenRevoke)},
 		)
 	}
 
@@ -147,4 +155,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-audit", "admin-server", "endpoints", "endpoint-detail", "error"}
+var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-audit", "admin-server", "admin-feed", "endpoints", "endpoint-detail", "error"}

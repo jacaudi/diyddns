@@ -24,7 +24,7 @@
   <div class="card-head"><h2>Add an endpoint</h2></div>
   <div class="card-body">
     {{template "errorBanner" .FieldErr}}
-    <form method="post" action="/account/endpoints">
+    <form method="post" action="/admin/endpoints">
       <input type="hidden" name="csrf" value="{{.CSRFToken}}">
       <div class="field">
         <label for="label">Label</label>
@@ -48,7 +48,7 @@
 <div class="card"><div class="empty">
   <div class="icon">🔔</div>
   <h3>No notification endpoints yet</h3>
-  <p>Add one above to get a webhook whenever your public IP changes.</p>
+  <p>Add one above to get a webhook whenever any device's public IP changes.</p>
 </div></div>
 {{else}}
 <div class="card">
@@ -60,14 +60,14 @@
       <tbody>
         {{range .Endpoints}}
         <tr>
-          <td data-label="Label"><a class="primary-cell" href="/account/endpoints/{{.ID}}">{{.Label}}</a></td>
+          <td data-label="Label"><a class="primary-cell" href="/admin/endpoints/{{.ID}}">{{.Label}}</a></td>
           <td data-label="URL">{{template "mutedCodeOrDash" .URL}}</td>
           <td data-label="Status">
             {{if .Enabled}}<span class="tag ok"><span class="dot"></span>Enabled</span>
             {{else}}<span class="tag danger"><span class="dot"></span>Disabled</span>{{end}}
           </td>
           <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
-          <td class="actions"><a class="btn sm" href="/account/endpoints/{{.ID}}">Open</a></td>
+          <td class="actions"><a class="btn sm" href="/admin/endpoints/{{.ID}}">Open</a></td>
         </tr>
         {{end}}
       </tbody>

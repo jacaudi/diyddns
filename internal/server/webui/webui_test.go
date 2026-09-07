@@ -20,6 +20,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
 	emailpkg "github.com/jacaudi/diyddns/internal/email" // aliased: revive's import-shadowing rule runs on _test.go, and seedSessionCookie/seedUser take an `email` parameter
+	"github.com/jacaudi/diyddns/internal/server/feed"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -73,17 +74,19 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	// fixtures, not policy under test here — Task 9's tests exercise the
 	// webui routes, not notify's destination policy (that's Task 8's own
 	// test file).
-	notify := service.NewNotificationService(st, key, 5, nil, audit)
+	notify := service.NewNotificationService(st, key, nil, audit)
+	feedSvc := service.NewFeedService(st, feed.New(), audit)
 
 	return Deps{
 		Sessions:  sessions,
 		Cfg:       cfg,
 		Log:       log,
-		Devices:   service.NewDeviceService(st, key, &fakeInvalidator{}, audit),
+		Devices:   service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
 		Enroll:    service.NewEnrollmentService(st, key, 15*time.Minute, audit),
-		Admin:     service.NewAdminService(st, audit, grants),
+		Admin:     service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}),
 		Grants:    grants,
 		Notify:    notify,
+		Feed:      feedSvc,
 		Info:      version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
 		StartedAt: time.Now().Add(-2 * time.Hour),
 	}, st
@@ -2655,7 +2658,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3297,7 +3300,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3381,7 +3384,7 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin-disabled-recovery@example.com", "admin")
