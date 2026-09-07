@@ -204,14 +204,22 @@ func TestStream_ThroughRealChain_SnapshotFirstAndEqualToJSONRoute(t *testing.T) 
 // replay converges).
 func TestStream_DeltasArriveInBumpOrder_AfterSnapshot(t *testing.T) {
 	t.Cleanup(func() { goleak.VerifyNone(t) })
-	srv, hub, st := chain(t, nil)
+	// Registered before chain(t, nil) so the restore is safe by construction:
+	// under LIFO cleanup it runs after chain's server teardown, not before —
+	// no dependence on hub.WaitPumps() at the end of this test's body.
+	var hub *feed.Hub
 	t.Cleanup(feed.SetBeforeSnapshot(func() {
-		// A real change the snapshot will include, then its delta queued
-		// before the snapshot is rendered.
-		feed.SeedMember(t, st, "dev-b", "203.0.113.10")
+		// The delta queued before the snapshot is rendered is subsumed by it
+		// and its replay converges (design §5.1).
 		hub.Broadcast([]byte(`{"version":1,"type":"device.added","id":1,"device":{"id":"dev-b"},"current":{"ipv4":"203.0.113.10","ipv6":null}}`))
 		hub.Broadcast([]byte(`{"version":1,"type":"device.ip_changed","id":2}`))
 	}))
+	srv, hub, st := chain(t, nil)
+	// A real change the snapshot will include, seeded on the test goroutine —
+	// never inside the beforeSnapshot hook, which runs on the handler's
+	// goroutine where SeedMember's t.Fatalf would be the same misuse this
+	// file's readFrame helper exists to avoid.
+	feed.SeedMember(t, st, "dev-b", "203.0.113.10")
 
 	conn := dial(t, srv, nil)
 	snap := mustFrame(t, conn)
@@ -268,12 +276,18 @@ func TestStream_ClientDataFrameUnderLimitIsIgnored_OverLimitCloses1009(t *testin
 func TestStream_StalledClientIsCutWith1013_ServerSide(t *testing.T) {
 	t.Cleanup(func() { goleak.VerifyNone(t) })
 	logBuf := &syncBuffer{}
-	srv, hub, _ := chain(t, logBuf)
+	// Registered before chain(t, logBuf) so the restore is safe by
+	// construction: under LIFO cleanup it runs after chain's server
+	// teardown, not before — this test has no hub.WaitPumps() to join on
+	// (§5.3: overflow unsubscribes before the pump exits), so the ordering
+	// cannot rely on a join argument at all.
+	var hub *feed.Hub
 	t.Cleanup(feed.SetBeforeSnapshot(func() {
 		for range 65 {
 			hub.Broadcast([]byte(`{"type":"flood"}`))
 		}
 	}))
+	srv, hub, _ := chain(t, logBuf)
 
 	_ = dial(t, srv, nil) // the client deliberately never reads
 
@@ -282,6 +296,9 @@ func TestStream_StalledClientIsCutWith1013_ServerSide(t *testing.T) {
 	for time.Now().Before(deadline) {
 		logged = logBuf.String()
 		if strings.Contains(logged, `"msg":"feed stream closed"`) && strings.Contains(logged, `"close_code":1013`) {
+			if strings.Contains(logged, testToken) {
+				t.Error("the presented token reached the log")
+			}
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
