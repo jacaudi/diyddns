@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -15,15 +16,31 @@ type fakeInvalidator struct{ called []string }
 func (f *fakeInvalidator) Invalidate(id string) { f.called = append(f.called, id) }
 
 // newDeviceServiceTest opens a fresh in-memory store, seeds one user, and
-// builds a DeviceService wired to a fakeInvalidator and a discard audit
-// sink. Reused by every DeviceService test in this file.
+// builds a DeviceService wired to a fakeInvalidator, a discard audit sink,
+// and a recording membership notifier. Reused by every DeviceService test
+// in this file.
 func newDeviceServiceTest(t *testing.T) (*store.Store, string, *DeviceService, *fakeInvalidator) {
+	t.Helper()
+	st, userID, svc, inv, _ := newDeviceServiceTestWithNotifier(t)
+	return st, userID, svc, inv
+}
+
+func newDeviceServiceTestWithNotifier(t *testing.T) (*store.Store, string, *DeviceService, *fakeInvalidator, *recordingDeviceNotifier) {
 	t.Helper()
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	inv := &fakeInvalidator{}
-	svc := NewDeviceService(st, testKey32(), inv, discardAudit{})
-	return st, usr.ID, svc, inv
+	n := &recordingDeviceNotifier{}
+	svc := NewDeviceService(st, testKey32(), inv, discardAudit{}, n)
+	return st, usr.ID, svc, inv, n
+}
+
+// giveIP records an address for dev so it becomes a feed member.
+func giveIP(t *testing.T, st *store.Store, deviceID, v4 string) {
+	t.Helper()
+	if err := st.Devices().UpdateIP(t.Context(), deviceID, v4, "", "", "", "", store.NowUnix()); err != nil {
+		t.Fatalf("UpdateIP: %v", err)
+	}
 }
 
 func TestDeviceService_Get_ReturnsOwnedDevice(t *testing.T) {
@@ -175,3 +192,97 @@ func TestDeviceService_History_Paginates(t *testing.T) {
 		t.Fatalf("foreign history err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestDeviceService_SetEnabled_EmitsMembershipEvents pins design §6.2: a
+// flip out of the feed emits removed, a flip back in emits added, and a
+// device with no address emits nothing either way. The "before" snapshot is
+// the pre-write row and the "after" is that row with the flag set to its
+// intended value — never a re-read.
+func TestDeviceService_SetEnabled_EmitsMembershipEvents(t *testing.T) {
+	st, userID, svc, _, n := newDeviceServiceTestWithNotifier(t)
+	dev := seedDevice(t, st, userID, "d")
+	giveIP(t, st, dev.ID, "203.0.113.9")
+
+	if _, err := svc.SetEnabled(t.Context(), userID, dev.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.removed) != 1 || n.removed[0].ID != dev.ID || n.removed[0].CurrentIPv4 != "203.0.113.9" {
+		t.Fatalf("removed = %+v, want the device with its last address", n.removed)
+	}
+	if len(n.added) != 0 {
+		t.Fatalf("added = %+v, want none on disable", n.added)
+	}
+
+	if _, err := svc.SetEnabled(t.Context(), userID, dev.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.added) != 1 || n.added[0].ID != dev.ID || n.added[0].Disabled {
+		t.Fatalf("added = %+v, want the re-enabled device", n.added)
+	}
+
+	// Disabling a device that never checked in: not a member, no event.
+	quiet := seedDevice(t, st, userID, "quiet")
+	if _, err := svc.SetEnabled(t.Context(), userID, quiet.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.removed) != 1 {
+		t.Errorf("removed = %+v, want no event for a device with no address", n.removed)
+	}
+}
+
+// TestDeviceService_SetEnabled_OwnerDisabledEmitsNothing: the owner check
+// applies to removed as much as to added (pass 2 S1).
+func TestDeviceService_SetEnabled_OwnerDisabledEmitsNothing(t *testing.T) {
+	st, userID, svc, _, n := newDeviceServiceTestWithNotifier(t)
+	dev := seedDevice(t, st, userID, "d")
+	giveIP(t, st, dev.ID, "203.0.113.9")
+	if err := st.Users().SetDisabled(t.Context(), userID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnabled(t.Context(), userID, dev.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetEnabled(t.Context(), userID, dev.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.added)+len(n.removed) != 0 {
+		t.Errorf("added=%+v removed=%+v, want nothing while the owner is disabled", n.added, n.removed)
+	}
+}
+
+func TestDeviceService_Delete_EmitsRemovedForMember(t *testing.T) {
+	st, userID, svc, _, n := newDeviceServiceTestWithNotifier(t)
+	member := seedDevice(t, st, userID, "m")
+	giveIP(t, st, member.ID, "203.0.113.9")
+	quiet := seedDevice(t, st, userID, "q")
+
+	if err := svc.Delete(t.Context(), userID, member.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(t.Context(), userID, quiet.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.removed) != 1 || n.removed[0].ID != member.ID {
+		t.Errorf("removed = %+v, want exactly the member", n.removed)
+	}
+}
+
+// TestDeviceService_NotifierPanicDoesNotFailTheRequest mirrors the check-in
+// path's guarantee: a broken hook must not turn an admin action into a 500.
+func TestDeviceService_NotifierPanicDoesNotFailTheRequest(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	svc := NewDeviceService(st, testKey32(), &fakeInvalidator{}, discardAudit{}, panickingDeviceNotifier{})
+	dev := seedDevice(t, st, usr.ID, "d")
+	giveIP(t, st, dev.ID, "203.0.113.9")
+
+	if _, err := svc.SetEnabled(t.Context(), usr.ID, dev.ID, true); err != nil {
+		t.Fatalf("SetEnabled: %v (a panicking notifier must be contained)", err)
+	}
+}
+
+type panickingDeviceNotifier struct{}
+
+func (panickingDeviceNotifier) DeviceAdded(context.Context, store.Device)   { panic("boom") }
+func (panickingDeviceNotifier) DeviceRemoved(context.Context, store.Device) { panic("boom") }

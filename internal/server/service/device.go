@@ -22,13 +22,15 @@ type DeviceService struct {
 	key         []byte
 	invalidator SecretCacheInvalidator
 	audit       AuditSink
+	notify      DeviceNotifier
 }
 
 // NewDeviceService constructs a DeviceService. key is the 32-byte AEAD key used
 // to seal rotated device secrets (see auth.SealSecret); invalidator evicts the
-// HMAC verifier's secret cache on rotation; audit records lifecycle events.
-func NewDeviceService(st *store.Store, key []byte, invalidator SecretCacheInvalidator, audit AuditSink) *DeviceService {
-	return &DeviceService{st: st, key: key, invalidator: invalidator, audit: audit}
+// HMAC verifier's secret cache on rotation; audit records lifecycle events;
+// notify is told when a device joins or leaves the gateway feed (#106).
+func NewDeviceService(st *store.Store, key []byte, invalidator SecretCacheInvalidator, audit AuditSink, notify DeviceNotifier) *DeviceService {
+	return &DeviceService{st: st, key: key, invalidator: invalidator, audit: audit, notify: notify}
 }
 
 // List returns all devices belonging to userID.
@@ -81,9 +83,17 @@ func (s *DeviceService) Rename(ctx context.Context, userID, id, newLabel string)
 	return dev, nil
 }
 
-// SetEnabled toggles a device's disabled flag.
+// SetEnabled toggles a device's disabled flag and emits device.added /
+// device.removed when the flip changes the device's feed membership (design
+// #106 §6.2, §7.2). before is evaluated on the pre-write rows; after on the
+// same snapshot with Disabled set to the requested value.
 func (s *DeviceService) SetEnabled(ctx context.Context, userID, id string, disabled bool) (store.Device, error) {
-	if _, err := s.ownedDevice(ctx, userID, id); err != nil {
+	dev, err := s.ownedDevice(ctx, userID, id)
+	if err != nil {
+		return store.Device{}, fmt.Errorf("service.SetEnabled: %w", err)
+	}
+	owner, err := s.st.Users().GetByID(ctx, dev.UserID)
+	if err != nil {
 		return store.Device{}, fmt.Errorf("service.SetEnabled: %w", err)
 	}
 	if err := s.st.Devices().SetDisabled(ctx, id, disabled); err != nil {
@@ -96,17 +106,28 @@ func (s *DeviceService) SetEnabled(ctx context.Context, userID, id string, disab
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: userID, EventType: event, TargetType: "device", TargetID: id,
 	})
-	dev, err := s.st.Devices().GetByID(ctx, id)
+
+	after := dev
+	after.Disabled = disabled
+	emitMembership(ctx, s.notify, after, inFeed(dev, owner), inFeed(after, owner))
+
+	updated, err := s.st.Devices().GetByID(ctx, id)
 	if err != nil {
 		return store.Device{}, fmt.Errorf("service.SetEnabled: %w", err)
 	}
-	return dev, nil
+	return updated, nil
 }
 
 // Delete removes a device (its ip_history cascades; a consumed enrollment code
-// survives with a nulled device_id, per the schema FKs).
+// survives with a nulled device_id, per the schema FKs) and emits
+// device.removed if it was a feed member.
 func (s *DeviceService) Delete(ctx context.Context, userID, id string) error {
-	if _, err := s.ownedDevice(ctx, userID, id); err != nil {
+	dev, err := s.ownedDevice(ctx, userID, id)
+	if err != nil {
+		return fmt.Errorf("service.Delete: %w", err)
+	}
+	owner, err := s.st.Users().GetByID(ctx, dev.UserID)
+	if err != nil {
 		return fmt.Errorf("service.Delete: %w", err)
 	}
 	if err := s.st.Devices().Delete(ctx, id); err != nil {
@@ -115,6 +136,7 @@ func (s *DeviceService) Delete(ctx context.Context, userID, id string) error {
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: userID, EventType: "device.deleted", TargetType: "device", TargetID: id,
 	})
+	emitMembership(ctx, s.notify, dev, inFeed(dev, owner), false)
 	return nil
 }
 

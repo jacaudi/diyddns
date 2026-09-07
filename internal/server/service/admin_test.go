@@ -19,10 +19,20 @@ import (
 // newAdminSvcWithPasskeys instead.
 func newAdminSvc(t *testing.T) (*store.Store, *AdminService) {
 	t.Helper()
+	st, svc, _ := newAdminSvcWithNotifier(t)
+	return st, svc
+}
+
+// newAdminSvcWithNotifier is newAdminSvc plus the recording membership
+// notifier, for the tests that assert device.added/device.removed emission
+// on user disable/enable/delete.
+func newAdminSvcWithNotifier(t *testing.T) (*store.Store, *AdminService, *recordingDeviceNotifier) {
+	t.Helper()
 	st := openTestStore(t)
 	audit := NewAuditWriter(st)
 	grants := NewGrantService(st, nil, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
-	return st, NewAdminService(st, audit, grants)
+	n := &recordingDeviceNotifier{}
+	return st, NewAdminService(st, audit, grants, n), n
 }
 
 // newAdminSvcWithPasskeys is newAdminSvc but with a real PasskeyService
@@ -34,7 +44,7 @@ func newAdminSvcWithPasskeys(t *testing.T) (*store.Store, *AdminService) {
 	audit := NewAuditWriter(st)
 	passkeys := newTestPasskeyService(t, st, audit)
 	grants := NewGrantService(st, passkeys, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
-	return st, NewAdminService(st, audit, grants)
+	return st, NewAdminService(st, audit, grants, NopDeviceNotifier{})
 }
 
 func TestAdminService_CreateUserInvite_RejectsBadRole(t *testing.T) {
@@ -299,5 +309,58 @@ func TestAdminService_ListAudit_ReturnsPage(t *testing.T) {
 	}
 	if page.Rows[0].EventType != "user.deleted" {
 		t.Fatalf("EventType = %q, want %q", page.Rows[0].EventType, "user.deleted")
+	}
+}
+
+// TestAdminService_DisableUser_EmitsRemovedPerMemberDevice is the case pass 1
+// B5 showed a naive implementation gets wrong: the "before" membership must be
+// computed against the PRE-WRITE user row. Three devices, one already
+// disabled, one with no address: exactly one removed on disable, one added on
+// re-enable.
+func TestAdminService_DisableUser_EmitsRemovedPerMemberDevice(t *testing.T) {
+	st, svc, n := newAdminSvcWithNotifier(t)
+	admin := seedUser(t, st, "a@x", "admin")
+	target := seedUser(t, st, "b@x", "user")
+	member := seedDevice(t, st, target.ID, "member")
+	giveIP(t, st, member.ID, "203.0.113.9")
+	off := seedDevice(t, st, target.ID, "off")
+	giveIP(t, st, off.ID, "203.0.113.10")
+	if err := st.Devices().SetDisabled(t.Context(), off.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	seedDevice(t, st, target.ID, "noaddr")
+
+	dis := true
+	if _, err := svc.UpdateUser(t.Context(), admin.ID, target.ID, UpdateUserParams{Disabled: &dis}); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.removed) != 1 || n.removed[0].ID != member.ID {
+		t.Fatalf("removed = %+v, want exactly [%s]", n.removed, member.ID)
+	}
+
+	en := false
+	if _, err := svc.UpdateUser(t.Context(), admin.ID, target.ID, UpdateUserParams{Disabled: &en}); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.added) != 1 || n.added[0].ID != member.ID {
+		t.Fatalf("added = %+v, want exactly [%s]", n.added, member.ID)
+	}
+}
+
+// TestAdminService_DeleteUser_EmitsRemovedBeforeCascade: devices.user_id is
+// ON DELETE CASCADE, so the member list must be read before the delete.
+func TestAdminService_DeleteUser_EmitsRemovedBeforeCascade(t *testing.T) {
+	st, svc, n := newAdminSvcWithNotifier(t)
+	admin := seedUser(t, st, "a@x", "admin")
+	target := seedUser(t, st, "b@x", "user")
+	member := seedDevice(t, st, target.ID, "member")
+	giveIP(t, st, member.ID, "203.0.113.9")
+	seedDevice(t, st, target.ID, "noaddr")
+
+	if err := svc.DeleteUser(t.Context(), admin.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.removed) != 1 || n.removed[0].ID != member.ID || n.removed[0].CurrentIPv4 != "203.0.113.9" {
+		t.Errorf("removed = %+v, want exactly the member with its last address", n.removed)
 	}
 }
