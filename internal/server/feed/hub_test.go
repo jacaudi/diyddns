@@ -61,6 +61,17 @@ func TestHub_UnsubscribeIsIdempotent(t *testing.T) {
 // subscriber's buffer cancels it with causeSlowConsumer, frees its slot at
 // once, and never deadlocks Broadcast (pass 5 B1 reproduced the deadlock of
 // calling unsubscribe under hub.mu).
+//
+// Broadcast is non-blocking by design (§5.3): the broadcaster can complete
+// every send before a separate "drain continuously" goroutine is ever
+// scheduled, so that goroutine is only fast if the scheduler happens to run
+// it. Under GOMAXPROCS=1 on Linux CI it wasn't, the fast subscriber's buffer
+// overflowed exactly like the slow one, and — because sub.ch is never closed
+// — the stranded drainer then broke goleak.VerifyNone for every later
+// TestStream_* test in the package. Draining the fast subscriber in lockstep
+// on the test goroutine, right after each Broadcast call returns, keeps its
+// buffer at zero or one message regardless of scheduling, and leaves no
+// goroutine behind.
 func TestHub_BroadcastOverflowRemovesSubscriberOutsideTheLock(t *testing.T) {
 	h := New()
 	slow, err := h.subscribe("slow")
@@ -71,31 +82,33 @@ func TestHub_BroadcastOverflowRemovesSubscriberOutsideTheLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fast subscriber drains continuously, like a live pump; only the
-	// slow one lets its buffer fill.
-	fastGot := make(chan int, 1)
-	go func() {
-		n := 0
-		for range fast.ch {
-			n++
-			if n == streamBuffer+1 {
-				fastGot <- n
-				return
-			}
-		}
-	}()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i <= streamBuffer; i++ { // one more than the buffer holds
-			h.Broadcast([]byte("x"))
+	// broadcast runs Broadcast on its own goroutine and waits for it to
+	// return, preserving the deadlock guard this test exists for (pass 5
+	// B1): every such goroutine terminates because Broadcast always returns.
+	broadcast := func(payload []byte) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.Broadcast(payload)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Broadcast did not return: overflow handling deadlocked")
 		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Broadcast did not return: overflow handling deadlocked")
+	}
+
+	fastGot := 0
+	for range streamBuffer + 1 { // one more than the buffer holds
+		broadcast([]byte("x"))
+		select {
+		case <-fast.ch:
+			fastGot++
+		case <-time.After(3 * time.Second):
+			t.Fatal("fast subscriber did not receive the broadcast")
+		}
 	}
 
 	select {
@@ -115,13 +128,8 @@ func TestHub_BroadcastOverflowRemovesSubscriberOutsideTheLock(t *testing.T) {
 	default:
 	}
 	// The fast subscriber received every broadcast; the hub kept serving it.
-	select {
-	case n := <-fastGot:
-		if n != streamBuffer+1 {
-			t.Errorf("fast received %d, want %d", n, streamBuffer+1)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("fast subscriber did not receive every broadcast")
+	if fastGot != streamBuffer+1 {
+		t.Errorf("fast received %d, want %d", fastGot, streamBuffer+1)
 	}
 	// The slow one's later unsubscribe is a no-op, and Shutdown still returns.
 	h.unsubscribe(slow)
