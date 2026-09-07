@@ -350,7 +350,6 @@ a:hover { text-decoration: underline; }
 
 .card + .card { margin-top: var(--space-4); }
 .grid > .card + .card { margin-top: 0; }
-.card.narrow { max-width: 640px; }
 
 /* minmax(0, 1fr), never a bare 1fr: `1fr` alone is minmax(auto, 1fr), and auto
    as a track minimum is the item's min-content width, so the track can never
@@ -588,6 +587,12 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    number nobody chose, and the only fractional size left in the file. */
 .empty h3 { font-size: var(--type-4); margin: var(--space-3) 0 var(--space-1); }
 .empty p { color: var(--text-muted); margin: 0 0 var(--space-4); }
+/* A form folded into the empty state (the create/mint form, once there is
+   nothing to list yet) would otherwise inherit the centred text-align above:
+   labels and hints centre over left-aligned inputs and a left-flushed
+   button. Only the form's own text goes back to normal reading order; the
+   icon/heading/lead stay centred. */
+.empty form { text-align: left; }
 
 /* ---------- Pagination ---------- */
 

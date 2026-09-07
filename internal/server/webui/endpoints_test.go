@@ -579,17 +579,26 @@ func TestEndpoints_EmptyStateFoldsFormIntoSingleCard(t *testing.T) {
 		t.Fatalf("got %d <div class=\"empty\"> blocks, want exactly 1:\n%s", n, body)
 	}
 	emptyStart := strings.Index(body, `<div class="empty">`)
+	// The wrapping "<div class=\"card\"><div class=\"empty\">" closes as
+	// "</div></div>"; the FIRST such pair after emptyStart is the empty
+	// card's own close, since nothing else inside it (the icon, the
+	// heading, the form's own elements) closes two divs back to back.
+	relEnd := strings.Index(body[emptyStart:], "</div></div>")
+	if relEnd == -1 {
+		t.Fatalf("could not find the empty-state card's closing tags:\n%s", body)
+	}
+	emptyEnd := emptyStart + relEnd
 	formIdx := strings.Index(body, `<form method="post" action="/admin/endpoints"`)
-	if formIdx == -1 || formIdx < emptyStart {
-		t.Error("the create form is not inside the empty-state card")
+	if formIdx == -1 || formIdx < emptyStart || formIdx > emptyEnd {
+		t.Errorf("form index = %d, want it inside the empty-state card (%d, %d)", formIdx, emptyStart, emptyEnd)
 	}
 	if !strings.Contains(body, "Endpoints receive a signed webhook whenever a device's address changes, or a device joins or leaves the feed.") {
 		t.Error("empty state is missing the lead sentence")
 	}
 }
 
-// TestEndpoints_BodyHasNoInlineMaxWidthStyles: narrow cards use the .card.narrow
-// class, never an inline style attribute.
+// TestEndpoints_BodyHasNoInlineMaxWidthStyles: cards on this page never carry
+// an inline max-width style.
 func TestEndpoints_BodyHasNoInlineMaxWidthStyles(t *testing.T) {
 	deps, st := testDeps(t)
 	enableNotifications(&deps)
