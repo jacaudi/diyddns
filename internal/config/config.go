@@ -33,6 +33,7 @@ type Server struct {
 	Auth          Auth
 	Email         EmailSection
 	Notifications Notifications
+	Feed          FeedSection
 	Retention     RetentionSection
 	Observability ObservabilitySection
 }
@@ -137,13 +138,20 @@ type WebAuthnCfg struct {
 	Timeout       time.Duration `mapstructure:"timeout"`
 }
 
-// Notifications configures the outbound IP-change hook (#65).
+// Notifications configures the outbound webhook (#65, admin-scoped by #106).
 type Notifications struct {
 	Enabled             bool          `mapstructure:"enabled"`
 	AllowedPrivateCIDRs []string      `mapstructure:"allowed_private_cidrs"`
 	Timeout             time.Duration `mapstructure:"timeout"`
 	MaxAttempts         int           `mapstructure:"max_attempts"`
-	MaxEndpointsPerUser int           `mapstructure:"max_endpoints_per_user"`
+}
+
+// FeedSection configures the gateway feed (#106): the bearer-token REST
+// snapshot at /feed/v1/devices.{txt,json} and the WebSocket stream at
+// /feed/v1/stream. When Enabled is false none of those routes, nor the
+// /admin/feed token page, exists on the mux.
+type FeedSection struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // keyDefaults enumerates every config key, its default, and its env var. Keys
@@ -195,7 +203,7 @@ var keyDefaults = map[string]any{
 	"notifications.allowed_private_cidrs":    []string{},
 	"notifications.timeout":                  "10s",
 	"notifications.max_attempts":             8,
-	"notifications.max_endpoints_per_user":   5,
+	"feed.enabled":                           false,
 	"retention.ip_history_days":              0,
 	"retention.ip_history_per_device_max":    0,
 	"retention.audit_log_days":               0,
@@ -474,10 +482,6 @@ func validateNotifications(cfg Server) error {
 	}
 	if n.MaxAttempts < 1 || n.MaxAttempts > 16 {
 		return fmt.Errorf("config: notifications.max_attempts must be 1..16, got %d", n.MaxAttempts)
-	}
-	if n.MaxEndpointsPerUser < 1 {
-		return fmt.Errorf("config: notifications.max_endpoints_per_user must be >= 1, got %d",
-			n.MaxEndpointsPerUser)
 	}
 	return nil
 }
