@@ -16,9 +16,11 @@ import (
 const deliveryHistoryLimit = 50
 
 // endpointActionRefusedMessage is the ONE message shown when POST .../test is
-// refused: the endpoint is disabled. (The per-user attempt budget is gone
-// with #106; the endpoint is admin-managed.)
-const endpointActionRefusedMessage = "That action was refused. The endpoint is disabled."
+// refused: InsertUserTest's predicate refuses when the endpoint is disabled
+// OR no longer exists (deleted between this handler's Get and the INSERT).
+// (The per-user attempt budget is gone with #106; the endpoint is
+// admin-managed.)
+const endpointActionRefusedMessage = "That action was refused. The endpoint is disabled or no longer exists."
 
 // deliveryRedeliverRefusedMessage is the delivery-route counterpart. A
 // delivery is reachable only through its endpoint, and

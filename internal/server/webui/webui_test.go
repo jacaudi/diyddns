@@ -69,11 +69,10 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	}
 	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log)
 
-	// maxEndpointsPerUser and allowed (nil = no private destinations, the
-	// same "empty allow-list" default production ships) are arbitrary test
-	// fixtures, not policy under test here — Task 9's tests exercise the
-	// webui routes, not notify's destination policy (that's Task 8's own
-	// test file).
+	// allowed (nil = no private destinations, the same "empty allow-list"
+	// default production ships) is an arbitrary test fixture, not policy
+	// under test here — these tests exercise the webui routes, not notify's
+	// destination policy (that's notify's own test file).
 	notify := service.NewNotificationService(st, key, nil, audit)
 	feedSvc := service.NewFeedService(st, feed.New(), audit)
 

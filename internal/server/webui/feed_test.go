@@ -24,14 +24,32 @@ func TestFeedRoutes_AbsentWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestFeedTokens_NonAdminIsForbidden: every feed-token route is admin-only.
+// Both POST cases carry a VALID CSRF token from the non-admin's own session
+// (requirePostAdmin checks CSRF before the role — see the equivalent comment
+// on TestEndpoints_NonAdminIsForbidden), so a regression that dropped
+// adminOnly from one of these routes would not stay green by accident.
 func TestFeedTokens_NonAdminIsForbidden(t *testing.T) {
 	deps, st := testDeps(t)
 	enableFeed(&deps)
 	h, _ := New(deps)
+	now := store.NowUnix()
+	tok := store.FeedToken{ID: store.NewID(), Label: "existing", TokenHash: "test-hash", CreatedAt: now}
+	if err := st.FeedTokens().Create(t.Context(), tok); err != nil {
+		t.Fatalf("seed feed token: %v", err)
+	}
 	usr := seedUser(t, st, "plain@example.com", "user")
 	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
 	if rec := getPage(t, h, cookie, "/admin/feed"); rec.Code != http.StatusForbidden {
 		t.Errorf("GET /admin/feed as a user = %d, want 403", rec.Code)
+	}
+	if rec := postForm(t, h, cookie, "/admin/feed/tokens", url.Values{"csrf": {sess.CSRFToken}, "label": {"x"}}); rec.Code != http.StatusForbidden {
+		t.Errorf("POST /admin/feed/tokens as a user (valid csrf) = %d, want 403", rec.Code)
+	}
+	if rec := postForm(t, h, cookie, "/admin/feed/tokens/"+tok.ID+"/revoke", url.Values{"csrf": {sess.CSRFToken}}); rec.Code != http.StatusForbidden {
+		t.Errorf("POST /admin/feed/tokens/{id}/revoke as a user (valid csrf) = %d, want 403", rec.Code)
 	}
 }
 

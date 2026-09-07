@@ -175,12 +175,18 @@ func TestEndpoints_ListRequiresSession(t *testing.T) {
 }
 
 // TestEndpoints_NonAdminIsForbidden: every endpoint route is admin-only
-// since #106; a signed-in user gets 403, not a redirect and not a page.
+// since #106; a signed-in user gets 403, not a redirect and not a page. Every
+// POST case carries a VALID CSRF token from the non-admin's own session:
+// requirePostAdmin is requirePost(adminOnly(...)), so CSRF is checked before
+// the role, and a regression that dropped adminOnly from one of these routes
+// would otherwise stay green (it would still get past requirePost's CSRF
+// check with a bad token and 403 for the wrong reason).
 func TestEndpoints_NonAdminIsForbidden(t *testing.T) {
 	deps, st := testDeps(t)
 	enableNotifications(&deps)
 	h, _ := New(deps)
 	ep := seedEndpoint(t, st, "hook", "https://example.com/hook", true)
+	d := seedDelivery(t, st, ep.ID, "ip.changed", "failed", "unreachable", 1)
 	usr := seedUser(t, st, "plain@example.com", "user")
 	cookie := signIn(t, deps, usr)
 	sess := sessionFor(t, deps, cookie)
@@ -191,9 +197,25 @@ func TestEndpoints_NonAdminIsForbidden(t *testing.T) {
 	if rec := getPage(t, h, cookie, "/admin/endpoints/"+ep.ID); rec.Code != http.StatusForbidden {
 		t.Errorf("GET /admin/endpoints/{id} as a user = %d, want 403", rec.Code)
 	}
-	form := url.Values{"csrf": {sess.CSRFToken}, "label": {"x"}, "url": {"https://example.com/x"}}
-	if rec := postForm(t, h, cookie, "/admin/endpoints", form); rec.Code != http.StatusForbidden {
-		t.Errorf("POST /admin/endpoints as a user = %d, want 403", rec.Code)
+
+	posts := []struct {
+		name string
+		path string
+		form url.Values
+	}{
+		{"create", "/admin/endpoints", url.Values{"label": {"x"}, "url": {"https://example.com/x"}}},
+		{"set enabled", "/admin/endpoints/" + ep.ID + "/enabled", url.Values{"enabled": {"false"}}},
+		{"test", "/admin/endpoints/" + ep.ID + "/test", url.Values{}},
+		{"delete", "/admin/endpoints/" + ep.ID + "/delete", url.Values{"confirm_label": {ep.Label}}},
+		{"redeliver", "/admin/deliveries/" + strconv.FormatInt(d.ID, 10) + "/redeliver", url.Values{"endpoint_id": {ep.ID}}},
+	}
+	for _, tc := range posts {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.form.Set("csrf", sess.CSRFToken)
+			if rec := postForm(t, h, cookie, tc.path, tc.form); rec.Code != http.StatusForbidden {
+				t.Errorf("POST %s as a user (valid csrf) = %d, want 403", tc.path, rec.Code)
+			}
+		})
 	}
 }
 
@@ -215,6 +237,9 @@ func TestEndpoints_CreateShowsSecretOnceThenNever(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (the reveal renders in the POST response), body=%s", rec.Code, rec.Body.String())
 	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q on the reveal response", got, "no-store")
+	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "Shown once") || !strings.Contains(body, "home-automation") {
 		t.Error("body missing the shown-once warning or the created endpoint's label")
@@ -231,6 +256,35 @@ func TestEndpoints_CreateShowsSecretOnceThenNever(t *testing.T) {
 	}
 	if strings.Contains(rec2.Body.String(), secret) {
 		t.Error("the secret leaked into a later render of the list")
+	}
+}
+
+// TestEndpoints_CreateWithDeniedURLRendersBannerAndKeepsValues: the harness
+// builds NotificationService with allowed=nil, so a private-range URL like
+// https://10.0.0.1/x reaches notify.Permit's denied branch (10.0.0.0/8 is in
+// notify's hardcoded denied list). The form re-renders with the errorBanner
+// partial and both typed values still populated, never a blank form.
+func TestEndpoints_CreateWithDeniedURLRendersBannerAndKeepsValues(t *testing.T) {
+	deps, st := testDeps(t)
+	enableNotifications(&deps)
+	h, _ := New(deps)
+	cookie, sess := adminSession(t, deps, st, "denied@example.com")
+
+	const label, rawURL = "internal-hook", "https://10.0.0.1/x"
+	form := url.Values{"csrf": {sess.CSRFToken}, "label": {label}, "url": {rawURL}}
+	rec := postForm(t, h, cookie, "/admin/endpoints", form)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `role="alert"`) {
+		t.Error("body missing the errorBanner partial (role=\"alert\")")
+	}
+	if !strings.Contains(body, label) {
+		t.Errorf("body missing the re-rendered label %q", label)
+	}
+	if !strings.Contains(body, rawURL) {
+		t.Errorf("body missing the re-rendered URL %q", rawURL)
 	}
 }
 
