@@ -128,12 +128,17 @@ cycle instead of discovering the next missing key on each restart.
 
 ### Notifications (optional, off by default)
 
-DIYDDNS can deliver a signed webhook to endpoints you configure whenever a device's public IP
-changes, plus an on-demand `endpoint.test` probe for checking an endpoint before you trust it.
-This is a generic outbound notifier — it is not a DNS publisher, and it does not replace an
-authoritative DNS record (see the identity paragraph above).
+DIYDDNS can deliver a signed webhook to endpoints an **admin** configures whenever a device
+joins the feed, leaves it, or changes its public IP, plus an on-demand `endpoint.test` probe for
+checking an endpoint before you trust it. This is a generic outbound notifier — it is not a DNS
+publisher, and it does not replace an authoritative DNS record (see the identity paragraph above).
 
-It is **disabled by default**. Turning it on is also what makes `/account/endpoints` exist as a
+Endpoints are **server-global and admin-only**: every enabled endpoint receives every user's
+device events, and only an admin can create, test, disable or delete one. Users cannot configure
+the outbound service. (Endpoints created under the earlier per-user model are removed on upgrade
+and must be recreated by an admin.)
+
+It is **disabled by default**. Turning it on is also what makes `/admin/endpoints` exist as a
 route at all — with notifications off, the whole route group is absent, not merely empty.
 
 | Key | Env var | Notes |
@@ -142,15 +147,30 @@ route at all — with notifications off, the whole route group is absent, not me
 | `notifications.allowed_private_cidrs` | `DIYDDNS_NOTIFICATIONS_ALLOWED_PRIVATE_CIDRS` | operator-only egress allow-list; comma-separated over env; see "Egress policy" below |
 | `notifications.timeout` | `DIYDDNS_NOTIFICATIONS_TIMEOUT` | per-attempt HTTP timeout, default `10s` |
 | `notifications.max_attempts` | `DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS` | delivery attempts (with doubling backoff) before giving up, default `8`, must be 1–16 |
-| `notifications.max_endpoints_per_user` | `DIYDDNS_NOTIFICATIONS_MAX_ENDPOINTS_PER_USER` | endpoints one user may configure, default `5` |
 
-A signed-in user adds an endpoint from `/account/endpoints`: a label and a target URL. The
-response shows that endpoint's signing secret exactly once — copy it immediately, it cannot be
-shown again, and creating another endpoint will not show it again either.
+(`notifications.max_endpoints_per_user` is gone; a config file still carrying it is ignored.)
+
+An admin adds an endpoint from `/admin/endpoints`: a label and a target URL. The response shows
+that endpoint's signing secret exactly once — copy it immediately, it cannot be shown again, and
+creating another endpoint will not show it again either.
 
 #### The payload
 
-Every delivery is one JSON object, one event. Here is a `device.ip_changed` event:
+Every delivery is one JSON object, one event. There are three device events and one rule for
+all of them: **the device's allowed set is now `current`** — an all-null `current` means delete
+that device. Keep state per device `id`; your allow-list is the union of every device's set.
+
+| Type | When | `previous` | `current` | `id` |
+|---|---|---|---|---|
+| `device.ip_changed` | a member's address moved on check-in — **including a device's first check-in**, which is how a new device joins | the old addresses (both `null` on a first check-in) | the new addresses | the `ip_history` row id |
+| `device.added` | a device with an address re-joins the feed: it, or its owner, was re-enabled | both `null` | its addresses | the feed sequence number |
+| `device.removed` | a device leaves the feed: it was disabled or deleted, or its owner was | its last addresses | both `null` | the feed sequence number |
+
+Do not key on `type` to detect a join (it can arrive as either `ip_changed` or `added`), and do
+not remove an address by value: two devices behind one NAT share it, and only the per-device
+union tells you when it is really gone.
+
+Here is a `device.ip_changed` event:
 
 ```json
 {
@@ -158,18 +178,16 @@ Every delivery is one JSON object, one event. Here is a `device.ip_changed` even
   "type": "device.ip_changed",
   "id": 4821,
   "occurred_at": "2026-08-27T14:03:11Z",
-  "device": {
-    "id": "dev_01hh2k9z3q8f7yq6y1n0f0k5xr",
-    "label": "home-router",
-    "hostname": "router.lan",
-    "os": "linux",
-    "client_version": "0.3.0"
-  },
+  "device": { "id": "dev_01hh2k9z3q8f7yq6y1n0f0k5xr", "label": "home-router" },
   "changed": ["ipv4"],
   "current": { "ipv4": "203.0.113.9", "ipv6": null },
   "previous": { "ipv4": "203.0.113.4", "ipv6": null }
 }
 ```
+
+The `device` object carries exactly `id` and `label`. A `device.removed` event has the same shape
+with `current` all-null and `previous` holding the withdrawn addresses; `device.added` is the
+mirror image.
 
 And an `endpoint.test` event, sent when you press "Test" on an endpoint — same envelope, no
 device, no addresses, `id` always `0`:
@@ -213,7 +231,9 @@ after that, forever.
 
 Do not treat gaps in `id` as evidence of a missed delivery: `ip_history.id` is a server-global
 sequence shared by every device on the server, not a per-endpoint or per-device counter, so gaps
-between the ids your endpoint sees are the normal case, not a signal of anything wrong.
+between the ids your endpoint sees are the normal case, not a signal of anything wrong. For
+`device.added` and `device.removed` the id is the feed sequence number rather than an
+`ip_history` id; it is unique per event and the same `(type, id)` rule applies.
 
 #### Verifying a delivery
 
@@ -250,17 +270,17 @@ To verify a delivery:
 4. **Compute HMAC-SHA256** of that canonical string using the raw key from step 1, hex-encode the
    result, and compare it (constant-time) against `X-Diyddns-Signature`.
 
-Once verified, **branch on the body's `type`.** Known types today are `device.ip_changed` and
-`endpoint.test`; **ignore any type you don't recognize** rather than erroring — a future version
-may add new event types, and treating an unknown type as an error breaks forward compatibility
-for every existing consumer.
+Once verified, **branch on the body's `type`.** Known types today are `device.ip_changed`,
+`device.added`, `device.removed` and `endpoint.test`; **ignore any type you don't recognize**
+rather than erroring — a future version may add new event types, and treating an unknown type as
+an error breaks forward compatibility for every existing consumer.
 
 #### `410 Gone` ends that delivery
 
 Respond `410 Gone` and that **one delivery** stops immediately — no further retries for it,
 regardless of attempts remaining. It does **not** disable the endpoint: the next event (a new IP
 change, or another manual test) is still delivered to it. There is no consumer-side way to opt an
-endpoint out of future deliveries in this version; only the account owner can disable or delete the
+endpoint out of future deliveries in this version; only an admin can disable or delete the
 endpoint. Every other non-2xx response (or no response at all — timeout, connection refused, TLS
 failure) is retried with doubling backoff up to `notifications.max_attempts`.
 
@@ -297,13 +317,128 @@ HTTPS client trusts it. **This works on Linux — the shipped container image �
 macOS**: Go's certificate verifier on Darwin uses the OS's own Security framework instead of these
 variables, so a self-built macOS binary needs the CA installed in the system keychain instead.
 
-#### What a user sees on failure
+#### What an admin sees on failure
 
-A failed delivery's cause is reported to the endpoint's owner as exactly one of six fixed classes:
-`blocked`, `unreachable`, `tls`, `rejected`, `gone` ("Target removed (410)"), `internal`. No
-resolved address or raw error text is ever shown, and no status code beyond the `410` already
-implied by the `gone` class itself — that detail is deliberately withheld so a user configuring an
-outbound target cannot use failure detail as a probe of your internal network.
+A failed delivery's cause is reported on the endpoint's page as exactly one of six fixed classes:
+`blocked`, `unreachable`, `tls`, `rejected`, `gone` ("Target removed (410)"), `internal`. The
+resolved address and raw error go to the server log and, for a policy rejection, the audit log.
+
+#### A webhook-only consumer cannot detect a lost event
+
+Delivery is retried until it succeeds or gives up, but the *enqueue* is best-effort: if the
+database write that queues an event fails, that event is never sent and there is no later
+signal that it was lost. A consumer that must never drift should also poll the feed below, which
+reads the current state directly.
+
+### Feed (optional, off by default)
+
+The feed is how a firewall, WAF, Envoy Gateway or other Kubernetes gateway consumes the current
+device addresses: a bearer-token REST snapshot to poll, and a WebSocket stream for live changes.
+It lists **every enabled device of every enabled user** that has an address.
+
+| Key | Env var | Notes |
+|---|---|---|
+| `feed.enabled` | `DIYDDNS_FEED_ENABLED` | `false` by default; when off, none of the routes below nor `/admin/feed` exists |
+
+#### Tokens
+
+An admin mints tokens at `/admin/feed`, one per consumer. The token is shown **once**, starts
+with `ddf_`, and is stored only as a hash. Revoke it from the same page: the row is deleted and
+any open stream authenticated with it is closed with code `4001`. Rotate by minting a new token,
+reconfiguring the consumer, then revoking the old one.
+
+Present it on every request as `Authorization: Bearer ddf_…`. That is the **only** accepted form:
+there is no query-string or basic-auth variant (a fetcher that cannot set a header, such as
+pfSense's URL table, is not supported). Browser JavaScript cannot set headers on a WebSocket
+handshake; the consumers are services.
+
+**What a token discloses:** the current public address, label and last-seen time of every enabled
+device on the server, and their changes as they happen. Treat it like any other credential.
+
+#### `GET /feed/v1/devices.txt`
+
+One CIDR per line, IPv4 as `/32` and IPv6 as `/128`, deduplicated and sorted, after a header line
+that is always present (so an empty feed is still a non-empty body, distinguishable from a
+truncated fetch):
+
+```
+# diyddns feed v1
+203.0.113.9/32
+2001:db8::1/128
+```
+
+This is the format pulled natively by OPNsense URL-table aliases, HAProxy Enterprise
+`dynamic-update`, and ModSecurity `@ipMatchFromFile`, and written verbatim into HAProxy pattern
+files and NGINX `include`s by a cron `curl`. Note it carries no device keying: a consumer of the
+stream's deltas needs the JSON document below as its baseline.
+
+#### `GET /feed/v1/devices.json`
+
+```json
+{
+  "version": 1,
+  "cidrs": ["203.0.113.9/32", "2001:db8::1/128"],
+  "devices": [
+    { "id": "dev_…", "label": "home-router", "ipv4": "203.0.113.9", "ipv6": null,
+      "last_seen_at": "2026-09-05T14:03:11Z" }
+  ]
+}
+```
+
+`cidrs` is byte-for-byte the text document's list, so Kubernetes glue is `jq -r '.cidrs[]'`.
+`devices` carries each member's bare addresses (`null` for an absent family, never `""`). Adding
+fields is compatible; changing their meaning is not (`version` would move).
+
+#### Validators
+
+Each document carries its own strong `ETag` — the SHA-256 of *that document's* bytes, so the two
+differ — plus `Last-Modified` (the time the feed last changed). Poll each URL against the tag it
+gave you; a `.txt` tag never matches `.json` and vice versa. `HEAD` returns the same headers with no body. A request with a
+matching `If-None-Match` gets `304`; `If-Modified-Since` is **ignored** and always answered with
+the full document, because `Last-Modified` is informational — a wrong match would serve a stale
+allow-list. A `304` is never sent to an unconditional request. On an internal error the response
+is `500` with a body, never an empty `200`: keep your last good copy.
+
+```sh
+curl -fsS -H "Authorization: Bearer $TOKEN" --etag-compare etag --etag-save etag \
+  https://ddns.example.com/feed/v1/devices.txt -o new.lst && ! cmp -s new.lst cur.lst \
+  && mv new.lst cur.lst && nginx -s reload
+```
+
+#### `GET /feed/v1/stream` (WebSocket)
+
+Connect with the same header. The first frame is a snapshot — the JSON document above wrapped
+as `{"version":1,"type":"feed.snapshot","feed":{…}}` — then one frame per event, byte-identical
+to the webhook payload (`device.ip_changed`, `device.added`, `device.removed`). Initialise each
+device's allowed set from the snapshot's `ipv4`/`ipv6`, then apply deltas with the rule above.
+
+The server pings every 30 s; a client that stops answering is closed. The client sends nothing
+(frames under 4 KiB are ignored; larger ones close the connection with `1009`). Close codes:
+
+| Code | Meaning | Client action |
+|---|---|---|
+| `1001` | server shutting down, or two pings unanswered | reconnect with backoff |
+| `1009` | you sent a frame over 4 KiB | reconnect |
+| `1011` | the snapshot could not be rendered | reconnect with backoff |
+| `1013` | you fell 64 events behind and were cut | reconnect; the snapshot resyncs you |
+| `4001` | your token was revoked | stop |
+
+**The stream is at-most-once and non-durable.** An event that occurs while you are disconnected,
+or that overflowed your buffer, is not replayed; reconnecting and taking the new snapshot as
+authoritative is the recovery path. One consequence of that: a delta queued just before your
+snapshot was rendered can be older than the snapshot for a device that changed twice in that
+instant, so that device may briefly regress until the newer delta lands — and if *that* delta is
+the one lost, until your next snapshot or poll. At most 32 streams are served at once; the 33rd
+handshake gets `503`.
+
+#### Kubernetes glue
+
+```sh
+curl -fsS -H "Authorization: Bearer $TOKEN" https://ddns.example.com/feed/v1/devices.json \
+  | jq '{spec:{authorization:{rules:[{action:"Allow",principal:{clientCIDRs:.cidrs}}]}}}' \
+  | kubectl patch securitypolicy allow-home --type merge -p "$(cat)"
+```
+
 ### Retention (optional, off by default)
 
 DIYDDNS records an `ip_history` row every time a device's public IP changes, and
@@ -340,11 +475,6 @@ be sent or retried is never removed, however old it is, because deleting one
 would silently drop work with nothing left to retry it. Enable this if you use
 notifications: without it the table grows with every IP change, for every
 endpoint.
-
-The attempt ledger behind the per-user rate limit (`notification_attempts`) is
-**not** configurable and needs no key. Its rows only mean anything inside a live
-five-minute budget window, so they are swept hourly on age alone — the same way
-expired sessions and replay nonces are.
 
 **Deletion is permanent and there is no undo.** When you first enable a key, the
 next sweep removes everything already outside the window — on an aged database
