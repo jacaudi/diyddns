@@ -10,8 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // maxRequestIDLen bounds an inbound correlation id. 128 admits a UUIDv7 (36)
@@ -86,11 +85,7 @@ func RequestID(header string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := r.Header.Get(header)
 			if !validRequestID(id) {
-				if v7, err := uuid.NewV7(); err == nil {
-					id = v7.String()
-				} else {
-					id = uuid.NewString()
-				}
+				id = uuid.NewV7().String()
 			}
 			w.Header().Set(header, id)
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey, id)))

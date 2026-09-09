@@ -340,8 +340,7 @@ func TestStream_RevokeCloses4001(t *testing.T) {
 
 	hub.CloseToken("tok1")
 	_, err := readFrame(t, conn, 5*time.Second)
-	var ce websocket.CloseError
-	if !errors.As(err, &ce) || ce.Code != 4001 || ce.Reason != "token revoked" {
+	if ce, ok := errors.AsType[websocket.CloseError](err); !ok || ce.Code != 4001 || ce.Reason != "token revoked" {
 		t.Fatalf("after revoke: err = %v, want close 4001 token revoked", err)
 	}
 	hub.WaitPumps()
@@ -418,8 +417,7 @@ func TestStream_PeerThatStopsAnsweringPingsIsClosed1001(t *testing.T) {
 
 	start := time.Now()
 	_, err := readFrame(t, conn, 5*time.Second)
-	var ce websocket.CloseError
-	if !errors.As(err, &ce) || ce.Code != websocket.StatusGoingAway || ce.Reason != "ping failed" {
+	if ce, ok := errors.AsType[websocket.CloseError](err); !ok || ce.Code != websocket.StatusGoingAway || ce.Reason != "ping failed" {
 		t.Fatalf("err = %v, want 1001 ping failed", err)
 	}
 	if d := time.Since(start); d > 2*200*time.Millisecond+100*time.Millisecond+2*time.Second {

@@ -190,7 +190,7 @@ func TestHub_SubscribeRacesShutdownCleanly(t *testing.T) {
 			}
 		})
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			_ = h.Shutdown(ctx)
 		})

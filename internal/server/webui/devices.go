@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -88,12 +89,9 @@ func matchesQuery(d store.Device, q string) bool {
 		return true
 	}
 	q = strings.ToLower(q)
-	for _, field := range []string{d.Label, d.Hostname, d.CurrentIPv4, d.CurrentIPv6} {
-		if strings.Contains(strings.ToLower(field), q) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc([]string{d.Label, d.Hostname, d.CurrentIPv4, d.CurrentIPv6}, func(field string) bool {
+		return strings.Contains(strings.ToLower(field), q)
+	})
 }
 
 // deviceSummary renders the page subtitle, e.g. "3 devices · 2 online, 1 stale".

@@ -157,14 +157,13 @@ func readLoop(conn *websocket.Conn, sub *subscriber) {
 // connection) cancel the subscriber. sub.ctx is observed only with select,
 // and Ping gets context.Background() plus its own timeout (design §5.1).
 func pingLoop(conn *websocket.Conn, sub *subscriber) {
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
+	tick := time.Tick(pingInterval)
 	failures := 0
 	for {
 		select {
 		case <-sub.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tick:
 			pctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 			err := conn.Ping(pctx)
 			cancel()

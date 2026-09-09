@@ -15,7 +15,7 @@ func newTestStore(t *testing.T) (*Store, context.Context) {
 
 	path := filepath.Join(t.TempDir(), "test.db")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 
 	s, err := Open(ctx, path)

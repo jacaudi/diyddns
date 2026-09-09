@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -150,10 +151,5 @@ func followToCallback(t *testing.T, client *http.Client, idpAuthURL string) stri
 
 // hasCookie reports whether resp's Set-Cookie headers include one named name.
 func hasCookie(resp *http.Response, name string) bool {
-	for _, c := range resp.Cookies() {
-		if c.Name == name {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(resp.Cookies(), func(c *http.Cookie) bool { return c.Name == name })
 }

@@ -74,15 +74,15 @@ func TestWebUIPatternsAreReachable(t *testing.T) {
 func concretePath(p string) string {
 	p = strings.ReplaceAll(p, "{$}", "")
 	for {
-		open := strings.Index(p, "{")
-		if open < 0 {
+		before, rest, ok := strings.Cut(p, "{")
+		if !ok {
 			return p
 		}
-		closeIdx := strings.Index(p[open:], "}")
-		if closeIdx < 0 {
+		_, after, ok := strings.Cut(rest, "}")
+		if !ok {
 			return p
 		}
-		p = p[:open] + "pattern-probe" + p[open+closeIdx+1:]
+		p = before + "pattern-probe" + after
 	}
 }
 

@@ -45,7 +45,7 @@ func (f *fakeInvalidator) Invalidate(deviceID string) {
 // confirmation exists to protect.
 func testDeps(t *testing.T) (Deps, *store.Store) {
 	t.Helper()
-	st, err := store.Open(context.Background(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -102,7 +102,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 	deps, _ := testDeps(t)
 
-	usr, link, _, err := deps.Admin.CreateUserInvite(context.Background(), "actor-id", "invitee@example.com", "user")
+	usr, link, _, err := deps.Admin.CreateUserInvite(t.Context(), "actor-id", "invitee@example.com", "user")
 	if err != nil {
 		t.Fatalf("CreateUserInvite: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
 	}
@@ -110,7 +110,7 @@ func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 		t.Error("CreateUserInvite: empty invite link")
 	}
 
-	if link, _, err := deps.Grants.IssueRecovery(context.Background(), "actor-id", usr); err != nil {
+	if link, _, err := deps.Grants.IssueRecovery(t.Context(), "actor-id", usr); err != nil {
 		t.Fatalf("IssueRecovery: %v (a nil PasskeyService fails here with ErrWebAuthnUnavailable)", err)
 	} else if link == "" {
 		t.Error("IssueRecovery: empty recovery link")
@@ -121,11 +121,11 @@ func TestTestDeps_GrantsAndAdminAreFunctional(t *testing.T) {
 // http.Cookie a test can attach to a request to authenticate as that user.
 func seedSessionCookie(t *testing.T, st *store.Store, sm *auth.SessionManager, email string) (*http.Cookie, store.Session) {
 	t.Helper()
-	usr, err := st.Users().Create(context.Background(), store.User{Email: email, Role: "user"})
+	usr, err := st.Users().Create(t.Context(), store.User{Email: email, Role: "user"})
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	sess, err := sm.Create(context.Background(), usr.ID, "127.0.0.1", "test-agent")
+	sess, err := sm.Create(t.Context(), usr.ID, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("session create: %v", err)
 	}
@@ -3100,15 +3100,14 @@ func nextPagerURL(t *testing.T, body string) string {
 
 func tableBody(t *testing.T, body string) string {
 	t.Helper()
-	start := strings.Index(body, "<tbody")
-	if start == -1 {
+	_, rest, ok := strings.Cut(body, "<tbody")
+	if !ok {
 		return "" // no table rendered: an empty-state page
 	}
-	openTagEnd := strings.IndexByte(body[start:], '>')
-	if openTagEnd == -1 {
+	_, after, ok := strings.Cut(rest, ">")
+	if !ok {
 		return ""
 	}
-	after := body[start+openTagEnd+1:]
 	rows, _, _ := strings.Cut(after, "</tbody>")
 	return rows
 }

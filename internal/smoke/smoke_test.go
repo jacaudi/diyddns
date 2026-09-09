@@ -64,8 +64,8 @@ func TestSmoke(t *testing.T) {
 
 	// A cookie jar is mandatory, not a convenience: the WebAuthn ceremony
 	// carries its sealed challenge between begin and finish in a cookie, and
-	// that cookie is Secure under the shipped defaults — see newBrowserJar.
-	client := &http.Client{Jar: newBrowserJar(t), Timeout: 30 * time.Second}
+	// that cookie is Secure under the shipped defaults — see newJar.
+	client := &http.Client{Jar: newJar(t), Timeout: 30 * time.Second}
 
 	// The relying party must match what the server derived from
 	// server.base_url, or every assertion fails origin validation.

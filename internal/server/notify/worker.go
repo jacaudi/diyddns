@@ -87,13 +87,12 @@ func NewWorker(st *store.Store, cs *Clients, key []byte, maxAttempts int, audit 
 // cancelled. Started as a goroutine by Server.Run; ctx cancellation is its
 // only shutdown path.
 func (w *Worker) Run(ctx context.Context) {
-	ticker := time.NewTicker(notifierInterval)
-	defer ticker.Stop()
+	tick := time.Tick(notifierInterval)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tick:
 			w.sweep(ctx)
 		}
 	}

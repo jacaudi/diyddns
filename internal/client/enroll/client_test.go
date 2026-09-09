@@ -1,7 +1,6 @@
 package enroll
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -50,7 +49,7 @@ func TestDeviceStartStatusMapping(t *testing.T) {
 				w.WriteHeader(tt.status)
 				_, _ = w.Write([]byte(tt.body))
 			})
-			ds, err := c.OIDCDeviceStart(context.Background())
+			ds, err := c.OIDCDeviceStart(t.Context())
 			if tt.want == nil {
 				if err != nil {
 					t.Fatalf("err = %v", err)
@@ -95,7 +94,7 @@ func TestDevicePollStatusMapping(t *testing.T) {
 				w.WriteHeader(tt.status)
 				_, _ = w.Write([]byte(tt.body))
 			})
-			res, err := c.OIDCDevicePoll(context.Background(), "flow123")
+			res, err := c.OIDCDevicePoll(t.Context(), "flow123")
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Errorf("err = %v, want %v", err, tt.wantErr)
@@ -119,7 +118,7 @@ func TestCapabilitiesDecode(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"server_version":"1.0","oidc_enabled":true,"oidc_device_enabled":true}`))
 	})
-	caps, err := c.Capabilities(context.Background())
+	caps, err := c.Capabilities(t.Context())
 	if err != nil || !caps.OIDCDeviceEnabled {
 		t.Fatalf("caps = %+v err = %v", caps, err)
 	}
@@ -133,7 +132,7 @@ func TestNewClientCACertTrustsTLSServer(t *testing.T) {
 
 	// Without the CA, the self-signed cert is rejected.
 	plain, _ := NewClient(ts.URL, ClientOptions{})
-	if _, err := plain.Capabilities(context.Background()); err == nil {
+	if _, err := plain.Capabilities(t.Context()); err == nil {
 		t.Fatal("expected TLS verification failure without CA")
 	}
 
@@ -147,7 +146,7 @@ func TestNewClientCACertTrustsTLSServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient(ca): %v", err)
 	}
-	if _, err := trusting.Capabilities(context.Background()); err != nil {
+	if _, err := trusting.Capabilities(t.Context()); err != nil {
 		t.Fatalf("Capabilities with CA: %v", err)
 	}
 }
@@ -171,7 +170,7 @@ func TestClient_EnrollCode_Success(t *testing.T) {
 			"secret":    base64.StdEncoding.EncodeToString([]byte("rawsecret")),
 		})
 	})
-	res, err := c.EnrollCode(context.Background(), "ABC-123")
+	res, err := c.EnrollCode(t.Context(), "ABC-123")
 	if err != nil {
 		t.Fatalf("EnrollCode: %v", err)
 	}
@@ -201,7 +200,7 @@ func TestClient_EnrollCode_StatusMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newTestClient(t, tt.handler)
-			if _, err := c.EnrollCode(context.Background(), "x"); !errors.Is(err, tt.wantErr) {
+			if _, err := c.EnrollCode(t.Context(), "x"); !errors.Is(err, tt.wantErr) {
 				t.Errorf("err = %v, want %v", err, tt.wantErr)
 			}
 		})

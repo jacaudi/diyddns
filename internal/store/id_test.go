@@ -2,8 +2,7 @@ package store
 
 import (
 	"testing"
-
-	"github.com/google/uuid"
+	"uuid"
 )
 
 func TestNewIDIsValidUUIDv7(t *testing.T) {
@@ -13,8 +12,9 @@ func TestNewIDIsValidUUIDv7(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewID()=%q is not a valid UUID: %v", got, err)
 		}
-		if parsed.Version() != 7 {
-			t.Fatalf("NewID()=%q is UUIDv%d, want v7", got, parsed.Version())
+		// RFC 9562 §4.2: the version is the high nibble of octet 6.
+		if v := parsed[6] >> 4; v != 7 {
+			t.Fatalf("NewID()=%q is UUIDv%d, want v7", got, v)
 		}
 	}
 }

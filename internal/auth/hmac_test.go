@@ -60,7 +60,7 @@ func signedParts(secret []byte, now int64, body []byte) RequestParts {
 func TestVerify_Success(t *testing.T) {
 	v, _, _, secret := newFixture(t)
 	p := signedParts(secret, 1720000000, []byte(`{"ipv4":"1.2.3.4"}`))
-	id, err := v.Verify(context.Background(), p, 1720000000)
+	id, err := v.Verify(t.Context(), p, 1720000000)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestVerify_Success(t *testing.T) {
 func TestVerify_SkewOut(t *testing.T) {
 	v, _, _, secret := newFixture(t)
 	p := signedParts(secret, 1720000000, nil)
-	_, err := v.Verify(context.Background(), p, 1720000000+121)
+	_, err := v.Verify(t.Context(), p, 1720000000+121)
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("want ErrUnauthorized, got %v", err)
 	}
@@ -82,7 +82,7 @@ func TestVerify_BadSignature(t *testing.T) {
 	v, _, _, secret := newFixture(t)
 	p := signedParts(secret, 1720000000, nil)
 	p.Signature = "deadbeef"
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("want ErrUnauthorized, got %v", err)
 	}
 }
@@ -90,10 +90,10 @@ func TestVerify_BadSignature(t *testing.T) {
 func TestVerify_Replay(t *testing.T) {
 	v, _, _, secret := newFixture(t)
 	p := signedParts(secret, 1720000000, nil)
-	if _, err := v.Verify(context.Background(), p, 1720000000); err != nil {
+	if _, err := v.Verify(t.Context(), p, 1720000000); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("replay must be rejected, got %v", err)
 	}
 }
@@ -105,7 +105,7 @@ func TestVerify_DisabledDevice(t *testing.T) {
 	v := NewVerifier(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed, Disabled: true}},
 		fakeUsers{u: store.User{ID: "u"}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
 	p := signedParts(secret, 1720000000, nil)
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("disabled device must be rejected, got %v", err)
 	}
 }
@@ -117,7 +117,7 @@ func TestVerify_DisabledUser(t *testing.T) {
 	v := NewVerifier(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed}},
 		fakeUsers{u: store.User{ID: "u", Disabled: true}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
 	p := signedParts(secret, 1720000000, nil)
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("disabled user must be rejected, got %v", err)
 	}
 }
@@ -126,7 +126,7 @@ func TestVerify_UnknownDevice(t *testing.T) {
 	key := make([]byte, 32)
 	v := NewVerifier(fakeDevices{err: store.ErrNotFound}, fakeUsers{}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
 	p := RequestParts{Device: "nope", Timestamp: "1720000000", Nonce: "n", Signature: "x", Method: "GET", Path: "/agent/v1/self"}
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("unknown device must be rejected, got %v", err)
 	}
 }
@@ -174,7 +174,7 @@ func TestVerifier_Invalidate_EvictsCachedSecret(t *testing.T) {
 	}
 
 	// Seed the cache with secretA by verifying a request signed with it.
-	if _, err := v.Verify(context.Background(), parts(secretA, "n1"), now); err != nil {
+	if _, err := v.Verify(t.Context(), parts(secretA, "n1"), now); err != nil {
 		t.Fatalf("seed verify with secretA: %v", err)
 	}
 
@@ -183,13 +183,13 @@ func TestVerifier_Invalidate_EvictsCachedSecret(t *testing.T) {
 
 	// Without Invalidate: a request signed with the NEW secretB must FAIL
 	// (stale cache still serves secretA).
-	if _, err := v.Verify(context.Background(), parts(secretB, "n2"), now); err == nil {
+	if _, err := v.Verify(t.Context(), parts(secretB, "n2"), now); err == nil {
 		t.Fatal("expected stale cache to reject the new secret before Invalidate")
 	}
 
 	// After Invalidate: the new secretB must now verify.
 	v.Invalidate(dr.dev.ID)
-	if _, err := v.Verify(context.Background(), parts(secretB, "n3"), now); err != nil {
+	if _, err := v.Verify(t.Context(), parts(secretB, "n3"), now); err != nil {
 		t.Fatalf("expected new secret to verify after Invalidate, got %v", err)
 	}
 }
@@ -198,7 +198,7 @@ func TestVerifier_Invalidate_EvictsCachedSecret(t *testing.T) {
 func TestVerify_NonNumericTimestamp(t *testing.T) {
 	v, _, _, _ := newFixture(t)
 	p := RequestParts{Device: "dev1", Timestamp: "not-a-number", Nonce: "n", Signature: "x", Method: "GET", Path: "/agent/v1/self"}
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("non-numeric timestamp must be rejected, got %v", err)
 	}
 }
@@ -208,7 +208,7 @@ func TestVerify_CorruptSecretHash(t *testing.T) { // OpenSecret fails in secretF
 	v := NewVerifier(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: "not-valid-sealed"}},
 		fakeUsers{u: store.User{ID: "u"}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
 	p := RequestParts{Device: "dev1", Timestamp: "1720000000", Nonce: "n", Signature: "x", Method: "GET", Path: "/agent/v1/self"}
-	if _, err := v.Verify(context.Background(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
+	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("corrupt secret_hash must be rejected, got %v", err)
 	}
 }

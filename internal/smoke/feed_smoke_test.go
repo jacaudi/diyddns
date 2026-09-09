@@ -50,7 +50,7 @@ func TestFeedSmoke(t *testing.T) {
 
 	step(t, "claim the first admin and sign in")
 	token := scrapeToken(t, srv)
-	client := &http.Client{Jar: newBrowserJar(t), Timeout: 30 * time.Second}
+	client := &http.Client{Jar: newJar(t), Timeout: 30 * time.Second}
 	rp := virtualwebauthn.RelyingParty{Name: "DIYDDNS", ID: rpIDFor(t, addr), Origin: baseURL}
 	attOpts := beginClaim(t, client, baseURL, token)
 	authr := virtualwebauthn.NewAuthenticatorWithOptions(
@@ -91,7 +91,7 @@ func TestFeedSmoke(t *testing.T) {
 	}
 
 	step(t, "open the stream and receive the snapshot")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	conn, dialResp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(baseURL, "http")+"/feed/v1/stream", &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + feedToken}},
@@ -187,7 +187,7 @@ func TestFeedSmoke(t *testing.T) {
 		t.Fatalf("could not find the token's revoke form:\n%s", tokensPage)
 	}
 	postFormExpect(t, client, fmt.Sprintf("%s/admin/feed/tokens/%s/revoke", baseURL, idm[1]), csrf, nil, http.StatusOK)
-	rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	rctx, rcancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer rcancel()
 	if _, _, err := conn.Read(rctx); websocket.CloseStatus(err) != 4001 {
 		t.Fatalf("after revoke: read err = %v, want close status 4001", err)
@@ -261,7 +261,7 @@ func feedGet(t *testing.T, c *http.Client, rawURL, token string) (int, []byte) {
 
 func readStreamFrame(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	_, b, err := conn.Read(ctx)
 	if err != nil {

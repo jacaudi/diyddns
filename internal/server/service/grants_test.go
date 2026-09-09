@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -89,7 +90,7 @@ func (m *fakeMailer) LastCtxErr() error {
 func (m *fakeMailer) Sent() []sentEmail {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]sentEmail(nil), m.sent...)
+	return slices.Clone(m.sent)
 }
 
 var _ email.Mailer = (*fakeMailer)(nil)
@@ -162,11 +163,11 @@ func extractToken(t *testing.T, link string) string {
 // redeem exactly as a user clicking the emailed link would.
 func extractLinkFromBody(t *testing.T, body string) string {
 	t.Helper()
-	i := strings.Index(body, "https://")
-	if i < 0 {
+	_, rest, found := strings.Cut(body, "https://")
+	if !found {
 		t.Fatalf("email body has no https:// link: %q", body)
 	}
-	link := body[i:]
+	link := "https://" + rest
 	if j := strings.IndexAny(link, " \r\n\t"); j >= 0 {
 		link = link[:j]
 	}

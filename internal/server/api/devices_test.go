@@ -174,7 +174,7 @@ func newOIDCHarness(t *testing.T, cfgOIDC config.OIDCCfg) fullHarness {
 // local password auth is gone. role is "user" or "admin".
 func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 	t.Helper()
-	u, err := st.Users().Create(context.Background(), store.User{Email: email, Role: role})
+	u, err := st.Users().Create(t.Context(), store.User{Email: email, Role: role})
 	if err != nil {
 		t.Fatalf("seed user %q: %v", email, err)
 	}
@@ -189,12 +189,12 @@ func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 // authenticates through sessionMiddleware exactly as a browser's would.
 func sessionFor(t *testing.T, h fullHarness, email string) (*http.Cookie, string) {
 	t.Helper()
-	u, err := h.st.Users().GetByEmail(context.Background(), email)
+	u, err := h.st.Users().GetByEmail(t.Context(), email)
 	if err != nil {
 		t.Fatalf("sessionFor lookup %q: %v", email, err)
 	}
 	sm := auth.NewSessionManager(h.st.Sessions(), h.st.Users(), time.Hour, time.Minute)
-	sess, err := sm.Create(context.Background(), u.ID, "", "")
+	sess, err := sm.Create(t.Context(), u.ID, "", "")
 	if err != nil {
 		t.Fatalf("sessionFor create for %q: %v", email, err)
 	}

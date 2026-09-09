@@ -1,7 +1,6 @@
 package ipdiscovery
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +29,7 @@ func TestHTTPProvider_ParseAndFamilyValidate(t *testing.T) {
 			// Use the default client (not family-locked) so httptest's 127.0.0.1
 			// is reachable; family validation is on the PARSED address, not the dial.
 			p := NewHTTPProvider(srv.URL, tt.family, srv.Client())
-			addr, err := p.Lookup(context.Background())
+			addr, err := p.Lookup(t.Context())
 			if tt.wantOK {
 				if err != nil {
 					t.Fatalf("Lookup err = %v, want nil", err)
@@ -56,7 +55,7 @@ func TestHTTPProvider_NonOKStatus(t *testing.T) {
 	defer srv.Close()
 
 	p := NewHTTPProvider(srv.URL, FamilyV4, srv.Client())
-	addr, err := p.Lookup(context.Background())
+	addr, err := p.Lookup(t.Context())
 	if err == nil {
 		t.Fatal("Lookup err = nil, want error for non-200 status")
 	}
@@ -82,7 +81,7 @@ func TestHTTPProvider_OversizedBody(t *testing.T) {
 	defer srv.Close()
 
 	p := NewHTTPProvider(srv.URL, FamilyV4, srv.Client())
-	addr, err := p.Lookup(context.Background())
+	addr, err := p.Lookup(t.Context())
 	if err == nil {
 		t.Fatal("Lookup err = nil, want error for oversized body")
 	}

@@ -40,7 +40,7 @@ func TestDiscoverer_Quorum(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewDiscoverer: %v", err)
 			}
-			v4, _ := d.Discover(context.Background())
+			v4, _ := d.Discover(t.Context())
 			if v4.OK != tt.wantOK {
 				t.Fatalf("OK = %v, want %v", v4.OK, tt.wantOK)
 			}
@@ -70,7 +70,7 @@ func TestDiscoverer_DisabledFamilySkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDiscoverer: %v", err)
 	}
-	v4, v6 := d.Discover(context.Background())
+	v4, v6 := d.Discover(t.Context())
 	if v4.OK || v6.OK {
 		t.Errorf("disabled families should both be !OK, got v4=%v v6=%v", v4.OK, v6.OK)
 	}

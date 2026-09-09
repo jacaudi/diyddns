@@ -4,6 +4,7 @@
 package oidctest
 
 import (
+	"cmp"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -66,12 +67,12 @@ func New(t *testing.T, opts Options) *IdP {
 		pollInterval: 1,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", i.handleDiscovery)
-	mux.HandleFunc("/jwks", i.handleJWKS)
-	mux.HandleFunc("/authorize", i.handleAuthorize)
-	mux.HandleFunc("/token", i.handleToken)
+	mux.HandleFunc("GET /.well-known/openid-configuration", i.handleDiscovery)
+	mux.HandleFunc("GET /jwks", i.handleJWKS)
+	mux.HandleFunc("GET /authorize", i.handleAuthorize)
+	mux.HandleFunc("POST /token", i.handleToken)
 	if opts.SupportDevice {
-		mux.HandleFunc("/device", i.handleDevice)
+		mux.HandleFunc("POST /device", i.handleDevice)
 	}
 	i.srv = httptest.NewServer(mux)
 	i.Issuer = i.srv.URL
@@ -163,20 +164,13 @@ func (i *IdP) handleToken(w http.ResponseWriter, r *http.Request) {
 	// auth-code grant. An explicit Claims.Nonce still wins, so tests that
 	// stage a deliberately wrong nonce keep asserting the mismatch path.
 	claims := i.authCode
-	if claims.Nonce == "" {
-		claims.Nonce = i.seenNonce
-	}
+	claims.Nonce = cmp.Or(claims.Nonce, i.seenNonce)
 	writeJSON(w, map[string]any{"access_token": "at", "token_type": "Bearer", "id_token": i.sign(claims)})
 }
 
 func (i *IdP) sign(c Claims) string {
-	if c.Audience == "" {
-		c.Audience = "test-client"
-	}
-	exp := c.ExpiresIn
-	if exp == 0 {
-		exp = 300
-	}
+	c.Audience = cmp.Or(c.Audience, "test-client")
+	exp := cmp.Or(c.ExpiresIn, 300)
 	now := time.Now().Unix()
 	payload := map[string]any{
 		"iss": i.Issuer,

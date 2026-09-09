@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -22,10 +21,10 @@ import (
 func TestAdminErr_MapsErrWebAuthnUnavailable(t *testing.T) {
 	deps := ServerDeps{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
-	err := adminErr(context.Background(), deps, "create user", service.ErrWebAuthnUnavailable)
+	err := adminErr(t.Context(), deps, "create user", service.ErrWebAuthnUnavailable)
 
-	var se huma.StatusError
-	if !errors.As(err, &se) {
+	se, ok := errors.AsType[huma.StatusError](err)
+	if !ok {
 		t.Fatalf("adminErr returned %v (%T), want a huma.StatusError", err, err)
 	}
 	if se.GetStatus() != 503 {

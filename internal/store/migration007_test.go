@@ -19,7 +19,7 @@ import (
 // leave nothing pre-00007 to seed.
 func openAtVersion6(t *testing.T) (*sql.DB, context.Context) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	t.Cleanup(cancel)
 
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migration007.db"))

@@ -96,8 +96,7 @@ func TestStream_SnapshotThenDeltaThenRevoke(t *testing.T) {
 	if websocket.CloseStatus(err) != 4001 {
 		t.Fatalf("after revoke: read err = %v, want close status 4001", err)
 	}
-	var ce websocket.CloseError
-	if errors.As(err, &ce) && ce.Reason != "token revoked" {
+	if ce, ok := errors.AsType[websocket.CloseError](err); ok && ce.Reason != "token revoked" {
 		t.Errorf("close reason = %q, want token revoked", ce.Reason)
 	}
 	hub.WaitPumps()

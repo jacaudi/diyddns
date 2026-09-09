@@ -44,8 +44,8 @@ func TestAdminInviteIsEmailed(t *testing.T) {
 
 	// The cookie jar is mandatory: the WebAuthn ceremony carries its sealed
 	// challenge between begin and finish in a cookie, and that cookie is Secure
-	// under the shipped defaults — see newBrowserJar.
-	client := &http.Client{Jar: newBrowserJar(t), Timeout: 30 * time.Second}
+	// under the shipped defaults — see newJar.
+	client := &http.Client{Jar: newJar(t), Timeout: 30 * time.Second}
 
 	rp := virtualwebauthn.RelyingParty{Name: "DIYDDNS", ID: rpIDFor(t, addr), Origin: baseURL}
 	attOpts := beginClaim(t, client, baseURL, token)
