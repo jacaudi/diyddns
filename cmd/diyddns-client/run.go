@@ -78,9 +78,9 @@ func newRunCmd() *cobra.Command {
 				ClientVersion: version.Current().Version,
 			})
 			if once {
-				return p.RunOnce(cmd.Context())
+				return explainRunError(p.RunOnce(cmd.Context()), creds.ServerURL)
 			}
-			return p.Run(cmd.Context())
+			return explainRunError(p.Run(cmd.Context()), creds.ServerURL)
 		},
 	}
 	cmd.Flags().BoolVar(&once, "once", false, "run a single discover+check-in and exit")
@@ -89,6 +89,19 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&credFile, "credentials-file", "", "path to credentials.json (default: user config dir)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to client config.yaml")
 	return cmd
+}
+
+// explainRunError turns the poller's credential rejection into the message an
+// operator reads in `docker logs` (#102): the cause and the remedy, not a bare
+// "unauthorized". The wrapped sentinel is preserved so errors.Is still holds.
+// Every other error — and nil — passes through untouched.
+func explainRunError(err error, serverURL string) error {
+	if err == nil || !errors.Is(err, checkin.ErrUnauthorized) {
+		return err
+	}
+	return fmt.Errorf("the server rejected this device's credentials (%w): the device secret was rotated or the device was disabled. "+
+		"Mint a new enrollment code at %s/devices/new, then run `diyddns-client enroll --server %s --code <code> --force`",
+		err, serverURL, serverURL)
 }
 
 // buildDiscoverer wires providers per enabled family (config override, else
