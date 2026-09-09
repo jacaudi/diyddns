@@ -8,6 +8,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// execer is the write half of database/sql, satisfied by both *sql.DB and
+// *sql.Tx. It lets one SQL body serve both a repository method running on
+// the pool and the same write running inside RecordIPChange's transaction,
+// so no statement is duplicated. Unexported on purpose: transactions never
+// leave this package (see RecordIPChange).
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // Store is DIYDDNS's persistence handle. It wraps a single *sql.DB pool
 // configured with the runtime pragmas and migrations applied. Obtain one
 // via Open and release it via Close.

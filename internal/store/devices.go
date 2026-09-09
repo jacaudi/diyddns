@@ -212,7 +212,14 @@ func (r *DeviceRepo) ListAll(ctx context.Context) ([]Device, error) {
 // UpdateIP updates the IP address fields, metadata, and last_seen_at for a device.
 // Returns ErrNotFound if no row matched.
 func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt int64) error {
-	res, err := r.db.ExecContext(ctx,
+	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os, lastSeenAt, NowUnix())
+}
+
+// updateDeviceIP carries the UPDATE itself, taking updatedAt explicitly so a
+// caller writing several rows for one event can stamp them all identically.
+// Runs on the pool for UpdateIP and on the transaction for RecordIPChange.
+func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt, updatedAt int64) error {
+	res, err := ex.ExecContext(ctx,
 		`UPDATE devices
 		 SET current_ipv4 = ?, current_ipv6 = ?, client_version = ?,
 		     hostname = ?, os = ?, last_seen_at = ?, updated_at = ?
@@ -223,7 +230,7 @@ func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion
 		nullIfEmpty(hostname),
 		nullIfEmpty(os),
 		nullIfZero(lastSeenAt),
-		NowUnix(),
+		updatedAt,
 		id,
 	)
 	if err != nil {
