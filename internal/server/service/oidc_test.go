@@ -164,6 +164,121 @@ func TestOIDCLoginOrLink(t *testing.T) {
 		}
 	})
 
+	// #93: the mirror of the case above. A legacy row stored in display-name
+	// form (created before #87's boundary validations existed) plus the same
+	// display-name-form claim must resolve to that ORIGINAL row. Before the
+	// fix the claim was canonicalized, GetByEmail missed the raw row, signup
+	// succeeded, and the user landed in a second empty account while the row
+	// holding their devices and history was orphaned.
+	t.Run("legacy display-name row is linked, not duplicated", func(t *testing.T) {
+		st := openTestStore(t)
+		legacy, err := st.Users().Create(t.Context(), store.User{Email: "Bob <bob@example.test>", Role: "user"})
+		if err != nil {
+			t.Fatalf("create legacy user: %v", err)
+		}
+		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-legacy", "Bob <bob@example.test>", true)
+		if err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		if got.ID != legacy.ID {
+			t.Fatalf("logged in as %s, want the original row %s", got.ID, legacy.ID)
+		}
+		users, err := st.Users().List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(users) != 1 {
+			t.Fatalf("users = %d, want 1 - the login must not create a second account", len(users))
+		}
+	})
+
+	// The half of #93 the issue does not name. The claim form is irrelevant:
+	// what is stale is the ROW, so an ordinary canonical claim misses the
+	// legacy row exactly as the display-name one does. A fallback that simply
+	// retried the raw claim as a second lookup key would pass the test above
+	// and still fail this one.
+	t.Run("legacy display-name row is found by an ordinary canonical claim", func(t *testing.T) {
+		st := openTestStore(t)
+		legacy, err := st.Users().Create(t.Context(), store.User{Email: "Bob <bob@example.test>", Role: "user"})
+		if err != nil {
+			t.Fatalf("create legacy user: %v", err)
+		}
+		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-legacy-canon", "bob@example.test", true)
+		if err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		if got.ID != legacy.ID {
+			t.Fatalf("logged in as %s, want the original row %s", got.ID, legacy.ID)
+		}
+		users, err := st.Users().List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(users) != 1 {
+			t.Fatalf("users = %d, want 1 - the login must not create a second account", len(users))
+		}
+	})
+
+	// Linking repairs the stored address. Until it is canonical the row is
+	// rejected by email.checkSendable, so the user receives no invite and no
+	// recovery mail. Asserted against the STORE, not the returned struct.
+	t.Run("linking a legacy row canonicalizes its stored address", func(t *testing.T) {
+		st := openTestStore(t)
+		legacy, err := st.Users().Create(t.Context(), store.User{Email: "Bob <bob@example.test>", Role: "user"})
+		if err != nil {
+			t.Fatalf("create legacy user: %v", err)
+		}
+		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-legacy-repair", "Bob <bob@example.test>", true); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		reloaded, err := st.Users().GetByID(t.Context(), legacy.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if reloaded.Email != "bob@example.test" {
+			t.Errorf("stored email = %q, want %q", reloaded.Email, "bob@example.test")
+		}
+	})
+
+	// A legacy row that CANNOT be linked must still not fall through to
+	// signup. Both reasons a link is refused get their own case, because they
+	// are separate branches and each one used to end in a duplicate account.
+	t.Run("legacy display-name row with an unverified claim is rejected, not duplicated", func(t *testing.T) {
+		st := openTestStore(t)
+		if _, err := st.Users().Create(t.Context(), store.User{Email: "Bob <bob@example.test>", Role: "user"}); err != nil {
+			t.Fatalf("create legacy user: %v", err)
+		}
+		if _, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-legacy-unverified", "Bob <bob@example.test>", false); !errors.Is(err, ErrOIDCRejected) {
+			t.Fatalf("want ErrOIDCRejected, got %v", err)
+		}
+		users, err := st.Users().List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(users) != 1 {
+			t.Fatalf("users = %d, want 1 - a rejected login must create nothing", len(users))
+		}
+	})
+
+	t.Run("legacy display-name row with auto-link off is rejected, not duplicated", func(t *testing.T) {
+		st := openTestStore(t)
+		if _, err := st.Users().Create(t.Context(), store.User{Email: "Bob <bob@example.test>", Role: "user"}); err != nil {
+			t.Fatalf("create legacy user: %v", err)
+		}
+		cfg := baseCfg
+		cfg.AutoLinkByEmail = false
+		if _, err := newSvc(t, st, cfg).LoginOrLink(t.Context(), iss, "s-legacy-nolink", "Bob <bob@example.test>", true); !errors.Is(err, ErrOIDCRejected) {
+			t.Fatalf("want ErrOIDCRejected, got %v", err)
+		}
+		users, err := st.Users().List(t.Context())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(users) != 1 {
+			t.Fatalf("users = %d, want 1 - a rejected login must create nothing", len(users))
+		}
+	})
+
 	t.Run("signup stores the normalized address", func(t *testing.T) {
 		st := openTestStore(t)
 		got, err := newSvc(t, st, baseCfg).LoginOrLink(t.Context(), iss, "s-norm", "Carol <carol@example.test>", true)
