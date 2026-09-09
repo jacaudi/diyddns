@@ -19,25 +19,32 @@ type pageData struct {
 }
 
 // appData is embedded in every app-shell page's template data. It carries what
-// the topbar renders plus the CSRF token every form needs.
+// the topbar renders plus the CSRF token every form needs. NotificationsEnabled
+// and FeedEnabled gate the two admin nav entries whose route groups exist only
+// when their feature is on (design #106 §8.1): a link to an unregistered route
+// is a 404 dead end.
 type appData struct {
 	pageData
-	Title    string
-	Nav      string // "devices" | "account" | "admin-users" | "admin-audit" | "admin-server"
-	Email    string
-	Initials string
-	IsAdmin  bool
+	Title                string
+	Nav                  string // "devices" | "account" | "admin-users" | "admin-endpoints" | "admin-feed" | "admin-audit" | "admin-server"
+	Email                string
+	Initials             string
+	IsAdmin              bool
+	NotificationsEnabled bool
+	FeedEnabled          bool
 }
 
 // newAppData builds the shell data for a page rendered to an authenticated user.
 func (h *handler) newAppData(usr store.User, sess store.Session, title, nav string) appData {
 	return appData{
-		pageData: pageData{CSRFToken: sess.CSRFToken},
-		Title:    title,
-		Nav:      nav,
-		Email:    usr.Email,
-		Initials: initials(usr.Email),
-		IsAdmin:  usr.Role == "admin",
+		pageData:             pageData{CSRFToken: sess.CSRFToken},
+		Title:                title,
+		Nav:                  nav,
+		Email:                usr.Email,
+		Initials:             initials(usr.Email),
+		IsAdmin:              usr.Role == "admin",
+		NotificationsEnabled: h.deps.Cfg.Notifications.Enabled,
+		FeedEnabled:          h.deps.Cfg.Feed.Enabled,
 	}
 }
 
@@ -167,20 +174,9 @@ func (h *handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "register", registerData{Token: r.URL.Query().Get("token")})
 }
 
-// accountData is account.html's template data. NotificationsEnabled gates the
-// link to /account/endpoints: those routes are only registered when
-// notifications.enabled is true, so offering the link otherwise would render a
-// dead end.
-type accountData struct {
-	appData
-	NotificationsEnabled bool
-}
-
 // handleAccount renders /account. requireSession has already guaranteed a
-// valid session (usr, sess) by the time this runs.
+// valid session (usr, sess) by the time this runs. Since #106 the page has no
+// notification card: endpoints are admin-only and live under /admin.
 func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	h.render(w, r, "account", accountData{
-		appData:              h.newAppData(usr, sess, "Account", "account"),
-		NotificationsEnabled: h.deps.Cfg.Notifications.Enabled,
-	})
+	h.render(w, r, "account", h.newAppData(usr, sess, "Account", "account"))
 }

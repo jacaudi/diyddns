@@ -10,25 +10,20 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// seedNotificationRows creates a user and one endpoint, then inserts delivery
-// rows with the given (status, createdAt) pairs and attempt-ledger rows at the
-// given timestamps. Returns the user id.
+// seedNotificationRows creates one endpoint, then inserts delivery rows with
+// the given (status, createdAt) pairs.
 func seedNotificationRows(t *testing.T, st *store.Store, deliveries []struct {
 	status    string
 	createdAt int64
-}, attemptsAt []int64) string {
+}) {
 	t.Helper()
 	ctx := t.Context()
-	u, err := st.Users().Create(ctx, store.User{Email: "notify@example.com", Role: "user"})
-	if err != nil {
-		t.Fatalf("Users().Create: %v", err)
-	}
 	now := store.NowUnix()
 	if _, err := st.DB().ExecContext(ctx,
 		`INSERT INTO notification_endpoints
-		   (id, user_id, label, url, secret_sealed, enabled, created_at, updated_at)
-		 VALUES ('ep1', ?, 'l', 'https://example.com/h', 'sealed', 1, ?, ?)`,
-		u.ID, now, now); err != nil {
+		   (id, label, url, secret_sealed, enabled, created_at, updated_at)
+		 VALUES ('ep1', 'l', 'https://example.com/h', 'sealed', 1, ?, ?)`,
+		now, now); err != nil {
 		t.Fatalf("seed endpoint: %v", err)
 	}
 	for _, d := range deliveries {
@@ -41,13 +36,6 @@ func seedNotificationRows(t *testing.T, st *store.Store, deliveries []struct {
 			t.Fatalf("seed delivery: %v", err)
 		}
 	}
-	for _, at := range attemptsAt {
-		if _, err := st.DB().ExecContext(ctx,
-			`INSERT INTO notification_attempts (user_id, at) VALUES (?, ?)`, u.ID, at); err != nil {
-			t.Fatalf("seed attempt: %v", err)
-		}
-	}
-	return u.ID
 }
 
 func countRows(t *testing.T, st *store.Store, table string) int {
@@ -59,27 +47,8 @@ func countRows(t *testing.T, st *store.Store, table string) int {
 	return n
 }
 
-// TestPrune_AttemptLedgerIsSweptWithoutAnyRetentionKey: the ledger is
-// expiry-gated, so a default (all-zero) retention policy must still clear it.
-// If this ever needs a key to work, the table grows forever on every default
-// deployment.
-func TestPrune_AttemptLedgerIsSweptWithoutAnyRetentionKey(t *testing.T) {
-	st := openTestStore(t)
-	now := store.NowUnix()
-	seedNotificationRows(t, st, nil, []int64{
-		now - 7200, // older than attemptLedgerTTL — must go
-		now - 30,   // inside a live budget window — must stay
-	})
-
-	prune(t.Context(), st, config.RetentionSection{}, discardLog())
-
-	if got := countRows(t, st, "notification_attempts"); got != 1 {
-		t.Errorf("notification_attempts = %d rows, want 1 (only the recent one survives)", got)
-	}
-}
-
-// TestPrune_DeliveriesNeedTheirKey: unlike the ledger, delivery history is a
-// retention decision, so a zero key must delete nothing however old the rows.
+// TestPrune_DeliveriesNeedTheirKey: delivery history is a retention decision,
+// so a zero key must delete nothing however old the rows.
 func TestPrune_DeliveriesNeedTheirKey(t *testing.T) {
 	st := openTestStore(t)
 	now := store.NowUnix()
@@ -90,7 +59,7 @@ func TestPrune_DeliveriesNeedTheirKey(t *testing.T) {
 	}{
 		{store.DeliveryDelivered, old},
 		{store.DeliveryFailed, old},
-	}, nil)
+	})
 
 	prune(t.Context(), st, config.RetentionSection{}, discardLog())
 
@@ -114,7 +83,7 @@ func TestPrune_DeliveriesRetentionKeepsPending(t *testing.T) {
 		{store.DeliveryDelivered, old}, // terminal — must go
 		{store.DeliveryFailed, old},    // terminal — must go
 		{store.DeliveryDelivered, now}, // inside the window — must survive
-	}, nil)
+	})
 
 	prune(t.Context(), st, config.RetentionSection{NotificationDeliveriesDays: 30}, discardLog())
 
@@ -133,8 +102,7 @@ func TestPrune_DeliveriesRetentionKeepsPending(t *testing.T) {
 
 // TestPrune_DeliveryDeletionsAreAudited: the retention.prune audit row is the
 // only durable record that deletion happened, and it must fire when the ONLY
-// thing deleted was deliveries — i.e. the audit condition must include the
-// delivery count, not just ip_history and audit_log.
+// thing deleted was deliveries.
 func TestPrune_DeliveryDeletionsAreAudited(t *testing.T) {
 	st := openTestStore(t)
 	now := store.NowUnix()
@@ -143,7 +111,7 @@ func TestPrune_DeliveryDeletionsAreAudited(t *testing.T) {
 		createdAt int64
 	}{
 		{store.DeliveryDelivered, now - 86400*90},
-	}, nil)
+	})
 
 	prune(t.Context(), st, config.RetentionSection{NotificationDeliveriesDays: 30}, discardLog())
 
@@ -158,18 +126,18 @@ func TestPrune_DeliveryDeletionsAreAudited(t *testing.T) {
 }
 
 // TestPrune_LogsTheNewCounts: operators read the Debug line to see what a sweep
-// did; a sweep that deletes rows it does not name is unobservable.
+// did; a sweep that deletes rows it does not name is unobservable. The
+// attempt ledger is gone (#106), so its count must NOT appear.
 func TestPrune_LogsTheNewCounts(t *testing.T) {
 	st := openTestStore(t)
-	// capturingLog() defaults to Info; prune's summary is Debug, so this test
-	// needs its own handler or it asserts against an empty buffer.
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	prune(t.Context(), st, config.RetentionSection{}, log)
 
-	for _, key := range []string{"notification_attempts", "notification_deliveries"} {
-		if !strings.Contains(buf.String(), key) {
-			t.Errorf("prune's summary line does not report %q", key)
-		}
+	if !strings.Contains(buf.String(), "notification_deliveries") {
+		t.Error("prune's summary line does not report notification_deliveries")
+	}
+	if strings.Contains(buf.String(), "notification_attempts") {
+		t.Error("prune's summary line still reports notification_attempts; the ledger was removed")
 	}
 }

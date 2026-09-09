@@ -639,9 +639,6 @@ func TestLoad_NotificationsDefaults(t *testing.T) {
 	if got := cfg.Notifications.MaxAttempts; got != 8 {
 		t.Errorf("max_attempts = %d, want 8", got)
 	}
-	if got := cfg.Notifications.MaxEndpointsPerUser; got != 5 {
-		t.Errorf("max_endpoints_per_user = %d, want 5", got)
-	}
 	if len(cfg.Notifications.AllowedPrivateCIDRs) != 0 {
 		t.Errorf("allowed_private_cidrs = %v, want empty", cfg.Notifications.AllowedPrivateCIDRs)
 	}
@@ -676,7 +673,6 @@ func TestLoad_NotificationsValidation(t *testing.T) {
 		{"zero timeout", "DIYDDNS_NOTIFICATIONS_TIMEOUT", "0s"},
 		{"zero attempts", "DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS", "0"},
 		{"too many attempts", "DIYDDNS_NOTIFICATIONS_MAX_ATTEMPTS", "17"},
-		{"zero endpoints", "DIYDDNS_NOTIFICATIONS_MAX_ENDPOINTS_PER_USER", "0"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1013,5 +1009,44 @@ func TestLoad_AcceptsShippedExampleConfig(t *testing.T) {
 	}
 	if cfg.Observability.RequestIDHeader != "X-Request-Id" {
 		t.Fatalf("RequestIDHeader = %q, want X-Request-Id", cfg.Observability.RequestIDHeader)
+	}
+}
+
+// TestLoad_FeedDefaultsOff: the gateway feed is opt-in, and its key must be
+// in keyDefaults or neither the default nor the env var exists.
+func TestLoad_FeedDefaultsOff(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Feed.Enabled {
+		t.Error("feed.enabled should default to false")
+	}
+}
+
+func TestLoad_FeedEnabledFromEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+	t.Setenv("DIYDDNS_FEED_ENABLED", "true")
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Feed.Enabled {
+		t.Error("DIYDDNS_FEED_ENABLED=true did not set feed.enabled; is \"feed.enabled\" in keyDefaults?")
+	}
+}
+
+// TestLoad_IgnoresRemovedMaxEndpointsKey: an operator's existing config file
+// carrying the removed key must still start (config.Load ignores unknown
+// keys; the README says the key is gone).
+func TestLoad_IgnoresRemovedMaxEndpointsKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte("database:\n  path: /tmp/x.db\nnotifications:\n  enabled: false\n  max_endpoints_per_user: 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(viper.New(), path); err != nil {
+		t.Fatalf("Load with the removed key present: %v", err)
 	}
 }

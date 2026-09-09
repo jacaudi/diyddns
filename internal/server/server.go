@@ -17,6 +17,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
+	"github.com/jacaudi/diyddns/internal/server/feed"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
 	"github.com/jacaudi/diyddns/internal/server/notify"
 	"github.com/jacaudi/diyddns/internal/server/service"
@@ -42,6 +43,7 @@ type Server struct {
 	st         *store.Store
 	oidcMgr    *oidc.Manager
 	notifier   *notify.Worker // nil when notifications are disabled
+	hub        *feed.Hub      // always non-nil; closes live streams on shutdown
 	retention  config.RetentionSection
 }
 
@@ -65,10 +67,10 @@ type Server struct {
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
-		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: %w", err)
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: %w", err)
 	}
 
 	// A warning, not a fail-closed: the operator may be terminating TLS in
@@ -93,13 +95,10 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// prefixes.
 	allowedPrivateCIDRs, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs)
 	if err != nil {
-		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, err
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, err
 	}
 
-	var notifier service.Notifier = service.NopNotifier{}
-	if cfg.Notifications.Enabled {
-		notifier = notify.NewEnqueuer(st, log)
-	}
+	hub, notifier, devNotifier := buildFanout(cfg, st, log)
 
 	// Retention deletes user-visible history irreversibly and is opt-in, so say
 	// at boot that it is on and with what windows. This is the cheapest safety
@@ -118,7 +117,8 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 	audit := service.NewAuditWriter(st)
 	authSvc := service.NewAuthService(sessions, audit)
-	notifySvc := service.NewNotificationService(st, key, cfg.Notifications.MaxEndpointsPerUser, allowedPrivateCIDRs, audit)
+	notifySvc := service.NewNotificationService(st, key, allowedPrivateCIDRs, audit)
+	feedSvc := service.NewFeedService(st, hub, audit)
 
 	oidcMgr := oidc.NewManager(cfg.Auth.OIDC, cfg.Server.BaseURL, log)
 	if cfg.Auth.OIDC.Enabled && cfg.Auth.OIDC.Required {
@@ -127,7 +127,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		dctx, cancel := context.WithTimeout(context.Background(), oidcDiscoverTimeout)
 		defer cancel()
 		if err := oidcMgr.Discover(dctx); err != nil {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
 		}
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
@@ -148,12 +148,12 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	rpID, rpOrigin, rpErr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL)
 	if rpErr != nil {
 		if !cfg.Auth.HideLocalLoginUI {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: %w", rpErr)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: %w", rpErr)
 		}
 	} else {
 		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit, log)
 		if err != nil {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, fmt.Errorf("server: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: %w", err)
 		}
 	}
 
@@ -164,9 +164,9 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// same instances: they are two thin presentation layers over one service
 	// layer, and a dependency added to a service later must not silently exist
 	// twice.
-	devicesSvc := service.NewDeviceService(st, key, verifier, audit)
+	devicesSvc := service.NewDeviceService(st, key, verifier, audit, devNotifier)
 	enrollSvc := service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit)
-	adminSvc := service.NewAdminService(st, audit, grantSvc)
+	adminSvc := service.NewAdminService(st, audit, grantSvc, devNotifier)
 
 	mux := http.NewServeMux()
 	apiDeps := api.ServerDeps{
@@ -209,6 +209,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Admin:     adminSvc,
 		Grants:    grantSvc,
 		Notify:    notifySvc,
+		Feed:      feedSvc,
 		Info:      version.Current(),
 		StartedAt: time.Now(),
 	}
@@ -217,17 +218,54 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		mux.Handle(pattern, webHandler)
 	}
 
-	return mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, nil
+	registerFeed(mux, cfg, st, feedSvc, hub, log)
+
+	return mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, nil
+}
+
+// buildFanout constructs the stream hub and the two notifier seams buildMux
+// hands to the service layer. The hub is ALWAYS constructed (design §5.3):
+// with the feed off no route registers against it and Broadcast finds no
+// subscribers, so nothing downstream needs a nil check. The fan-out is wired
+// when EITHER transport is on; with both off the nop notifiers keep check-in
+// and the admin seams free of side effects.
+func buildFanout(cfg config.Server, st *store.Store, log *slog.Logger) (*feed.Hub, service.Notifier, service.DeviceNotifier) {
+	hub := feed.New()
+	var (
+		notifier    service.Notifier       = service.NopNotifier{}
+		devNotifier service.DeviceNotifier = service.NopDeviceNotifier{}
+	)
+	if cfg.Notifications.Enabled || cfg.Feed.Enabled {
+		var enqueuer *notify.Enqueuer
+		if cfg.Notifications.Enabled {
+			enqueuer = notify.NewEnqueuer(st, log)
+		}
+		fo := newFanout(st, enqueuer, hub, log)
+		notifier, devNotifier = fo, fo
+	}
+	return hub, notifier, devNotifier
+}
+
+// registerFeed mounts the feed route group. The group is absent, not guarded,
+// when the feed is off — the same rule the notification routes follow in
+// webui.New. The Authenticator parameter is named feedAuth, not auth: revive's
+// import-shadowing rule rejects a parameter that shadows the `auth` import.
+func registerFeed(mux *http.ServeMux, cfg config.Server, st *store.Store, feedAuth feed.Authenticator, hub *feed.Hub, log *slog.Logger) {
+	if !cfg.Feed.Enabled {
+		return
+	}
+	feed.Register(mux, feed.Deps{Store: st, Auth: feedAuth, Hub: hub, Log: log})
+	log.LogAttrs(context.Background(), slog.LevelInfo, "feed enabled")
 }
 
 // handler builds the fully-wrapped handler: buildMux's ServeMux inside the
 // RequestID → AccessLog → Recover middleware chain. It also returns the OIDC
 // manager buildMux constructs, so New/Run can launch its background
 // RetryLoop.
-func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, []netip.Prefix, error) {
-	mux, oidcMgr, _, _, allowedPrivateCIDRs, err := buildMux(cfg, st, log)
+func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, error) {
+	mux, oidcMgr, _, _, allowedPrivateCIDRs, hub, err := buildMux(cfg, st, log)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// This order is load-bearing, not stylistic. AccessLog reads r.Pattern
 	// AFTER next.ServeHTTP returns, and that works only because
@@ -240,15 +278,16 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 		middleware.RequestID(cfg.Observability.RequestIDHeader),
 		middleware.AccessLog(log),
 		middleware.Recover(log),
-	), oidcMgr, allowedPrivateCIDRs, nil
+	), oidcMgr, allowedPrivateCIDRs, hub, nil
 }
 
-// Handler builds the fully-wrapped http.Handler (see handler). Exported for
-// black-box testing via httptest; the OIDC manager it constructs is only
-// needed by New/Run to launch RetryLoop, so this wrapper discards it.
-func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, error) {
-	h, _, _, err := handler(cfg, st, log)
-	return h, err
+// Handler builds the fully-wrapped http.Handler (see handler) and returns the
+// stream hub beside it. Exported for black-box testing via httptest: the hub
+// lets a test revoke a token's streams or drive Shutdown, which no HTTP
+// route can. The OIDC manager is only needed by New/Run, so this discards it.
+func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *feed.Hub, error) {
+	h, _, _, hub, err := handler(cfg, st, log)
+	return h, hub, err
 }
 
 // New constructs a Server bound to cfg.Server.Listen, wiring the full auth,
@@ -260,7 +299,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 	// here rather than re-parsed: commit 74930fa claimed this reuse without
 	// actually doing it (New called notify.ParseAllowed a second time on the
 	// same config value), so this is now the genuine single call.
-	h, mgr, allowedPrivateCIDRs, err := handler(cfg, st, log)
+	h, mgr, allowedPrivateCIDRs, hub, err := handler(cfg, st, log)
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +328,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) 
 		st:        st,
 		oidcMgr:   mgr,
 		notifier:  notifier,
+		hub:       hub,
 		retention: cfg.Retention,
 	}, nil
 }
@@ -316,8 +356,18 @@ func (s *Server) Run(ctx context.Context) error {
 		s.log.LogAttrs(ctx, slog.LevelInfo, "server shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("server: shutdown: %w", err)
+		// http.Server.Shutdown ignores hijacked connections, so the hub's
+		// shutdown is the only thing that closes live streams. The two run
+		// concurrently and BOTH are waited for; an error from either is
+		// collected, not returned early.
+		hubErr := make(chan error, 1)
+		go func() { hubErr <- s.hub.Shutdown(shutdownCtx) }()
+		httpErr := s.httpServer.Shutdown(shutdownCtx)
+		if err := <-hubErr; err != nil {
+			s.log.LogAttrs(ctx, slog.LevelWarn, "feed hub shutdown incomplete", slog.Any("error", err))
+		}
+		if httpErr != nil {
+			return fmt.Errorf("server: shutdown: %w", httpErr)
 		}
 		return nil
 	}

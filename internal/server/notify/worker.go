@@ -35,16 +35,6 @@ const (
 	bodyDrainCap = 4 << 10
 )
 
-// Budget constants for the user-initiated attempt limit (design §10.3). Task 8
-// binds both into its SQL rather than hard-coding 5 and a bare timestamp.
-const (
-	// UserBudgetCount is the number of user-initiated delivery attempts an
-	// endpoint may spend within UserBudgetWindow.
-	UserBudgetCount = 5
-	// UserBudgetWindow is the rolling window UserBudgetCount is measured over.
-	UserBudgetWindow = 5 * time.Minute
-)
-
 // The six failure classes that may ever reach notification_deliveries.last_failure.
 // No status code, resolved address, or Go error string is a valid seventh
 // value — a user configuring an outbound target must not get a readback

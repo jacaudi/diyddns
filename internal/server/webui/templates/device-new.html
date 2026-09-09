@@ -24,6 +24,7 @@
       <div class="hint"><b>Step 1.</b> Enroll once. This exchanges the code and exits.</div>
       {{template "copyValue" .ContainerEnroll}}
       <div class="hint">The code appears in your shell history when you run this.</div>
+      {{if .ContainerHostNote}}<div class="hint">{{.ContainerHostNote}}</div>{{end}}
 
       <div class="hint"><b>Step 2.</b> Start the agent. This one keeps running and reports the IP.</div>
       {{template "copyValue" .ContainerRun}}

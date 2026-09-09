@@ -18,6 +18,8 @@
       <a class="{{if eq .Nav "account"}}active{{end}}" href="/account">Account</a>
       {{if .IsAdmin}}
       <a class="admin {{if eq .Nav "admin-users"}}active{{end}}" href="/admin/users">Users</a>
+      {{if .NotificationsEnabled}}<a class="admin {{if eq .Nav "admin-endpoints"}}active{{end}}" href="/admin/endpoints">Endpoints</a>{{end}}
+      {{if .FeedEnabled}}<a class="admin {{if eq .Nav "admin-feed"}}active{{end}}" href="/admin/feed">Feed</a>{{end}}
       <a class="admin {{if eq .Nav "admin-audit"}}active{{end}}" href="/admin/audit">Audit</a>
       <a class="admin {{if eq .Nav "admin-server"}}active{{end}}" href="/admin/server">Server</a>
       {{end}}

@@ -251,8 +251,16 @@ notifications:
   # Default 8. Must be 1..16 — beyond that the backoff can overflow.
   # max_attempts: 8
 
-  # Maximum notification endpoints a single user may configure. Default 5.
-  # max_endpoints_per_user: 5
+# Gateway feed (#106): a bearer-token REST snapshot of every enabled device's
+# current address (/feed/v1/devices.txt and .json) and a WebSocket stream of
+# changes (/feed/v1/stream), for firewalls, WAFs and Kubernetes gateways.
+# Tokens are minted by an admin at /admin/feed. When disabled, none of those
+# routes exists.
+feed:
+  # Default false. Left live for the same nil-section reason as
+  # notifications.enabled above.
+  enabled: false
+
 # Data retention for ip_history and audit_log. Disabled by default: neither
 # table loses a row to this policy until you set one of the three keys below,
 # so upgrading DIYDDNS never destroys history you already have because of
@@ -292,8 +300,7 @@ retention:
   # old it is; only finished ones are eligible.
   #
   # Worth setting if you use notifications: the table grows with every IP
-  # change, for every configured endpoint. The attempt ledger behind the
-  # per-user rate limit needs no key — it is swept hourly on age alone.
+  # change, for every configured endpoint.
   # notification_deliveries_days: 0
 
 observability:

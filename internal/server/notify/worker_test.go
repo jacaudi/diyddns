@@ -87,17 +87,13 @@ func (c *fakeErrCtx) Err() error {
 	return nil
 }
 
-// seedUserAndEndpoint inserts one user and one notification endpoint whose
-// secret is sealed under key, returning the endpoint's id.
+// seedUserAndEndpoint inserts one notification endpoint whose secret is
+// sealed under key, returning the endpoint's id. (The name predates #106;
+// endpoints no longer have an owner, and no user row is needed.)
 func seedUserAndEndpoint(t *testing.T, st *store.Store, key []byte, url string) string {
 	t.Helper()
 	ctx := t.Context()
 	now := store.NowUnix()
-	if _, err := st.DB().ExecContext(ctx,
-		`INSERT INTO users (id, email, role, disabled, created_at, updated_at)
-		 VALUES ('u1', 'u1@example.com', 'user', 0, ?, ?)`, now, now); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
 	secret, err := auth.GenerateSecret()
 	if err != nil {
 		t.Fatalf("GenerateSecret: %v", err)
@@ -108,8 +104,8 @@ func seedUserAndEndpoint(t *testing.T, st *store.Store, key []byte, url string) 
 	}
 	if _, err := st.DB().ExecContext(ctx,
 		`INSERT INTO notification_endpoints
-		   (id, user_id, label, url, secret_sealed, enabled, created_at, updated_at)
-		 VALUES ('ep1', 'u1', 'l', ?, ?, 1, ?, ?)`,
+		   (id, label, url, secret_sealed, enabled, created_at, updated_at)
+		 VALUES ('ep1', 'l', ?, ?, 1, ?, ?)`,
 		url, sealed, now, now); err != nil {
 		t.Fatalf("seed endpoint: %v", err)
 	}

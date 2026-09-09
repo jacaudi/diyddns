@@ -118,6 +118,14 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap exposes the wrapped writer so http.ResponseController — and a
+// WebSocket upgrade, which walks Unwrap looking for http.Hijacker — can reach
+// the connection through this recorder. Without it every upgrade served
+// through AccessLog fails with 501 (design #106 §5.1). Nothing in net/http
+// calls it except ResponseController, so status and byte capture are
+// unaffected.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 // AccessLog emits exactly one structured info line per request. Sensitive
 // headers are never logged.
 func AccessLog(log *slog.Logger) func(http.Handler) http.Handler {

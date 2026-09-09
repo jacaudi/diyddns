@@ -70,7 +70,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{})
 	checkinSvc := service.NewCheckinService(st, service.NopNotifier{})
-	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{})
+	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{}, service.NopDeviceNotifier{})
 
 	cfg := config.Auth{
 		Session: config.SessionCfg{
@@ -99,7 +99,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	mailer := fakeMailer{}
 	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log)
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
-	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc)
+	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{})
 
 	return st, api.ServerDeps{
 		Log:       log,
