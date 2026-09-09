@@ -17,18 +17,6 @@ import (
 // is served by making it configurable.
 const prunerInterval = time.Hour
 
-// attemptLedgerTTL is how long a notification_attempts row is kept. It is a
-// constant and NOT a retention.* key: the ledger only exists to be counted by
-// NotificationAttemptRepo.Claim inside a live budget window, so a row older
-// than the widest window the server can ask about carries no information an
-// operator could have a policy about — the same reasoning that gates
-// replay_nonces and sessions on expiry alone.
-//
-// An hour is deliberately far wider than notify.UserBudgetWindow (5 minutes),
-// so the sweep can never race a window still being counted, whatever the sweep
-// interval.
-const attemptLedgerTTL = time.Hour
-
 // pruneBatchSize bounds how many rows a single retention DELETE removes, so a
 // sweep of a large backlog cannot monopolise the process's single SQLite
 // connection (store.Open sets SetMaxOpenConns(1), so a long statement blocks
@@ -85,11 +73,6 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 	if err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "prune account_recovery_tokens failed", slog.Any("error", err))
 	}
-	attempts, err := st.NotificationAttempts().PruneExpired(ctx, now-int64(attemptLedgerTTL/time.Second))
-	if err != nil {
-		log.LogAttrs(ctx, slog.LevelWarn, "prune notification_attempts failed", slog.Any("error", err))
-	}
-
 	ipRows, auditRows, deliveryRows := pruneRetention(ctx, st, ret, log)
 	if ipRows+auditRows+deliveryRows > 0 {
 		// The empty actor is the established encoding for a system event; the
@@ -116,7 +99,6 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 		slog.Int("enrollment_codes", codes),
 		slog.Int("oidc_device_flows", flows),
 		slog.Int("account_recovery", recovery),
-		slog.Int("notification_attempts", attempts),
 		slog.Int("ip_history", ipRows),
 		slog.Int("audit_log", auditRows),
 		slog.Int("notification_deliveries", deliveryRows),

@@ -437,7 +437,7 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 
 /* ---------- Descriptions (key/value) ---------- */
 
-.kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); }
+.kv { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); }
 .kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: var(--type-2); }
 /* Values here are operator-configured — a database path, a listen address, a
    base URL, a build string — so they are unbounded in length and often carry
@@ -457,6 +457,15 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); max-width: 100%;
 }
 .copy code { color: var(--text); overflow: auto; white-space: nowrap; }
+/* A copy pill that spans a full-width row (a .kv value, a field, a callout,
+   a disclosure) has room to grow downward, so its code wraps instead of
+   scrolling sideways. A pill sitting inline in running content (a table
+   cell) keeps the base nowrap behavior above — wrapping there would blow up
+   row heights unpredictably. */
+.kv .copy code,
+.field .copy code,
+.callout .copy code,
+.disclosure .copy code { overflow-wrap: anywhere; white-space: normal; min-width: 0; }
 .copy button {
   border: 1px solid var(--border-strong); background: var(--surface);
   border-radius: 6px; padding: var(--space-1) var(--space-2); font-size: var(--type-1); cursor: pointer; color: var(--text-muted);
@@ -469,6 +478,7 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    has the same footprint and overflows the same way. One definition for both
    contexts. The inline-flex base above still applies where a pill sits inside
    running content (a <dd>, a table cell), which full width would break. */
+.kv .copy,
 .field .copy,
 .callout .copy,
 .disclosure .copy { display: flex; width: 100%; }
@@ -577,6 +587,12 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    number nobody chose, and the only fractional size left in the file. */
 .empty h3 { font-size: var(--type-4); margin: var(--space-3) 0 var(--space-1); }
 .empty p { color: var(--text-muted); margin: 0 0 var(--space-4); }
+/* A form folded into the empty state (the create/mint form, once there is
+   nothing to list yet) would otherwise inherit the centred text-align above:
+   labels and hints centre over left-aligned inputs and a left-flushed
+   button. Only the form's own text goes back to normal reading order; the
+   icon/heading/lead stay centred. */
+.empty form { text-align: left; }
 
 /* ---------- Pagination ---------- */
 

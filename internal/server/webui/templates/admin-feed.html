@@ -1,0 +1,84 @@
+{{/* The mint form is identical in the zero-token (folded into .empty) and
+     non-zero (its own "Mint a token" card) branches below; defined once so
+     the two copies can't drift. Takes the page data, same as "content"
+     receives it, so .CSRFToken/.Label/.FieldErr resolve. */}}
+{{define "feedTokenForm"}}{{template "errorBanner" .FieldErr}}
+    <form method="post" action="/admin/feed/tokens">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="label">Label</label>
+        <input class="input" id="label" name="label" value="{{.Label}}" placeholder="e.g. envoy-prod"
+               autocomplete="off" required>
+        <div class="hint">One token per consumer, so each can be revoked on its own.</div>
+        <div class="hint">The token is shown once.</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Mint token</button>
+      </div>
+    </form>
+{{end}}
+
+{{define "content"}}
+<div class="page-head">
+  <div><h1>Feed tokens</h1>{{if gt .Total 0}}<p class="sub">{{.Total}} token{{if ne .Total 1}}s{{end}} · credentials a gateway presents to read the device feed</p>{{end}}</div>
+</div>
+
+{{if .Secret}}
+<div class="card">
+  <div class="card-head"><h2>{{.NewLabel}} — token shown once</h2></div>
+  <div class="card-body">
+    <div class="callout warn">
+      <strong>⚠ Shown once</strong>
+      Copy it now — it can't be shown again. Send it as <code>Authorization: Bearer …</code> on every feed request.
+    </div>
+    <div class="field">
+      <label>Feed token</label>
+      {{template "copyValue" .Secret}}
+      <div class="hint">Anyone holding this token can read every enabled device's current address and label, and watch them change.</div>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{if eq .Total 0}}
+<div class="card"><div class="empty">
+  <div class="icon">🔑</div>
+  <h3>No feed tokens yet</h3>
+  <p>A token lets a gateway read the feed. Mint one per consumer so each can be revoked on its own.</p>
+  {{template "feedTokenForm" .}}
+</div></div>
+{{else}}
+<div class="card">
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr>
+        <th>Label</th><th>Created by</th><th>Created</th><th>Last used</th><th></th>
+      </tr></thead>
+      <tbody>
+        {{range .Tokens}}
+        <tr>
+          <td data-label="Label"><span class="primary-cell">{{.Label}}</span></td>
+          <td data-label="Created by">{{template "textOrDash" .CreatedBy}}</td>
+          <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
+          <td data-label="Last used" class="muted nowrap">{{template "textOrDash" .LastUsedAbs}}</td>
+          <td class="actions">
+            <form method="post" action="/admin/feed/tokens/{{.ID}}/revoke" style="display:inline">
+              <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+              <button class="btn sm danger" type="submit">Revoke</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Mint a token</h2></div>
+  <div class="card-body">
+    {{template "feedTokenForm" .}}
+  </div>
+</div>
+{{end}}
+{{end}}

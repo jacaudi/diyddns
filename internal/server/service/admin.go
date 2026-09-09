@@ -40,16 +40,20 @@ type AdminService struct {
 	st     *store.Store
 	audit  AuditSink
 	grants *GrantService
+	notify DeviceNotifier
 }
 
 // NewAdminService constructs an AdminService. grants drives CreateUserInvite's
 // registration-grant issuance (design D15); it may be nil if WebAuthn is not
 // configured, in which case CreateUserInvite returns ErrWebAuthnUnavailable.
-func NewAdminService(st *store.Store, audit AuditSink, grants *GrantService) *AdminService {
+// notify is told, per device, when a user's disable/enable/delete moves that
+// user's devices out of or into the gateway feed (#106).
+func NewAdminService(st *store.Store, audit AuditSink, grants *GrantService, notify DeviceNotifier) *AdminService {
 	return &AdminService{
 		st:     st,
 		audit:  audit,
 		grants: grants,
+		notify: notify,
 	}
 }
 
@@ -142,7 +146,7 @@ func (s *AdminService) UpdateUser(ctx context.Context, actorID, targetID string,
 	if err := s.applyRole(ctx, actorID, targetID, u, p); err != nil {
 		return store.User{}, fmt.Errorf("service.UpdateUser: %w", err)
 	}
-	if err := s.applyDisabled(ctx, actorID, targetID, p); err != nil {
+	if err := s.applyDisabled(ctx, actorID, targetID, u, p); err != nil {
 		return store.User{}, fmt.Errorf("service.UpdateUser: %w", err)
 	}
 
@@ -200,10 +204,23 @@ func (s *AdminService) applyRole(ctx context.Context, actorID, targetID string, 
 
 // applyDisabled writes the disabled flag via SetDisabled and, on disable,
 // revokes the target's active sessions (auditing session.revoked only if any
-// were actually deleted).
-func (s *AdminService) applyDisabled(ctx context.Context, actorID, targetID string, p UpdateUserParams) error {
+// were actually deleted). It then emits device.added / device.removed for
+// every device of the target whose feed membership flipped.
+//
+// u is the target's PRE-WRITE row, handed in by UpdateUser. Do not re-read
+// the user here: after the write the row already carries the new flag, so
+// "before" would be computed wrong and every removed event would vanish
+// (design #106 §7.2). The device list is read BEFORE SetDisabled, too: the
+// membership seam must never leave the primary write applied (user disabled,
+// sessions revoked) while reporting the request as failed (design D13) — a
+// failure here now aborts cleanly before anything is written.
+func (s *AdminService) applyDisabled(ctx context.Context, actorID, targetID string, u store.User, p UpdateUserParams) error {
 	if p.Disabled == nil {
 		return nil
+	}
+	devices, err := s.st.Devices().ListByUser(ctx, targetID)
+	if err != nil {
+		return err
 	}
 	if err := s.st.Users().SetDisabled(ctx, targetID, *p.Disabled); err != nil {
 		return err
@@ -220,11 +237,19 @@ func (s *AdminService) applyDisabled(ctx context.Context, actorID, targetID stri
 		}
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: event, TargetType: "user", TargetID: targetID})
+
+	after := u
+	after.Disabled = *p.Disabled
+	for _, d := range devices {
+		emitMembership(ctx, s.notify, d, inFeed(d, u), inFeed(d, after))
+	}
 	return nil
 }
 
 // DeleteUser deletes a user (cascading sessions + devices + codes via FK), with
-// last-admin and self-lockout guards.
+// last-admin and self-lockout guards. The target's devices are listed BEFORE
+// the delete — the cascade destroys them — and device.removed is emitted for
+// each one that was a feed member.
 func (s *AdminService) DeleteUser(ctx context.Context, actorID, targetID string) error {
 	if targetID == actorID {
 		return fmt.Errorf("service.DeleteUser: %w", ErrSelfLockout)
@@ -232,10 +257,21 @@ func (s *AdminService) DeleteUser(ctx context.Context, actorID, targetID string)
 	if err := s.guardLastAdmin(ctx, targetID); err != nil {
 		return fmt.Errorf("service.DeleteUser: %w", err)
 	}
-	if err := s.st.Users().Delete(ctx, targetID); err != nil {
+	u, err := s.st.Users().GetByID(ctx, targetID)
+	if err != nil {
 		return fmt.Errorf("service.DeleteUser: %w", err) // ErrNotFound flows up
 	}
+	devices, err := s.st.Devices().ListByUser(ctx, targetID)
+	if err != nil {
+		return fmt.Errorf("service.DeleteUser: %w", err)
+	}
+	if err := s.st.Users().Delete(ctx, targetID); err != nil {
+		return fmt.Errorf("service.DeleteUser: %w", err)
+	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: "user.deleted", TargetType: "user", TargetID: targetID})
+	for _, d := range devices {
+		emitMembership(ctx, s.notify, d, inFeed(d, u), false)
+	}
 	return nil
 }
 

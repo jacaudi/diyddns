@@ -2,6 +2,7 @@ package notify
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/store"
@@ -141,4 +142,194 @@ func TestRenderTest(t *testing.T) {
 	if len(changed) != 0 {
 		t.Errorf("changed = %v, want an empty array", changed)
 	}
+}
+
+// TestRenderIPChanged_DeviceObjectIsIDAndLabelOnly is design D22: the
+// device object carries exactly {id, label}. hostname, os and client_version
+// left the contract with #106 so a feed-token holder learns nothing from a
+// delta that the snapshot does not disclose.
+func TestRenderIPChanged_DeviceObjectIsIDAndLabelOnly(t *testing.T) {
+	ev := store.IPChangeEvent{
+		EventID: 1, Device: store.Device{ID: "dev1", Label: "router", Hostname: "h", OS: "linux", ClientVersion: "v1"},
+		PrevIPv4: "1.1.1.1", CurrIPv4: "2.2.2.2",
+	}
+	b, err := RenderIPChanged(ev)
+	if err != nil {
+		t.Fatalf("RenderIPChanged: %v", err)
+	}
+	var got struct {
+		Device map[string]any `json:"device"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if len(got.Device) != 2 || got.Device["id"] != "dev1" || got.Device["label"] != "router" {
+		t.Errorf("device = %v, want exactly {id: dev1, label: router}", got.Device)
+	}
+}
+
+// TestRenderAddedAndRemoved pins the two membership events (design §6.1):
+// same envelope, id = feed_state.seq, added has null previous and the
+// device's addresses as current; removed is the mirror image.
+func TestRenderAddedAndRemoved(t *testing.T) {
+	const now = 1755153174 // 2025-08-14T06:32:54Z
+	dev := store.Device{ID: "dev1", Label: "router", CurrentIPv4: "203.0.113.9", CurrentIPv6: ""}
+
+	type addrs struct {
+		IPv4 *string `json:"ipv4"`
+		IPv6 *string `json:"ipv6"`
+	}
+	type payload struct {
+		Version    int            `json:"version"`
+		Type       string         `json:"type"`
+		ID         int64          `json:"id"`
+		OccurredAt string         `json:"occurred_at"`
+		Device     map[string]any `json:"device"`
+		Changed    []string       `json:"changed"`
+		Current    addrs          `json:"current"`
+		Previous   addrs          `json:"previous"`
+	}
+	decode := func(b []byte) payload {
+		t.Helper()
+		var p payload
+		if err := json.Unmarshal(b, &p); err != nil {
+			t.Fatalf("payload is not valid JSON: %v", err)
+		}
+		return p
+	}
+
+	added, err := RenderAdded(41, now, dev)
+	if err != nil {
+		t.Fatalf("RenderAdded: %v", err)
+	}
+	a := decode(added)
+	if a.Version != 1 || a.Type != EventAdded || a.ID != 41 || a.OccurredAt != "2025-08-14T06:32:54Z" {
+		t.Errorf("added envelope = %+v", a)
+	}
+	if a.Device["id"] != "dev1" || a.Device["label"] != "router" || len(a.Device) != 2 {
+		t.Errorf("added device = %v, want {id,label}", a.Device)
+	}
+	if a.Current.IPv4 == nil || *a.Current.IPv4 != "203.0.113.9" || a.Current.IPv6 != nil {
+		t.Errorf("added current = %+v, want ipv4 203.0.113.9 and ipv6 null", a.Current)
+	}
+	if a.Previous.IPv4 != nil || a.Previous.IPv6 != nil {
+		t.Errorf("added previous = %+v, want both null", a.Previous)
+	}
+	if len(a.Changed) != 1 || a.Changed[0] != "ipv4" {
+		t.Errorf("added changed = %v, want [ipv4] (the families present)", a.Changed)
+	}
+
+	removed, err := RenderRemoved(42, now, dev)
+	if err != nil {
+		t.Fatalf("RenderRemoved: %v", err)
+	}
+	r := decode(removed)
+	if r.Type != EventRemoved || r.ID != 42 {
+		t.Errorf("removed envelope = %+v", r)
+	}
+	if r.Current.IPv4 != nil || r.Current.IPv6 != nil {
+		t.Errorf("removed current = %+v, want both null", r.Current)
+	}
+	if r.Previous.IPv4 == nil || *r.Previous.IPv4 != "203.0.113.9" || r.Previous.IPv6 != nil {
+		t.Errorf("removed previous = %+v, want ipv4 203.0.113.9 and ipv6 null", r.Previous)
+	}
+	if len(r.Changed) != 1 || r.Changed[0] != "ipv4" {
+		t.Errorf("removed changed = %v, want [ipv4] (the families removed)", r.Changed)
+	}
+	if strings.Contains(string(added), `""`) || strings.Contains(string(removed), `""`) {
+		t.Error("an absent family must be JSON null, never \"\"")
+	}
+}
+
+// TestRenderAddedAndRemoved_FamiliesPresent covers familiesPresent's ipv6
+// branch, which TestRenderAddedAndRemoved's ipv4-only fixture never reaches:
+// an ipv6-only device and a dual-stack device, on both RenderAdded and
+// RenderRemoved.
+func TestRenderAddedAndRemoved_FamiliesPresent(t *testing.T) {
+	const now = 1755153174
+
+	type addrs struct {
+		IPv4 *string `json:"ipv4"`
+		IPv6 *string `json:"ipv6"`
+	}
+	type payload struct {
+		Changed  []string `json:"changed"`
+		Current  addrs    `json:"current"`
+		Previous addrs    `json:"previous"`
+	}
+	decode := func(t *testing.T, b []byte) payload {
+		t.Helper()
+		var p payload
+		if err := json.Unmarshal(b, &p); err != nil {
+			t.Fatalf("payload is not valid JSON: %v", err)
+		}
+		return p
+	}
+
+	ipv6Only := store.Device{ID: "d", Label: "l", CurrentIPv6: "2001:db8::1"}
+	dualStack := store.Device{ID: "d", Label: "l", CurrentIPv4: "203.0.113.9", CurrentIPv6: "2001:db8::1"}
+
+	t.Run("ipv6 only", func(t *testing.T) {
+		added, err := RenderAdded(1, now, ipv6Only)
+		if err != nil {
+			t.Fatalf("RenderAdded: %v", err)
+		}
+		a := decode(t, added)
+		if len(a.Changed) != 1 || a.Changed[0] != "ipv6" {
+			t.Errorf("added changed = %v, want [ipv6]", a.Changed)
+		}
+		if a.Current.IPv4 != nil {
+			t.Errorf("added current.ipv4 = %v, want null", *a.Current.IPv4)
+		}
+		if a.Current.IPv6 == nil || *a.Current.IPv6 != "2001:db8::1" {
+			t.Errorf("added current.ipv6 = %v, want 2001:db8::1", a.Current.IPv6)
+		}
+
+		removed, err := RenderRemoved(2, now, ipv6Only)
+		if err != nil {
+			t.Fatalf("RenderRemoved: %v", err)
+		}
+		r := decode(t, removed)
+		if len(r.Changed) != 1 || r.Changed[0] != "ipv6" {
+			t.Errorf("removed changed = %v, want [ipv6]", r.Changed)
+		}
+		if r.Previous.IPv4 != nil {
+			t.Errorf("removed previous.ipv4 = %v, want null", *r.Previous.IPv4)
+		}
+		if r.Previous.IPv6 == nil || *r.Previous.IPv6 != "2001:db8::1" {
+			t.Errorf("removed previous.ipv6 = %v, want 2001:db8::1", r.Previous.IPv6)
+		}
+	})
+
+	t.Run("dual stack", func(t *testing.T) {
+		added, err := RenderAdded(1, now, dualStack)
+		if err != nil {
+			t.Fatalf("RenderAdded: %v", err)
+		}
+		a := decode(t, added)
+		if len(a.Changed) != 2 || a.Changed[0] != "ipv4" || a.Changed[1] != "ipv6" {
+			t.Errorf("added changed = %v, want [ipv4 ipv6]", a.Changed)
+		}
+		if a.Current.IPv4 == nil || *a.Current.IPv4 != "203.0.113.9" {
+			t.Errorf("added current.ipv4 = %v, want 203.0.113.9", a.Current.IPv4)
+		}
+		if a.Current.IPv6 == nil || *a.Current.IPv6 != "2001:db8::1" {
+			t.Errorf("added current.ipv6 = %v, want 2001:db8::1", a.Current.IPv6)
+		}
+
+		removed, err := RenderRemoved(2, now, dualStack)
+		if err != nil {
+			t.Fatalf("RenderRemoved: %v", err)
+		}
+		r := decode(t, removed)
+		if len(r.Changed) != 2 || r.Changed[0] != "ipv4" || r.Changed[1] != "ipv6" {
+			t.Errorf("removed changed = %v, want [ipv4 ipv6]", r.Changed)
+		}
+		if r.Previous.IPv4 == nil || *r.Previous.IPv4 != "203.0.113.9" {
+			t.Errorf("removed previous.ipv4 = %v, want 203.0.113.9", r.Previous.IPv4)
+		}
+		if r.Previous.IPv6 == nil || *r.Previous.IPv6 != "2001:db8::1" {
+			t.Errorf("removed previous.ipv6 = %v, want 2001:db8::1", r.Previous.IPv6)
+		}
+	})
 }

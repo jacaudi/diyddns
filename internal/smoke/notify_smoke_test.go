@@ -70,11 +70,11 @@ func TestNotifySmoke(t *testing.T) {
 	passkeyLogin(t, client, baseURL, rp, authr, cred)
 	csrf := fetchCSRF(t, client, baseURL)
 
-	step(t, "POST /account/endpoints (create an endpoint pointing at the listener)")
+	step(t, "POST /admin/endpoints (create an endpoint pointing at the listener)")
 	epID, secretB64 := createEndpoint(t, client, baseURL, csrf, listener.URL)
 
-	step(t, "POST /account/endpoints/{id}/test")
-	postForm(t, client, fmt.Sprintf("%s/account/endpoints/%s/test", baseURL, epID), csrf, nil)
+	step(t, "POST /admin/endpoints/{id}/test")
+	postForm(t, client, fmt.Sprintf("%s/admin/endpoints/%s/test", baseURL, epID), csrf, nil)
 
 	step(t, "poll the listener for the delivered request")
 	req := rx.wait(t, 40*time.Second)
@@ -275,8 +275,8 @@ func (c *capture) wait(t *testing.T, timeout time.Duration) capturedRequest {
 
 // endpointRowRe finds the newly-created endpoint's id from the refreshed
 // endpoints list rendered in the create response (endpoints.html: the row's
-// primary-cell link, "/account/endpoints/{id}").
-var endpointRowRe = regexp.MustCompile(`href="/account/endpoints/([^"]+)"`)
+// primary-cell link, "/admin/endpoints/{id}").
+var endpointRowRe = regexp.MustCompile(`href="/admin/endpoints/([^"]+)"`)
 
 // endpointSecretRe finds the one-time signing secret from the reveal card
 // (endpoints.html: {{template "copyValue" .Secret}} renders
@@ -289,7 +289,7 @@ var endpointSecretRe = regexp.MustCompile(`Signing secret \(base64\)</label>\s*<
 // a headless client (or this smoke test) can use.
 func createEndpoint(t *testing.T, c *http.Client, baseURL, csrf, targetURL string) (id, secretB64 string) {
 	t.Helper()
-	body := postForm(t, c, baseURL+"/account/endpoints", csrf, map[string]string{
+	body := postForm(t, c, baseURL+"/admin/endpoints", csrf, map[string]string{
 		"label": "smoke-test-endpoint",
 		"url":   targetURL,
 	})

@@ -342,3 +342,53 @@ func (r *DeviceRepo) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// FeedDevice is one row of the gateway feed (design #106 §4.2): a member
+// device's id, label, current addresses and last-seen time. It carries no
+// user id (D21) and none of the device's other columns.
+type FeedDevice struct {
+	ID         string
+	Label      string
+	IPv4       string // "" when the family has never been reported (NULL)
+	IPv6       string // "" when the family has never been reported (NULL)
+	LastSeenAt int64  // 0 when NULL
+}
+
+// listFeedQuery is the executable half of the membership predicate (design
+// D18): enabled device, enabled owner, at least one address. service.inFeed
+// is the other half and must agree with it. Named so a test can EXPLAIN it.
+const listFeedQuery = `SELECT d.id, d.label, d.current_ipv4, d.current_ipv6, d.last_seen_at
+	  FROM devices d
+	  JOIN users u ON u.id = d.user_id
+	 WHERE d.disabled = 0
+	   AND u.disabled = 0
+	   AND (d.current_ipv4 IS NOT NULL OR d.current_ipv6 IS NOT NULL)
+	 ORDER BY d.id`
+
+// ListFeed returns every device currently in the gateway feed, ordered by id.
+// One bounded read; the whole per-request cost of the feed.
+func (r *DeviceRepo) ListFeed(ctx context.Context) ([]FeedDevice, error) {
+	rows, err := r.db.QueryContext(ctx, listFeedQuery)
+	if err != nil {
+		return nil, fmt.Errorf("devices.ListFeed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []FeedDevice
+	for rows.Next() {
+		var d FeedDevice
+		var v4, v6 sql.NullString
+		var seen sql.NullInt64
+		if err := rows.Scan(&d.ID, &d.Label, &v4, &v6, &seen); err != nil {
+			return nil, fmt.Errorf("devices.ListFeed: scan: %w", err)
+		}
+		d.IPv4 = scanString(v4)
+		d.IPv6 = scanString(v6)
+		d.LastSeenAt = scanInt64(seen)
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("devices.ListFeed: rows: %w", err)
+	}
+	return out, nil
+}

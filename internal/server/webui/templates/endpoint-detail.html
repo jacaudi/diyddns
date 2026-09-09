@@ -1,5 +1,5 @@
 {{define "content"}}
-<div class="breadcrumb"><a href="/account/endpoints">Notification endpoints</a> / {{.Endpoint.Label}}</div>
+<div class="breadcrumb"><a href="/admin/endpoints">Notification endpoints</a> / {{.Endpoint.Label}}</div>
 
 {{template "errorBanner" .Error}}
 
@@ -11,7 +11,7 @@
     </h1>
     <p class="sub">Created {{.CreatedAbs}}</p>
   </div>
-  <form method="post" action="/account/endpoints/{{.Endpoint.ID}}/test">
+  <form method="post" action="/admin/endpoints/{{.Endpoint.ID}}/test">
     <input type="hidden" name="csrf" value="{{.CSRFToken}}">
     <button class="btn primary" type="submit">Send test</button>
   </form>
@@ -46,7 +46,7 @@
           <td data-label="Updated" class="muted nowrap">{{.UpdatedAbs}}</td>
           <td class="actions">
             {{if .Redeliverable}}
-            <form method="post" action="/account/deliveries/{{.ID}}/redeliver">
+            <form method="post" action="/admin/deliveries/{{.ID}}/redeliver">
               <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
               <input type="hidden" name="endpoint_id" value="{{$.Endpoint.ID}}">
               <button class="btn sm" type="submit">Redeliver</button>
@@ -69,7 +69,7 @@
       <strong>{{if .Endpoint.Enabled}}Disable{{else}}Enable{{end}} endpoint</strong>
       <span>A disabled endpoint receives no deliveries, new or retried.</span>
     </div>
-    <form method="post" action="/account/endpoints/{{.Endpoint.ID}}/enabled">
+    <form method="post" action="/admin/endpoints/{{.Endpoint.ID}}/enabled">
       <input type="hidden" name="csrf" value="{{.CSRFToken}}">
       <input type="hidden" name="enabled" value="{{if .Endpoint.Enabled}}false{{else}}true{{end}}">
       <button class="btn danger" type="submit">{{if .Endpoint.Enabled}}Disable{{else}}Enable{{end}}</button>
@@ -87,7 +87,7 @@
         <div class="card modal-card">
           <h2>Delete endpoint</h2>
           <p class="muted">Permanently removes the endpoint and its delivery history. This cannot be undone.</p>
-          <form method="post" action="/account/endpoints/{{.Endpoint.ID}}/delete">
+          <form method="post" action="/admin/endpoints/{{.Endpoint.ID}}/delete">
             <input type="hidden" name="csrf" value="{{.CSRFToken}}">
             <div class="field">
               <label for="delete-confirm">Type <code>{{.Endpoint.Label}}</code> to confirm</label>

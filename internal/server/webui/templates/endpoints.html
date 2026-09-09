@@ -1,10 +1,35 @@
+{{/* The create form is identical in the zero-endpoint (folded into .empty)
+     and non-zero (its own "Add an endpoint" card) branches below; defined
+     once so the two copies can't drift. Takes the page data, same as
+     "content" receives it, so .CSRFToken/.Label/.URL/.FieldErr resolve. */}}
+{{define "endpointForm"}}{{template "errorBanner" .FieldErr}}
+    <form method="post" action="/admin/endpoints">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="label">Label</label>
+        <input class="input" id="label" name="label" value="{{.Label}}" placeholder="e.g. home-automation"
+               autocomplete="off" required>
+      </div>
+      <div class="field">
+        <label for="url">Target URL</label>
+        <input class="input" id="url" name="url" type="url" value="{{.URL}}"
+               placeholder="https://example.com/hooks/ddns" autocomplete="off" required>
+        <div class="hint">https:// for anything off this host; plain http:// is allowed only to loopback.</div>
+        <div class="hint">You'll be shown a signing secret once after creating it.</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Create endpoint</button>
+      </div>
+    </form>
+{{end}}
+
 {{define "content"}}
 <div class="page-head">
-  <div><h1>Notification endpoints</h1><p class="sub">{{.Total}} endpoint{{if ne .Total 1}}s{{end}}</p></div>
+  <div><h1>Notification endpoints</h1>{{if gt .Total 0}}<p class="sub">{{.Total}} endpoint{{if ne .Total 1}}s{{end}}</p>{{end}}</div>
 </div>
 
 {{if .Secret}}
-<div class="card" style="max-width:640px">
+<div class="card">
   <div class="card-head"><h2>{{.NewLabel}} — signing secret shown once</h2></div>
   <div class="card-body">
     <div class="callout warn">
@@ -20,35 +45,12 @@
 </div>
 {{end}}
 
-<div class="card" style="max-width:640px">
-  <div class="card-head"><h2>Add an endpoint</h2></div>
-  <div class="card-body">
-    {{template "errorBanner" .FieldErr}}
-    <form method="post" action="/account/endpoints">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="label">Label</label>
-        <input class="input" id="label" name="label" value="{{.Label}}" placeholder="e.g. home-automation"
-               autocomplete="off" required>
-      </div>
-      <div class="field">
-        <label for="url">Target URL</label>
-        <input class="input" id="url" name="url" type="url" value="{{.URL}}"
-               placeholder="https://example.com/hooks/ddns" autocomplete="off" required>
-        <div class="hint">Must be http:// or https://. Only loopback may use plain http://.</div>
-      </div>
-      <div class="btn-row">
-        <button class="btn primary" type="submit">Create endpoint</button>
-      </div>
-    </form>
-  </div>
-</div>
-
 {{if eq .Total 0}}
 <div class="card"><div class="empty">
   <div class="icon">🔔</div>
   <h3>No notification endpoints yet</h3>
-  <p>Add one above to get a webhook whenever your public IP changes.</p>
+  <p>Endpoints receive a signed webhook whenever a device's address changes, or a device joins or leaves the feed.</p>
+  {{template "endpointForm" .}}
 </div></div>
 {{else}}
 <div class="card">
@@ -60,18 +62,25 @@
       <tbody>
         {{range .Endpoints}}
         <tr>
-          <td data-label="Label"><a class="primary-cell" href="/account/endpoints/{{.ID}}">{{.Label}}</a></td>
+          <td data-label="Label"><a class="primary-cell" href="/admin/endpoints/{{.ID}}">{{.Label}}</a></td>
           <td data-label="URL">{{template "mutedCodeOrDash" .URL}}</td>
           <td data-label="Status">
             {{if .Enabled}}<span class="tag ok"><span class="dot"></span>Enabled</span>
             {{else}}<span class="tag danger"><span class="dot"></span>Disabled</span>{{end}}
           </td>
           <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
-          <td class="actions"><a class="btn sm" href="/account/endpoints/{{.ID}}">Open</a></td>
+          <td class="actions"><a class="btn sm" href="/admin/endpoints/{{.ID}}">Open</a></td>
         </tr>
         {{end}}
       </tbody>
     </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Add an endpoint</h2></div>
+  <div class="card-body">
+    {{template "endpointForm" .}}
   </div>
 </div>
 {{end}}
