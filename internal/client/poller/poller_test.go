@@ -53,7 +53,7 @@ func TestRunOnce_ReportsQuorumFamiliesOnly(t *testing.T) {
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &fakeChk{res: checkin.Result{Stored: true}}
 	p := New(d, c, Options{Logger: testLogger()})
-	if err := p.RunOnce(context.Background()); err != nil {
+	if err := p.RunOnce(t.Context()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if c.last.IPv4 != "203.0.113.7" || c.last.IPv6 != "" {
@@ -63,7 +63,7 @@ func TestRunOnce_ReportsQuorumFamiliesOnly(t *testing.T) {
 
 func TestRunOnce_NoQuorum(t *testing.T) {
 	p := New(fakeDisc{}, &fakeChk{}, Options{Logger: testLogger()})
-	if err := p.RunOnce(context.Background()); !errors.Is(err, ErrNoQuorum) {
+	if err := p.RunOnce(t.Context()); !errors.Is(err, ErrNoQuorum) {
 		t.Errorf("err = %v, want ErrNoQuorum", err)
 	}
 }
@@ -72,7 +72,7 @@ func TestRunOnce_AlwaysChecksInWhenQuorum(t *testing.T) {
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &fakeChk{res: checkin.Result{Stored: false}} // unchanged
 	p := New(d, c, Options{Logger: testLogger()})
-	if err := p.RunOnce(context.Background()); err != nil {
+	if err := p.RunOnce(t.Context()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if c.n != 1 {
@@ -97,7 +97,7 @@ func (c *fakeClock) Sleep(_ context.Context, d time.Duration) error {
 }
 
 func TestRun_BackoffThenReset(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	clk := &fakeClock{cancel: cancel, stopAt: 3}
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &fakeChk{err: fmt.Errorf("%w: status 500", checkin.ErrServer)} // a 5xx backs off, forever
@@ -110,7 +110,7 @@ func TestRun_BackoffThenReset(t *testing.T) {
 }
 
 func TestRun_SuccessJitterWithinBound(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	clk := &fakeClock{cancel: cancel, stopAt: 1}
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &fakeChk{res: checkin.Result{Stored: true}}
@@ -123,7 +123,7 @@ func TestRun_SuccessJitterWithinBound(t *testing.T) {
 }
 
 func TestRun_ThreeConsecutiveUnauthorized_Terminates(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	clk := &fakeClock{cancel: cancel, stopAt: 10} // never reached: Run must stop on its own
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
@@ -148,7 +148,7 @@ func TestRun_ThreeConsecutiveUnauthorized_Terminates(t *testing.T) {
 }
 
 func TestRun_UnauthorizedStreakResetsOnSuccess(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	clk := &fakeClock{cancel: cancel, stopAt: 5}
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	// 401, 401, ok, 401, ok — never three in a row, so Run keeps going until

@@ -6,6 +6,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"time"
@@ -163,10 +164,7 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 // "device.enroll.oidc"), letting each authenticated path own its own audit
 // trail while sharing this single enrollment operation.
 func (s *EnrollmentService) EnrollForUser(ctx context.Context, userID, eventType string, meta ClientMeta) (EnrollResult, error) {
-	label := meta.Hostname
-	if label == "" {
-		label = "device"
-	}
+	label := cmp.Or(meta.Hostname, "device")
 	dev, secret, err := s.createSealedDevice(ctx, userID, label, meta)
 	if err != nil {
 		return EnrollResult{}, fmt.Errorf("service.EnrollForUser: %w", err)

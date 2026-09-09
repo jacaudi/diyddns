@@ -34,7 +34,7 @@ func capturingLog() (*slog.Logger, *bytes.Buffer) {
 func openFileTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	st, err := store.Open(context.Background(), path)
+	st, err := store.Open(t.Context(), path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestPruneIPHistory_CancelledContextDoesNotFanOutWarnings(t *testing.T) {
 	pruneBatchSize = 1
 	t.Cleanup(func() { pruneBatchSize = old })
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	log, buf := capturingLog()
 
 	done := make(chan struct{})
@@ -594,7 +594,7 @@ func TestPrune_AuditSurvivesCancelMidSweep(t *testing.T) {
 		t.Fatalf("watcher busy_timeout: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	log, buf := capturingLog()
 
 	done := make(chan struct{})

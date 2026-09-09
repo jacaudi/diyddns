@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -66,7 +65,7 @@ func TestRunCmd_Once_EndToEnd(t *testing.T) {
 
 	cmd := newRunCmd()
 	cmd.SetArgs([]string{"--once", "--credentials-file", credPath, "--config", cfgPath})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("run --once: %v", err)
 	}
 	if gotDevice != "dev-xyz" {

@@ -83,7 +83,7 @@ func TestDeviceCodeEnrollSuccessAfterPending(t *testing.T) {
 	})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	p := &capturePrompter{}
-	res, err := DeviceCodeEnroll(context.Background(), c, p, clk)
+	res, err := DeviceCodeEnroll(t.Context(), c, p, clk)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -104,7 +104,7 @@ func TestDeviceCodeEnrollSlowDownBumpsInterval(t *testing.T) {
 		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
 	})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if len(clk.slept) != 1 || clk.slept[0] != 10*time.Second { // 5s base + 5s bump
@@ -126,7 +126,7 @@ func TestDeviceCodeEnrollTerminalStatuses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := scriptServer(t, startOK, []pb{tt.poll})
 			clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-			_, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk)
+			_, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk)
 			if !errors.Is(err, tt.want) {
 				t.Errorf("err = %v, want %v", err, tt.want)
 			}
@@ -140,13 +140,13 @@ func TestDeviceCodeEnrollBadGatewayToleratedThenExhausted(t *testing.T) {
 		{502, `{}`}, {502, `{}`}, {200, `{"device_id":"d","secret":"c2VjcmV0"}`},
 	})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); err != nil {
 		t.Fatalf("tolerated 502 failed: %v", err)
 	}
 	// Three consecutive 502s → ErrBadGateway.
 	c = scriptServer(t, startOK, []pb{{502, `{}`}})
 	clk = &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); !errors.Is(err, ErrBadGateway) {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); !errors.Is(err, ErrBadGateway) {
 		t.Errorf("err = %v, want ErrBadGateway", err)
 	}
 }
@@ -156,7 +156,7 @@ func TestDeviceCodeEnrollExpires(t *testing.T) {
 	start := `{"flow_id":"f","user_code":"UC","verification_uri":"https://v","expires_in":7,"interval":5}`
 	c := scriptServer(t, start, []pb{{200, `{"status":"pending"}`}})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); !errors.Is(err, ErrExpired) {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); !errors.Is(err, ErrExpired) {
 		t.Errorf("err = %v, want ErrExpired", err)
 	}
 }
@@ -165,14 +165,14 @@ func TestDeviceCodeEnrollExpiresInNonPositive(t *testing.T) {
 	start := `{"flow_id":"f","user_code":"UC","verification_uri":"https://v","expires_in":0,"interval":5}`
 	c := scriptServer(t, start, []pb{{200, `{"status":"pending"}`}})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); !errors.Is(err, ErrExpired) {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); !errors.Is(err, ErrExpired) {
 		t.Errorf("err = %v, want ErrExpired", err)
 	}
 }
 
 func TestDeviceCodeEnrollContextCancel(t *testing.T) {
 	c := scriptServer(t, startOK, []pb{{200, `{"status":"pending"}`}})
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // pre-cancelled
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	if _, err := DeviceCodeEnroll(ctx, c, &capturePrompter{}, clk); !errors.Is(err, context.Canceled) {
@@ -188,7 +188,7 @@ func TestDeviceCodeEnrollIntervalFloor(t *testing.T) {
 		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
 	})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if len(clk.slept) != 1 || clk.slept[0] != 5*time.Second { // floored up from 1s
@@ -203,7 +203,7 @@ func TestDeviceCodeEnrollBadGatewayBumpsInterval(t *testing.T) {
 		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
 	})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if len(clk.slept) != 1 || clk.slept[0] != 10*time.Second { // 5s base + 5s bump
@@ -221,7 +221,7 @@ func TestDeviceCodeEnrollConsecutive502ResetsOnNon502(t *testing.T) {
 		{200, `{"device_id":"d","secret":"c2VjcmV0"}`},
 	})
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	if _, err := DeviceCodeEnroll(context.Background(), c, &capturePrompter{}, clk); err != nil {
+	if _, err := DeviceCodeEnroll(t.Context(), c, &capturePrompter{}, clk); err != nil {
 		t.Fatalf("interleaved 502s must not trip ErrBadGateway: %v", err)
 	}
 }

@@ -90,11 +90,9 @@ func TestSaveConcurrentNoForceExactlyOneWins(t *testing.T) {
 	results := make(chan error, n)
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			results <- Save(path, Credentials{DeviceID: fmt.Sprintf("racer-%d", i)}, false)
-		}(i)
+		})
 	}
 	wg.Wait()
 	close(results)

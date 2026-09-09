@@ -24,7 +24,7 @@ import (
 // openTestStore opens an in-memory store for this package's white-box tests.
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(context.Background(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -47,7 +47,7 @@ func testKey32() []byte {
 // can sign requests.
 func seedDeviceWithSecret(t *testing.T, st *store.Store, key []byte, label, userEmail string) (store.Device, []byte) {
 	t.Helper()
-	usr, err := st.Users().Create(context.Background(), store.User{Email: userEmail, Role: "user"})
+	usr, err := st.Users().Create(t.Context(), store.User{Email: userEmail, Role: "user"})
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
@@ -59,7 +59,7 @@ func seedDeviceWithSecret(t *testing.T, st *store.Store, key []byte, label, user
 	if err != nil {
 		t.Fatalf("SealSecret: %v", err)
 	}
-	dev, err := st.Devices().Create(context.Background(), store.Device{
+	dev, err := st.Devices().Create(t.Context(), store.Device{
 		UserID: usr.ID, Label: label, SecretHash: sealed,
 	})
 	if err != nil {
@@ -387,12 +387,12 @@ const testCookieName = "diyddns_session"
 func registerSessionProbe(t *testing.T, withCSRF bool) (*httptest.Server, store.User, store.Session, *bytes.Buffer) {
 	t.Helper()
 	st := openTestStore(t)
-	usr, err := st.Users().Create(context.Background(), store.User{Email: "session@example.com", Role: "user"})
+	usr, err := st.Users().Create(t.Context(), store.User{Email: "session@example.com", Role: "user"})
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-	sess, err := sm.Create(context.Background(), usr.ID, "127.0.0.1", "test-agent")
+	sess, err := sm.Create(t.Context(), usr.ID, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("SessionManager.Create: %v", err)
 	}
@@ -501,20 +501,20 @@ func TestSessionMiddleware_CookieAuthForwardsUserAndSession(t *testing.T) {
 func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess store.Session, buf *bytes.Buffer) {
 	t.Helper()
 	st := openTestStore(t)
-	admin, err := st.Users().Create(context.Background(), store.User{Email: "admin@example.com", Role: "admin"})
+	admin, err := st.Users().Create(t.Context(), store.User{Email: "admin@example.com", Role: "admin"})
 	if err != nil {
 		t.Fatalf("seed admin user: %v", err)
 	}
-	usr, err := st.Users().Create(context.Background(), store.User{Email: "user@example.com", Role: "user"})
+	usr, err := st.Users().Create(t.Context(), store.User{Email: "user@example.com", Role: "user"})
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-	adminSess, err = sm.Create(context.Background(), admin.ID, "127.0.0.1", "test-agent")
+	adminSess, err = sm.Create(t.Context(), admin.ID, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("SessionManager.Create (admin): %v", err)
 	}
-	userSess, err = sm.Create(context.Background(), usr.ID, "127.0.0.1", "test-agent")
+	userSess, err = sm.Create(t.Context(), usr.ID, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("SessionManager.Create (user): %v", err)
 	}

@@ -28,8 +28,7 @@ func (r *rejection) Unwrap() error { return ErrUnauthorized }
 // any error that is not a *rejection, so a return path that forgets to attach
 // a reason degrades to a useless log field rather than to a panic.
 func ReasonOf(err error) string {
-	var r *rejection
-	if errors.As(err, &r) {
+	if r, ok := errors.AsType[*rejection](err); ok {
 		return r.reason
 	}
 	return "unknown"

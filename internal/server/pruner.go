@@ -32,13 +32,12 @@ var pruneBatchSize = 5000
 // cancelled. Started as a goroutine by Server.Run; ctx cancellation is its
 // only shutdown path.
 func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection, log *slog.Logger) {
-	ticker := time.NewTicker(prunerInterval)
-	defer ticker.Stop()
+	tick := time.Tick(prunerInterval)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tick:
 			prune(ctx, st, ret, log)
 		}
 	}

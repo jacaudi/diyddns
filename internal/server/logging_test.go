@@ -79,7 +79,7 @@ func TestNewLogger_AddsRequestIDFromContext(t *testing.T) {
 // all -- an empty string reads as "correlation failed" on every pruner sweep.
 func TestNewLogger_OmitsRequestIDKeyWithoutRequestContext(t *testing.T) {
 	recs := logRecords(t, func(log *slog.Logger) {
-		log.LogAttrs(context.Background(), slog.LevelWarn, "background sweep")
+		log.LogAttrs(t.Context(), slog.LevelWarn, "background sweep")
 	})
 	if len(recs) != 1 {
 		t.Fatalf("got %d records, want 1", len(recs))

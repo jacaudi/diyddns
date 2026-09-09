@@ -87,13 +87,12 @@ func NewWorker(st *store.Store, cs *Clients, key []byte, maxAttempts int, audit 
 // cancelled. Started as a goroutine by Server.Run; ctx cancellation is its
 // only shutdown path.
 func (w *Worker) Run(ctx context.Context) {
-	ticker := time.NewTicker(notifierInterval)
-	defer ticker.Stop()
+	tick := time.Tick(notifierInterval)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tick:
 			w.sweep(ctx)
 		}
 	}
@@ -279,8 +278,7 @@ func classifySendError(err error) string {
 	if errors.Is(err, ErrDenied) {
 		return FailureBlocked
 	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
 		return FailureBlocked
 	}
 	// crypto/tls wraps every certificate-verification failure in
@@ -288,8 +286,7 @@ func classifySendError(err error) string {
 	// unknown-authority, hostname-mismatch and invalid-certificate alike.
 	// Verified by execution: an unknown-authority failure matches here, and
 	// separate errors.As branches for the x509 types beneath it never fire.
-	var certErr *tls.CertificateVerificationError
-	if errors.As(err, &certErr) {
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
 		return FailureTLS
 	}
 	return FailureUnreachable

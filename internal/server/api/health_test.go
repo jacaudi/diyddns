@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,7 +11,7 @@ import (
 
 func openMemStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(context.Background(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

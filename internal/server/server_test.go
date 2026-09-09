@@ -31,7 +31,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 
 func memStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(context.Background(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestServer_RunShutsDownOnCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()
 	cancel()

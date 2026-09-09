@@ -7,6 +7,7 @@
 package config
 
 import (
+	"cmp"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -537,12 +538,8 @@ func (a Auth) ResolveWebAuthn(baseURL string) (rpID, rpOrigin string, err error)
 	if u.Hostname() == "" {
 		return "", "", fmt.Errorf("config: server.base_url %q has no host, cannot derive WebAuthn RP ID", baseURL)
 	}
-	if rpID == "" {
-		rpID = u.Hostname()
-	}
-	if rpOrigin == "" {
-		rpOrigin = u.Scheme + "://" + u.Host
-	}
+	rpID = cmp.Or(rpID, u.Hostname())
+	rpOrigin = cmp.Or(rpOrigin, u.Scheme+"://"+u.Host)
 	return rpID, rpOrigin, validateRPID(rpID)
 }
 

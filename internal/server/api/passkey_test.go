@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -85,12 +84,12 @@ func jarPost(t *testing.T, client *http.Client, endpoint string, body any, csrf 
 // directly via SessionManager rather than POSTing credentials.
 func jarSeedSession(t *testing.T, client *http.Client, h fullHarness, email string) string {
 	t.Helper()
-	u, err := h.st.Users().GetByEmail(context.Background(), email)
+	u, err := h.st.Users().GetByEmail(t.Context(), email)
 	if err != nil {
 		t.Fatalf("jarSeedSession lookup %q: %v", email, err)
 	}
 	sm := auth.NewSessionManager(h.st.Sessions(), h.st.Users(), time.Hour, time.Minute)
-	sess, err := sm.Create(context.Background(), u.ID, "", "")
+	sess, err := sm.Create(t.Context(), u.ID, "", "")
 	if err != nil {
 		t.Fatalf("jarSeedSession create for %q: %v", email, err)
 	}
@@ -110,7 +109,7 @@ func jarSeedSession(t *testing.T, client *http.Client, h fullHarness, email stri
 // round-trips the plaintext.
 func seedBootstrapToken(t *testing.T, st *store.Store, token string) {
 	t.Helper()
-	if err := st.Bootstrap().SetTokenHash(context.Background(), auth.HashToken(token)); err != nil {
+	if err := st.Bootstrap().SetTokenHash(t.Context(), auth.HashToken(token)); err != nil {
 		t.Fatalf("seed bootstrap token: %v", err)
 	}
 }

@@ -139,7 +139,7 @@ func TestFinishEnroll_GuardsBeforeContact(t *testing.T) {
 
 	called := false
 	p := enrollParams{out: &nopWriter{}, server: "https://x", credFile: credPath, force: false}
-	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+	err := finishEnroll(t.Context(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		called = true
 		return enroll.Result{}, nil
 	})
@@ -154,7 +154,7 @@ func TestFinishEnroll_GuardsBeforeContact(t *testing.T) {
 func TestFinishEnroll_RequiresServer(t *testing.T) {
 	dir := t.TempDir()
 	p := enrollParams{out: &nopWriter{}, server: "", credFile: filepath.Join(dir, "credentials.json")}
-	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+	err := finishEnroll(t.Context(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		return enroll.Result{}, nil
 	})
 	if err == nil {
@@ -166,7 +166,7 @@ func TestFinishEnroll_SavesOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	credPath := filepath.Join(dir, "credentials.json")
 	p := enrollParams{out: &nopWriter{}, server: "https://srv/", credFile: credPath}
-	err := finishEnroll(context.Background(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
+	err := finishEnroll(t.Context(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		return enroll.Result{DeviceID: "dev-1", Secret: "c2VjcmV0"}, nil
 	})
 	if err != nil {
@@ -203,7 +203,7 @@ func TestEnrollCmd_Code_EndToEnd(t *testing.T) {
 	cmd := newEnrollCmd()
 	cmd.SetArgs([]string{"--code", "ABC-123", "--server", srv.URL, "--credentials-file", credPath})
 	cmd.SetErr(&nopWriter{})
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("enroll --code: %v", err)
 	}
 	if gotCode != "ABC-123" {
@@ -223,7 +223,7 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 		cmd := newEnrollCmd()
 		cmd.SetArgs([]string{"--code", "x", "--oidc", "--server", "https://x"})
 		cmd.SetErr(&nopWriter{})
-		if err := cmd.ExecuteContext(context.Background()); err == nil {
+		if err := cmd.ExecuteContext(t.Context()); err == nil {
 			t.Fatal("want error when two modes are set")
 		}
 	})
@@ -231,7 +231,7 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 		cmd := newEnrollCmd()
 		cmd.SetArgs([]string{"--server", "https://x"})
 		cmd.SetErr(&nopWriter{})
-		if err := cmd.ExecuteContext(context.Background()); err == nil {
+		if err := cmd.ExecuteContext(t.Context()); err == nil {
 			t.Fatal("want error when no mode is set")
 		}
 	})
@@ -239,7 +239,7 @@ func TestEnrollCmd_ModeSelection(t *testing.T) {
 		cmd := newEnrollCmd()
 		cmd.SetArgs([]string{"--code", "", "--server", "https://x"})
 		cmd.SetErr(&nopWriter{})
-		err := cmd.ExecuteContext(context.Background())
+		err := cmd.ExecuteContext(t.Context())
 		if err == nil {
 			t.Fatal("want error for --code \"\"")
 		}

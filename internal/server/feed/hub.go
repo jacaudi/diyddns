@@ -67,8 +67,7 @@ func causePeerGone(err error) *closeCause {
 // cancel in this package passes a *closeCause, so anything else is a bug;
 // it degrades to causeShutdown rather than panicking, and the pump logs it.
 func causeOf(ctx context.Context) *closeCause {
-	var c *closeCause
-	if errors.As(context.Cause(ctx), &c) && c != nil {
+	if c, ok := errors.AsType[*closeCause](context.Cause(ctx)); ok && c != nil {
 		return c
 	}
 	return causeShutdown

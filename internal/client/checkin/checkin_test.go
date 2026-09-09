@@ -1,7 +1,6 @@
 package checkin
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -62,7 +61,7 @@ func TestClient_Checkin_SignsAndParsesFieldParity(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	c.now = func() time.Time { return time.Unix(1_700_000_000, 0) } // white-box seam
-	res, err := c.Checkin(context.Background(), Report{IPv4: "203.0.113.7"})
+	res, err := c.Checkin(t.Context(), Report{IPv4: "203.0.113.7"})
 	if err != nil {
 		t.Fatalf("Checkin: %v", err)
 	}
@@ -90,7 +89,7 @@ func TestClient_Checkin_StatusMapping(t *testing.T) {
 			w.WriteHeader(tt.code)
 		}))
 		c, _ := NewClient(srv.URL, "d", key, Options{})
-		_, err := c.Checkin(context.Background(), Report{IPv4: "203.0.113.7"})
+		_, err := c.Checkin(t.Context(), Report{IPv4: "203.0.113.7"})
 		if !errors.Is(err, tt.wantErr) {
 			t.Errorf("status %d → err %v, want %v", tt.code, err, tt.wantErr)
 		}

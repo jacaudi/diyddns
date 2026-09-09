@@ -24,8 +24,7 @@ var ErrConflict = errors.New("store: conflict")
 //
 // Both indicate a duplicate-key conflict and are mapped to ErrConflict.
 func isUniqueViolation(err error) bool {
-	var sErr *sqlite.Error
-	if errors.As(err, &sErr) {
+	if sErr, ok := errors.AsType[*sqlite.Error](err); ok {
 		code := sErr.Code()
 		return code == 2067 || code == 1555
 	}

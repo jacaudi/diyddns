@@ -57,7 +57,7 @@ func TestNotifySmoke(t *testing.T) {
 	step(t, "scrape BOOTSTRAP_TOKEN from the server log")
 	token := scrapeToken(t, srv)
 
-	client := &http.Client{Jar: newBrowserJar(t), Timeout: 30 * time.Second}
+	client := &http.Client{Jar: newJar(t), Timeout: 30 * time.Second}
 	rp := virtualwebauthn.RelyingParty{Name: "DIYDDNS", ID: rpIDFor(t, addr), Origin: baseURL}
 
 	step(t, "claim the first admin (WebAuthn ceremony)")

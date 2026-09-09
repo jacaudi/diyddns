@@ -37,7 +37,7 @@ type appData struct {
 // newAppData builds the shell data for a page rendered to an authenticated user.
 func (h *handler) newAppData(usr store.User, sess store.Session, title, nav string) appData {
 	return appData{
-		pageData:             pageData{CSRFToken: sess.CSRFToken},
+		CSRFToken:            sess.CSRFToken,
 		Title:                title,
 		Nav:                  nav,
 		Email:                usr.Email,

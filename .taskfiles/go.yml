@@ -4,9 +4,9 @@ version: '3'
 # The `go` directive in go.mod is a MINIMUM, not a pin: a newer local toolchain
 # satisfies it and stays vulnerable to GO-2026-5856. Keep this value in lockstep
 # with go.mod's `go` directive — Renovate bumps go.mod but NOT this line, and the
-# resulting mismatch fails hard ("go.mod requires go >= X, running go1.25.12").
+# resulting mismatch fails hard ("go.mod requires go >= X, running go1.Y.Z").
 env:
-  GOTOOLCHAIN: go1.25.13
+  GOTOOLCHAIN: go1.27.1
 
 tasks:
   ci:
