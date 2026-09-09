@@ -290,9 +290,8 @@ func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID st
 // so the on-screen link is the only thing standing between u and a permanent
 // lockout.
 //
-// The self-service path (doSelfServiceRecovery) has no equivalent Disabled
-// check and still emails a recovery link to a disabled account; that gap is
-// out of scope for #82 and is not fixed here.
+// The self-service path (doSelfServiceRecovery) guards on the same field
+// since #89, so neither path mails a recovery link to a disabled account.
 func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u store.User) (string, Delivery, error) {
 	if s.passkeys == nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", ErrWebAuthnUnavailable)
@@ -379,6 +378,15 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 	if err != nil {
 		return
 	}
+	// #89: a disabled account keeps its passkeys (applyDisabled revokes
+	// sessions, not credentials), so the count below would let the send
+	// proceed — and redeeming the link revokes every passkey for a login that
+	// is refused anyway. Mirror IssueRecovery's #82 guard. Silent, like the
+	// unknown-email and no-passkey exits above and below: the endpoint answers
+	// nil unconditionally so nothing about the account leaks.
+	if u.Disabled {
+		return
+	}
 	count, err := s.st.WebAuthnCredentials().CountWebAuthnCredentials(ctx, u.ID)
 	if err != nil || count == 0 {
 		return
@@ -397,18 +405,25 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 		})
 	}
 
+	s.notifyAdminsOfSelfServiceRecovery(ctx, u, ip)
+}
+
+// notifyAdminsOfSelfServiceRecovery mails every enabled admin that a
+// self-service recovery link was issued for u. It shares the caller's
+// delivery budget: ctx is the same bounded context the user's send ran on.
+func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u store.User, ip string) {
 	admins, err := s.st.Users().List(ctx)
 	if err != nil {
 		// Distinguish an exhausted budget from a genuine store failure. The
 		// canonical case is a stalled SMTP peer consuming the whole budget at
-		// the user's send above, after which this call fails on an already-dead
-		// context — and the old message pointed a debugger at a database that
-		// was perfectly healthy.
+		// the user's send in the caller, after which this call fails on an
+		// already-dead context — and the old message pointed a debugger at a
+		// database that was perfectly healthy.
 		//
 		// errors.Is / ctx.Err(), never `err == context.DeadlineExceeded`:
 		// errorlint runs with comparison: true and rejects that form.
 		//
-		// Re-basing this tail on a fresh context so a slow first recipient
+		// Re-basing this function on a fresh context so a slow first recipient
 		// cannot starve the admin notifications is #83b, deferred to its own
 		// design. This line stays useful afterwards: other causes of a dead
 		// context remain.
