@@ -28,3 +28,13 @@
   </div>
 </div>
 {{end}}
+
+{{/* The ?status= filter's options. The values are the Status constants
+     (view.go), so the two device lists share one option list rather than two
+     that could drift. Dot is the selected token, "" for All. */}}
+{{define "statusOptions"}}
+        <option value="" {{if eq . ""}}selected{{end}}>All</option>
+        <option value="online" {{if eq . "online"}}selected{{end}}>Online</option>
+        <option value="stale" {{if eq . "stale"}}selected{{end}}>Stale</option>
+        <option value="never" {{if eq . "never"}}selected{{end}}>Never seen</option>
+        <option value="disabled" {{if eq . "disabled"}}selected{{end}}>Disabled</option>{{end}}

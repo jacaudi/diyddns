@@ -1,22 +1,23 @@
 {{define "content"}}
 <div class="page-head">
-  <div><h1>My devices</h1><p class="sub">{{.Summary}}</p></div>
-  <a class="btn primary" href="/devices/new">+ New device</a>
+  <div><h1>All devices</h1><p class="sub">{{.Summary}}</p></div>
 </div>
 
 {{if eq .Total 0}}
 <div class="card"><div class="empty">
   <div class="icon">📡</div>
   <h3>No devices yet</h3>
-  <p>Create a device to get an enrollment code, then run the client with it.</p>
-  <a class="btn primary" href="/devices/new">+ New device</a>
+  <p>Nobody has enrolled a device. Users create devices from their own Devices page.</p>
 </div></div>
 {{else}}
 <div class="card">
-  <form class="filterbar" method="get" action="/devices">
+  <form class="filterbar" method="get" action="/admin/devices">
     <div class="field grow">
-      <label for="q">Search</label>
-      <input class="input" id="q" name="q" value="{{.Q}}" placeholder="Filter by label or IP…">
+      <label for="owner">Owner</label>
+      <select class="input" id="owner" name="owner">
+        <option value="" {{if eq .Owner ""}}selected{{end}}>All owners</option>
+        {{range .Owners}}<option value="{{.ID}}" {{if eq .ID $.Owner}}selected{{end}}>{{.Email}}</option>{{end}}
+      </select>
     </div>
     <div class="field">
       <label for="status">Status</label>
@@ -30,17 +31,17 @@
   <div class="table-wrap">
     <table class="grid-table responsive">
       <thead><tr>
-        <th>Device</th><th>Status</th><th>Current IPv4</th><th>Current IPv6</th><th>Last seen</th><th></th>
+        <th>Device</th><th>Owner</th><th>Status</th><th>Current IPv4</th><th>Current IPv6</th><th>Last seen</th>
       </tr></thead>
       <tbody>
         {{range .Devices}}
         <tr>
-          <td data-label="Device"><a class="primary-cell" href="/devices/{{.ID}}">{{.Label}}</a></td>
+          <td data-label="Device">{{if .Owned}}<a class="primary-cell" href="/devices/{{.ID}}">{{.Label}}</a>{{else}}<span class="primary-cell">{{.Label}}</span>{{end}}</td>
+          <td data-label="Owner"><a href="/admin/users/{{.OwnerID}}">{{.OwnerEmail}}</a></td>
           <td data-label="Status">{{template "statusTag" .Status}}</td>
           <td data-label="IPv4">{{template "codeOrDash" .IPv4}}</td>
           <td data-label="IPv6">{{template "mutedCodeOrDash" .IPv6}}</td>
           <td data-label="Last seen" class="muted nowrap" title="{{.LastSeenAbs}}">{{.LastSeenAt}}</td>
-          <td class="actions"><a class="btn sm" href="/devices/{{.ID}}">Open</a></td>
         </tr>
         {{end}}
       </tbody>
@@ -49,7 +50,7 @@
   {{else}}
   <div class="empty">
     <h3>No devices match that filter</h3>
-    <p><a href="/devices">Clear the filter</a> to see all {{.Total}} of your devices.</p>
+    <p><a href="/admin/devices">Clear the filter</a> to see all {{.Total}} devices.</p>
   </div>
   {{end}}
 </div>

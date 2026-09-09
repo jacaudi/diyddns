@@ -256,9 +256,10 @@ try {
     fail("the history screen did not render");
   }
 
-  step("walk the three admin screens");
+  step("walk the four admin screens");
   for (const [path, marker] of [
     ["/admin/users", "Users"],
+    ["/admin/devices", "browser-test-device"],
     ["/admin/audit", "Audit log"],
     ["/admin/server", "Server info"],
   ]) {
@@ -288,6 +289,7 @@ try {
     `${BASE_URL}/account`,
     `${BASE_URL}/admin/users`,
     `${BASE_URL}/admin/users/new`,
+    `${BASE_URL}/admin/devices`,
     `${BASE_URL}/admin/audit`,
     `${BASE_URL}/admin/server`,
   ]) {

@@ -405,7 +405,7 @@ func TestAppShell_ShowsAdminNavToAdmins(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	for _, want := range []string{`href="/admin/users"`, `href="/admin/audit"`, `href="/admin/server"`} {
+	for _, want := range []string{`href="/admin/users"`, `href="/admin/devices"`, `href="/admin/audit"`, `href="/admin/server"`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("admin nav missing %q", want)
 		}
@@ -2524,6 +2524,8 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 		{http.MethodGet, "/admin/audit"},
 		// Task 13 registers exactly this one — the last of the ten.
 		{http.MethodGet, "/admin/server"},
+		// #105 registers this one.
+		{http.MethodGet, "/admin/devices"},
 	} {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			form := url.Values{
@@ -3514,5 +3516,149 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 func TestKnownEventTypes_IncludesRetentionPrune(t *testing.T) {
 	if !slices.Contains(knownEventTypes, "retention.prune") {
 		t.Errorf("knownEventTypes is missing %q", "retention.prune")
+	}
+}
+
+// TestAdminDevices_ListsEveryOwnersDevices is #105's happy path: the admin page
+// lists devices across users, links each owner to the admin user page, links a
+// device to its owner-scoped detail only when the signed-in admin owns it, and
+// offers no mutation at all.
+func TestAdminDevices_ListsEveryOwnersDevices(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	other := seedUser(t, st, "mark@example.com", "user")
+	mine := seedDevice(t, st, admin.ID, "admin-pi")
+	theirs := seedDevice(t, st, other.ID, "marks-pi")
+	if err := st.Devices().UpdateIP(t.Context(), theirs.ID, "203.0.113.7", "2001:db8::7", "v1", "pi", "linux", store.NowUnix()); err != nil {
+		t.Fatalf("update ip: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/devices", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"admin-pi", "marks-pi",
+		"admin@example.com", "mark@example.com",
+		`href="/admin/users/` + admin.ID + `"`,
+		`href="/admin/users/` + other.ID + `"`,
+		`href="/devices/` + mine.ID + `"`, // the admin owns this one
+		"203.0.113.7", "2001:db8::7",
+		"Online", "Never seen",
+		`title="`, // absolute time behind the relative one
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	if strings.Contains(body, `href="/devices/`+theirs.ID+`"`) {
+		t.Error("another user's device is linked; detail pages are owner-scoped")
+	}
+	if strings.Contains(body, "<form method=\"post\"") {
+		t.Error("the admin devices page is read-only for v1 and must carry no mutation form")
+	}
+}
+
+func TestAdminDevices_FiltersByOwner(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	other := seedUser(t, st, "mark@example.com", "user")
+	seedDevice(t, st, admin.ID, "admin-pi")
+	seedDevice(t, st, other.ID, "marks-pi")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/devices?owner="+other.ID, nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "marks-pi") {
+		t.Error("the filtered owner's device is missing")
+	}
+	if strings.Contains(body, "admin-pi") {
+		t.Error("a device of another owner leaked through the owner filter")
+	}
+	if !strings.Contains(body, `value="`+other.ID+`" selected`) {
+		t.Error("the owner select does not preserve the chosen owner")
+	}
+}
+
+func TestAdminDevices_FiltersByStatus(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	other := seedUser(t, st, "mark@example.com", "user")
+	live := seedDevice(t, st, other.ID, "live-pi")
+	seedDevice(t, st, admin.ID, "silent-pi")
+	touchDevice(t, st, live.ID, store.NowUnix())
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/devices?status=online", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "live-pi") {
+		t.Error("the online device is missing")
+	}
+	if strings.Contains(body, "silent-pi") {
+		t.Error("a never-seen device leaked through status=online")
+	}
+	if !strings.Contains(body, `value="online" selected`) {
+		t.Error("the status select does not preserve the chosen status")
+	}
+}
+
+// TestAdminDevices_EmptyStates keeps "no devices on the server" and "none match
+// the filter" distinct, as /devices does.
+func TestAdminDevices_EmptyStates(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	cookie := signIn(t, deps, admin)
+
+	get := func(path string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", path, rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	body := get("/admin/devices")
+	if !strings.Contains(body, "No devices yet") {
+		t.Error("an empty server does not say so")
+	}
+	if strings.Contains(body, "Clear the filter") {
+		t.Error("an empty server offers to clear a filter that cannot be the cause")
+	}
+
+	seedDevice(t, st, admin.ID, "admin-pi")
+	body = get("/admin/devices?status=disabled")
+	if !strings.Contains(body, "No devices match that filter") {
+		t.Error("a filter that matches nothing does not say so")
+	}
+	if !strings.Contains(body, `href="/admin/devices"`) {
+		t.Error("the filtered-empty state has no link back to the unfiltered list")
+	}
+	if strings.Contains(body, "No devices yet") {
+		t.Error("a filtered-empty list is described as an empty server")
 	}
 }

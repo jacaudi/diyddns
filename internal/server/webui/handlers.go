@@ -26,7 +26,7 @@ type pageData struct {
 type appData struct {
 	pageData
 	Title                string
-	Nav                  string // "devices" | "account" | "admin-users" | "admin-endpoints" | "admin-feed" | "admin-audit" | "admin-server"
+	Nav                  string // "devices" | "account" | "admin-users" | "admin-devices" | "admin-endpoints" | "admin-feed" | "admin-audit" | "admin-server"
 	Email                string
 	Initials             string
 	IsAdmin              bool
