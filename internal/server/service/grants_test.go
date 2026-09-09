@@ -350,6 +350,47 @@ func TestGrantService_RequestSelfServiceRecovery_OIDCOnlyNoPasskey_NoEmailNoGran
 	}
 }
 
+func TestGrantService_RequestSelfServiceRecovery_DisabledTarget_NoEmailNoGrant(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 4)}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+
+	u := seedUser(t, st, "disabled@example.com", "user")
+	seedUser(t, st, "admin@example.com", "admin")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+	if err := st.Users().SetDisabled(t.Context(), u.ID, true); err != nil {
+		t.Fatalf("SetDisabled: %v", err)
+	}
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+
+	// #89: a disabled account keeps its passkeys (applyDisabled revokes
+	// sessions only), so the passkey-count gate passes and, without a Disabled
+	// check, the link is minted and mailed — and redeeming it revokes every
+	// passkey for a login that is refused anyway. Nothing may go out: not the
+	// recovery mail, not the admin notification.
+	assertNoSendWithin(t, mailer.sendCh, selfServiceRecoveryNoSendWindow)
+
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "passkey.recovery_issued"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 0 {
+		t.Errorf("passkey.recovery_issued entries = %d, want 0 (no grant minted for a disabled account)", len(page.Rows))
+	}
+
+	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("passkeys after request = %d, want 1 (untouched)", len(creds))
+	}
+}
+
 func TestGrantService_RequestSelfServiceRecovery_HappyPath_EmailsUserAndAdmins(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})
@@ -1002,8 +1043,8 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend(
 // never reach.
 //
 // Why a second test is unavoidable: when the budget is exhausted at the user
-// send, Users().List(ctx) at grants.go:332 fails on the dead context and the
-// function returns at :335, so the admin loop never executes. Here the user send
+// send, Users().List(ctx) in notifyAdminsOfSelfServiceRecovery fails on the dead context and the
+// function returns before the admin loop, so it never executes. Here the user send
 // is INSTANT (delayFromCall: 2) and succeeds inside the budget, List runs on a
 // live context, and only the admin send stalls past the deadline.
 func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNotify(t *testing.T) {
