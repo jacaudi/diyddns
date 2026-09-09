@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacaudi/diyddns/internal/client/checkin"
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
@@ -133,5 +135,32 @@ func writeJSON(t *testing.T, path string, v any) {
 	b, _ := json.Marshal(v)
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #102: once the poller gives up on a rejected credential, the operator must
+// read the cause AND the remedy from the container log, not a bare
+// "unauthorized". Any other error passes through untouched.
+func TestExplainRunError_RejectedCredentialNamesTheRemedy(t *testing.T) {
+	err := explainRunError(fmt.Errorf("wrapped: %w", checkin.ErrUnauthorized), "https://ddns.example.com")
+	if !errors.Is(err, checkin.ErrUnauthorized) {
+		t.Fatalf("explained error must still match checkin.ErrUnauthorized, got %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"rotated", "disabled", "https://ddns.example.com/devices/new", "enroll --server https://ddns.example.com", "--force"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+}
+
+func TestExplainRunError_OtherErrorsPassThrough(t *testing.T) {
+	in := errors.New("dial tcp: connection refused")
+	got := explainRunError(in, "https://ddns.example.com")
+	if !errors.Is(got, in) || got.Error() != in.Error() {
+		t.Errorf("explainRunError(other) = %v, want the same error back, unwrapped and unchanged", got)
+	}
+	if got := explainRunError(nil, "https://ddns.example.com"); got != nil {
+		t.Errorf("explainRunError(nil) = %v, want nil", got)
 	}
 }

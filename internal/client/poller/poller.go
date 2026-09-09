@@ -7,6 +7,7 @@ package poller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -17,6 +18,18 @@ import (
 
 // ErrNoQuorum means no address family reached quorum this cycle.
 var ErrNoQuorum = errors.New("poller: no address family reached quorum")
+
+// ErrCredentialRejected is returned by Run once the server has answered 401
+// on unauthorizedLimit consecutive check-ins: the device secret was rotated
+// or the device was disabled, and no amount of retrying will change that.
+// It wraps checkin.ErrUnauthorized so callers can match either.
+var ErrCredentialRejected = fmt.Errorf("poller: credential rejected by the server: %w", checkin.ErrUnauthorized)
+
+// unauthorizedLimit is how many consecutive 401s Run tolerates before it
+// stops. The server answers 401 for every rejection kind — clock skew and a
+// replayed nonce included — with a deliberately uniform body, so a single
+// one may be transient; three in a row across two backoff sleeps is not.
+const unauthorizedLimit = 3
 
 // Discoverer runs public-IP discovery for both families.
 type Discoverer interface {
@@ -124,6 +137,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 // on success or an exponential backoff (capped at interval) on failure.
 func (p *Poller) Run(ctx context.Context) error {
 	var backoff time.Duration
+	var unauthorized int // consecutive checkin.ErrUnauthorized results
 	for {
 		err := p.RunOnce(ctx)
 		if ctx.Err() != nil {
@@ -131,11 +145,21 @@ func (p *Poller) Run(ctx context.Context) error {
 		}
 		var d time.Duration
 		if err != nil {
+			if errors.Is(err, checkin.ErrUnauthorized) {
+				unauthorized++
+				if unauthorized >= unauthorizedLimit {
+					p.log.LogAttrs(ctx, slog.LevelError, "credential rejected by the server; stopping",
+						slog.Int("consecutive", unauthorized), slog.Any("error", err))
+					return ErrCredentialRejected
+				}
+			} else {
+				unauthorized = 0
+			}
 			p.log.LogAttrs(ctx, slog.LevelWarn, "cycle failed", slog.Any("error", err))
 			backoff = nextBackoff(backoff, p.interval)
 			d = backoff
 		} else {
-			backoff = 0
+			backoff, unauthorized = 0, 0
 			d = p.jittered()
 		}
 		if err := p.clock.Sleep(ctx, d); err != nil {
