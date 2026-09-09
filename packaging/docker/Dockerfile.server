@@ -2,7 +2,7 @@
 
 # --platform=$BUILDPLATFORM keeps the compile native; GOARCH cross-compiles.
 # Without it the arm64 build runs under QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 
 # Supplied automatically by BuildKit.
 ARG TARGETOS

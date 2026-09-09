@@ -90,7 +90,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=github-releases depName=golangci/golangci-lint
-        VERSION: 2.12.2
+        VERSION: 2.13.2
       run: |
         set -euo pipefail
         curl -sSfL "https://github.com/golangci/golangci-lint/releases/download/v${VERSION}/golangci-lint-${VERSION}-linux-amd64.tar.gz" \
@@ -102,7 +102,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=go depName=golang.org/x/vuln
-        VERSION: v1.1.4
+        VERSION: v1.8.0
       run: go install "golang.org/x/vuln/cmd/govulncheck@${VERSION}"
 
     - name: Install hadolint
