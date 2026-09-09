@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0](https://github.com/jacaudi/diyddns/compare/v0.3.0...v0.4.0) (2026-09-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **feed:** notification endpoints configured under the per-user model are removed on upgrade and must be recreated by an admin.
+* **email:** the server now refuses to start when email.enabled is true and email.from or server.base_url is non-ASCII or not already in canonical form (email.from with a display name or surrounding whitespace, e.g. "DIYDDNS <noreply@example.com>" instead of "noreply@example.com", is rejected even though it parses). A previously-working config using such a value must be corrected before startup will succeed.
+
+### Features
+
+* **admin:** do not email a recovery link to a disabled account ([#84](https://github.com/jacaudi/diyddns/issues/84)) ([a47401c](https://github.com/jacaudi/diyddns/commit/a47401c5529404c7995d36ed377a52a6084f2212))
+* **feed:** admin-only outbound integrations and a gateway feed ([#106](https://github.com/jacaudi/diyddns/issues/106)) ([#109](https://github.com/jacaudi/diyddns/issues/109)) ([949a62f](https://github.com/jacaudi/diyddns/commit/949a62f2c8a330d291a3eaeb476d78dd6c0af16c))
+* **notify:** notify configured endpoints when a device's public IP changes ([#99](https://github.com/jacaudi/diyddns/issues/99)) ([3cb3aa5](https://github.com/jacaudi/diyddns/commit/3cb3aa5b80e016b6ff95258e589a1887e1d2cafb))
+* **server:** add opt-in retention pruning for ip_history and audit_log ([#96](https://github.com/jacaudi/diyddns/issues/96)) ([1618d8c](https://github.com/jacaudi/diyddns/commit/1618d8c4a754002aa2080b60c4b3af33c9e8f116))
+* **webui:** admin page listing every device with current IPs and last seen ([#113](https://github.com/jacaudi/diyddns/issues/113)) ([58b57c2](https://github.com/jacaudi/diyddns/commit/58b57c2b16bdfc3306ecfefeed9d8058d92edb46)), closes [#105](https://github.com/jacaudi/diyddns/issues/105)
+
+
+### Bug Fixes
+
+* **ci:** make the lint and e2e gates watch what they claim to watch ([#85](https://github.com/jacaudi/diyddns/issues/85)) ([5fa122d](https://github.com/jacaudi/diyddns/commit/5fa122dffdaabc1513384d5965ed2014515b36f3))
+* **client:** stop retrying forever once the server has rejected the credential ([#111](https://github.com/jacaudi/diyddns/issues/111)) ([b5f52a7](https://github.com/jacaudi/diyddns/commit/b5f52a77d40e0a8729e409dd0c0c20315be18b2e)), closes [#102](https://github.com/jacaudi/diyddns/issues/102)
+* **email:** reject non-ASCII and malformed addresses at every route onto the wire ([#87](https://github.com/jacaudi/diyddns/issues/87)) ([cafd6ef](https://github.com/jacaudi/diyddns/commit/cafd6ef7135fb9d6b39e8353a5ec5784f7586c9e))
+* **service:** pin the self-service audit repairs and stop blaming the database ([#86](https://github.com/jacaudi/diyddns/issues/86)) ([3eed9f8](https://github.com/jacaudi/diyddns/commit/3eed9f8af4bdeff467c917df8ae397a909942a1e))
+* **service:** refuse a self-service recovery link for a disabled account ([#110](https://github.com/jacaudi/diyddns/issues/110)) ([1e7089d](https://github.com/jacaudi/diyddns/commit/1e7089df5792856dbbcc9a234fe2ea8d45aeaff1)), closes [#89](https://github.com/jacaudi/diyddns/issues/89)
+
 ## [0.3.0](https://github.com/jacaudi/diyddns/compare/v0.2.0...v0.3.0) (2026-08-19)
 
 
