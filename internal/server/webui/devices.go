@@ -29,6 +29,27 @@ type deviceRow struct {
 	LastSeenAbs string // absolute UTC, for the title attribute
 }
 
+// newDeviceRow derives the rendered form of a device: its status and the two
+// last-seen renderings. Shared by the user-scoped list and the admin list so the
+// derivation cannot drift between the two screens.
+func newDeviceRow(d store.Device, now time.Time) deviceRow {
+	return deviceRow{
+		ID:          d.ID,
+		Label:       d.Label,
+		Status:      deviceStatus(d, now),
+		IPv4:        d.CurrentIPv4,
+		IPv6:        d.CurrentIPv6,
+		LastSeenAt:  relTime(d.LastSeenAt, now),
+		LastSeenAbs: absTime(d.LastSeenAt),
+	}
+}
+
+// matchesStatus reports whether the row passes a ?status= filter; an empty
+// filter passes everything. The filter token is the Status constant itself.
+func (r deviceRow) matchesStatus(status string) bool {
+	return status == "" || string(r.Status) == status
+}
+
 // devicesData is devices.html's template data.
 type devicesData struct {
 	appData
@@ -56,20 +77,12 @@ func (h *handler) handleDevices(w http.ResponseWriter, r *http.Request, usr stor
 	rows := make([]deviceRow, 0, len(devices))
 	counts := map[Status]int{}
 	for _, d := range devices {
-		st := deviceStatus(d, now)
-		counts[st]++
-		if !matchesQuery(d, q) || (status != "" && string(st) != status) {
+		row := newDeviceRow(d, now)
+		counts[row.Status]++
+		if !matchesQuery(d, q) || !row.matchesStatus(status) {
 			continue
 		}
-		rows = append(rows, deviceRow{
-			ID:          d.ID,
-			Label:       d.Label,
-			Status:      st,
-			IPv4:        d.CurrentIPv4,
-			IPv6:        d.CurrentIPv6,
-			LastSeenAt:  relTime(d.LastSeenAt, now),
-			LastSeenAbs: absTime(d.LastSeenAt),
-		})
+		rows = append(rows, row)
 	}
 
 	h.render(w, r, "devices", devicesData{
