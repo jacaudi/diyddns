@@ -489,8 +489,11 @@ func (s *GrantService) RedeemBegin(ctx context.Context, token string) (string, [
 }
 
 // RedeemFinish completes a grant redeem. Ordering (design C1,
-// verify-before-consume, NO sql.Tx — the store's single-connection pool
-// would deadlock a transaction wrapping these repos): verify the passkey in
+// verify-before-consume, NO sql.Tx — this sequence interleaves in-memory
+// WebAuthn verification with its writes, and the store's single-connection
+// pool means a transaction held across that would stall every other request
+// for the duration; store.RecordIPChange shows the shape a transaction takes
+// here, one that never yields control while it holds the connection): verify the passkey in
 // memory (no DB write) -> Consume the grant (the atomic single-use gate) ->
 // for a "recovery" grant, revoke the user's existing passkeys now that
 // mailbox/link possession is proven (confirm-then-revoke) -> persist the new

@@ -242,8 +242,12 @@ func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) 
 }
 
 // FinishClaim completes a passkey-based bootstrap claim. Ordering (design
-// D9/C1, verify-before-consume, NO sql.Tx — the store's single-connection
-// pool would deadlock a transaction wrapping these repos): re-check
+// D9/C1, verify-before-consume, NO sql.Tx — this sequence interleaves
+// in-memory WebAuthn verification with its writes, and the store's
+// single-connection pool means a transaction held across that would stall
+// every other request for the duration; store.RecordIPChange shows the shape
+// a transaction takes here, one that never yields control while it holds the
+// connection): re-check
 // AdminExists (closes the concurrent-double-admin race, mirroring Consume)
 // -> verify the passkey in memory (no DB write) -> Bootstrap.Consume (the
 // atomic single-row gate) -> create the credential-less admin (a local

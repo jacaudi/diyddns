@@ -365,3 +365,57 @@ type panickingNotifier struct{}
 func (panickingNotifier) IPChanged(context.Context, store.IPChangeEvent) {
 	panic("notifier exploded")
 }
+
+// blockIPHistoryInserts installs a SQLite trigger that aborts every INSERT
+// into ip_history, so a check-in fails between its two writes without any
+// fake store or injected repository. The trigger is removed on cleanup.
+func blockIPHistoryInserts(t *testing.T, st *store.Store) {
+	t.Helper()
+	const create = `CREATE TRIGGER block_ip_history_insert
+		BEFORE INSERT ON ip_history
+		BEGIN SELECT RAISE(ABORT, 'injected ip_history failure'); END`
+	if _, err := st.DB().ExecContext(t.Context(), create); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := st.DB().ExecContext(context.Background(), `DROP TRIGGER block_ip_history_insert`); err != nil {
+			t.Errorf("drop trigger: %v", err)
+		}
+	})
+}
+
+func TestCheckin_HistoryAppendFails_LeavesDeviceUnchanged(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+	svc := NewCheckinService(st, NopNotifier{})
+
+	// Establish a known stored address, then make the history write fail.
+	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4"}); err != nil {
+		t.Fatalf("seed Checkin: %v", err)
+	}
+	blockIPHistoryInserts(t, st)
+
+	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "5.6.7.8"}); err == nil {
+		t.Fatal("Checkin: error = nil, want the injected ip_history failure")
+	}
+
+	// #97: the device row and ip_history must agree — both writes land or
+	// neither does. A half-applied check-in shows the new IP with no history
+	// row for it, so "last change" silently skips the change.
+	got, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatalf("Devices.GetByID: %v", err)
+	}
+	if got.CurrentIPv4 != "1.2.3.4" {
+		t.Errorf("device CurrentIPv4 = %q, want 1.2.3.4 (the failed check-in must roll back)", got.CurrentIPv4)
+	}
+
+	page, err := st.IPHistory().Page(t.Context(), dev.ID, "", 50)
+	if err != nil {
+		t.Fatalf("IPHistory.Page: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Errorf("ip_history rows = %d, want 1 (only the seed check-in)", len(page.Rows))
+	}
+}

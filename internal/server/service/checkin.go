@@ -103,15 +103,18 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 		}, nil
 	}
 
-	if err := s.st.Devices().UpdateIP(ctx, dev.ID, effV4, effV6, r.ClientVersion, r.Hostname, r.OS, store.NowUnix()); err != nil {
-		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
-	}
-	row, err := s.st.IPHistory().Append(ctx, store.IPHistory{
+	// One transaction: the device row and its ip_history row land together or
+	// not at all. Writing them separately let a failure between the two leave
+	// a device showing an address with no history row for it, so the device
+	// page and the history page disagreed and "last change" — derived from
+	// the latest history row — silently skipped the change (#97).
+	row, err := s.st.RecordIPChange(ctx, store.IPChange{
 		DeviceID:      dev.ID,
 		IPv4:          effV4,
 		IPv6:          effV6,
-		ObservedAt:    store.NowUnix(),
 		ClientVersion: r.ClientVersion,
+		Hostname:      r.Hostname,
+		OS:            r.OS,
 	})
 	if err != nil {
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)

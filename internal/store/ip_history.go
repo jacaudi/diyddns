@@ -89,10 +89,16 @@ func decodeCursor(c string) (observedAt, id int64, err error) {
 // Append inserts a new IPHistory row. If h.ObservedAt is zero, it is set to
 // NowUnix(). Returns the inserted row with ID populated from LastInsertId.
 func (r *IPHistoryRepo) Append(ctx context.Context, h IPHistory) (IPHistory, error) {
+	return appendIPHistory(ctx, r.db, h)
+}
+
+// appendIPHistory carries the INSERT itself. Runs on the pool for Append and
+// on the transaction for RecordIPChange.
+func appendIPHistory(ctx context.Context, ex execer, h IPHistory) (IPHistory, error) {
 	if h.ObservedAt == 0 {
 		h.ObservedAt = NowUnix()
 	}
-	res, err := r.db.ExecContext(ctx,
+	res, err := ex.ExecContext(ctx,
 		`INSERT INTO ip_history (device_id, ipv4, ipv6, observed_at, client_version)
 		 VALUES (?, ?, ?, ?, ?)`,
 		h.DeviceID,
