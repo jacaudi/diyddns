@@ -12,6 +12,9 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"os"
+	"slices"
+	"strings"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -24,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
@@ -64,6 +68,10 @@ type Providers struct {
 	requestDur metric.Float64Histogram
 	deliveries metric.Int64Counter
 
+	// meter is retained for ObserveDB (Task 12), which registers its callback
+	// after the store is open.
+	meter metric.Meter
+
 	// loggerProvider is nil until Task 5 constructs it. CONCRETE type, never
 	// the otellog.LoggerProvider interface: see LoggerProvider()'s comment.
 	loggerProvider *sdklog.LoggerProvider
@@ -87,9 +95,68 @@ func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info 
 	if !cfg.Enabled {
 		return inert(), Status{}
 	}
-	// Tasks 3-6 replace this branch. Until then an enabled server is inert
-	// with an honest reason rather than half-constructed.
-	return inert(), Status{Reason: "telemetry: not yet implemented"}
+
+	// An endpoint must come from somewhere. Four variables can supply it, so
+	// this check lives here rather than in internal/config, which reaches the
+	// environment only through viper's DIYDDNS_ binding.
+	//
+	// A MISSING endpoint is not Fatal (THE FATAL RULE): it is an operator who
+	// has not finished wiring telemetry up, and the server must still start.
+	// TRIMMED, not raw. signalEndpoint trims because a k8s secret or --env-file
+	// endpoint routinely carries a trailing newline; if this gate tests the raw
+	// value, "\n" skips the degrade branch, reaches signalEndpoint, comes back
+	// Fatal, and serveCmd exits -- turning a MISSING endpoint into a refusal to
+	// boot, which is exactly what D5 and THE FATAL RULE forbid. An empty-rendered
+	// Helm value produces precisely this.
+	if strings.TrimSpace(cfg.Endpoint) == "" && !anyOTLPEndpointEnv() {
+		return inert(), Status{
+			Reason: "observability.otlp.enabled is true but no endpoint is configured " +
+				"(set observability.otlp.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)",
+		}
+	}
+
+	res, st := buildResource(ctx, cfg, info)
+	if st.Fatal {
+		return inert(), st
+	}
+
+	p := &Providers{}
+	// Each build* appends its provider's Shutdown to p.shutdown before it can
+	// fail, so a later failure still drains what was already constructed: the
+	// inline _ = p.Shutdown(ctx) below runs against p, not against the
+	// inert() this function then returns to the caller. That drain is a no-op
+	// until Task 7 implements Shutdown's fan-out (today Shutdown always
+	// returns nil without calling anything in p.shutdown).
+	for _, build := range []func(context.Context, config.OTLPSection, *resource.Resource) Status{
+		p.buildTraces,
+		p.buildMetrics,
+		p.buildLogsFor(logLevel),
+	} {
+		if st := build(ctx, cfg, res); st.Fatal {
+			_ = p.Shutdown(ctx)
+			return inert(), st
+		}
+	}
+	return p, Status{}
+}
+
+// anyOTLPEndpointEnv reports whether the operator supplied an endpoint through
+// any of the four variables the SDK reads.
+//
+// TRIMMED, same as every other endpoint gate in this package: a k8s
+// secretKeyRef or `echo "http://…" | base64` is at least as likely to carry a
+// trailing newline in an env var as in the YAML value, and an untrimmed
+// comparison here reads a whitespace-only value as "set" -- skipping the
+// degrade branch and letting New build three real providers against the SDK's
+// default localhost:4318 with a zero Status, the silent-open failure this
+// package exists to prevent.
+func anyOTLPEndpointEnv() bool {
+	return slices.ContainsFunc([]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+	}, func(k string) bool { return strings.TrimSpace(os.Getenv(k)) != "" })
 }
 
 // inert returns a Providers whose every accessor is a working no-op.
