@@ -1001,6 +1001,12 @@ func TestLoad_ObservabilityAcceptsProxyHeaderNames(t *testing.T) {
 
 // The smoke gate boots the real binary against config.example.yaml, but it is
 // behind //go:build smoke. Catch a malformed section in unit tests too.
+//
+// This also guards observability.otlp: adding observability.otlp.* to
+// keyDefaults makes "observability.otlp" a guarded section prefix
+// (sectionPrefixes, config.go), so the example's otlp: block must keep at
+// least one live (uncommented) child — enabled: false — or every boot fails
+// detectNullSections.
 func TestLoad_AcceptsShippedExampleConfig(t *testing.T) {
 	v := viper.New()
 	cfg, err := config.Load(v, filepath.Join("..", "..", "config.example.yaml"))
@@ -1048,5 +1054,85 @@ func TestLoad_IgnoresRemovedMaxEndpointsKey(t *testing.T) {
 	}
 	if _, err := config.Load(viper.New(), path); err != nil {
 		t.Fatalf("Load with the removed key present: %v", err)
+	}
+}
+
+func TestLoad_OTLPSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := `
+database:
+  path: ":memory:"
+observability:
+  request_id_header: X-Request-Id
+  otlp:
+    enabled: true
+    endpoint: http://otel-collector:4318
+    service_name: from-yaml
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(viper.New(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Observability.OTLP.Enabled {
+		t.Error("otlp.enabled did not bind — check the mapstructure tag")
+	}
+	if got, want := cfg.Observability.OTLP.Endpoint, "http://otel-collector:4318"; got != want {
+		t.Errorf("otlp.endpoint = %q, want %q", got, want)
+	}
+	if got, want := cfg.Observability.OTLP.ServiceName, "from-yaml"; got != want {
+		t.Errorf("otlp.service_name = %q, want %q", got, want)
+	}
+}
+
+// The three keys must default to their ZERO values. A non-empty service_name
+// default would make OTEL_SERVICE_NAME permanently unreachable under the
+// design's precedence rule (§5.2).
+func TestLoad_OTLPDefaultsAreZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "database:\n  path: \":memory:\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(viper.New(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Observability.OTLP.Enabled {
+		t.Error("otlp.enabled must default to false")
+	}
+	if cfg.Observability.OTLP.Endpoint != "" {
+		t.Errorf("otlp.endpoint must default to \"\", got %q", cfg.Observability.OTLP.Endpoint)
+	}
+	if cfg.Observability.OTLP.ServiceName != "" {
+		t.Errorf("otlp.service_name must default to \"\", got %q", cfg.Observability.OTLP.ServiceName)
+	}
+}
+
+// The three keys must round-trip through the DIYDDNS_* env vars, not just
+// YAML and Go zero values. Load has no viper.AutomaticEnv(), so a key
+// missing from keyDefaults has its env var SILENTLY dropped — see
+// keyDefaults' own comment (config.go) and TestRetention_BindsEnv above for
+// the same guard on a sibling section. TestLoad_OTLPDefaultsAreZero cannot
+// catch this: the Go zero value and viper's own default are identical, so
+// that test passes whether or not SetDefault/BindEnv ever ran for these keys.
+func TestLoad_OTLPBindsEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_OBSERVABILITY_OTLP_ENABLED", "true")
+	t.Setenv("DIYDDNS_OBSERVABILITY_OTLP_ENDPOINT", "http://collector:4318")
+	t.Setenv("DIYDDNS_OBSERVABILITY_OTLP_SERVICE_NAME", "from-env")
+
+	cfg := mustLoadWithDB(t)
+	if !cfg.Observability.OTLP.Enabled {
+		t.Error("otlp.enabled did not bind from DIYDDNS_OBSERVABILITY_OTLP_ENABLED — is it in keyDefaults?")
+	}
+	if got, want := cfg.Observability.OTLP.Endpoint, "http://collector:4318"; got != want {
+		t.Errorf("otlp.endpoint = %q, want %q (env var DIYDDNS_OBSERVABILITY_OTLP_ENDPOINT was dropped)", got, want)
+	}
+	if got, want := cfg.Observability.OTLP.ServiceName, "from-env"; got != want {
+		t.Errorf("otlp.service_name = %q, want %q (env var DIYDDNS_OBSERVABILITY_OTLP_SERVICE_NAME was dropped)", got, want)
 	}
 }

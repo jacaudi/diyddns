@@ -84,7 +84,24 @@ type RetentionSection struct {
 // itself. The mapstructure tag is REQUIRED: viper lowercases field names but
 // does not split them, so without it RequestIDHeader binds to nothing.
 type ObservabilitySection struct {
-	RequestIDHeader string `mapstructure:"request_id_header"`
+	RequestIDHeader string      `mapstructure:"request_id_header"`
+	OTLP            OTLPSection `mapstructure:"otlp"`
+}
+
+// OTLPSection configures OpenTelemetry export. Off by default.
+//
+// Only three keys live here. Everything else -- headers, protocol, TLS,
+// timeouts, sampler, batch tuning -- comes from the standard OTEL_* variables
+// the SDK already parses, so this section does not restate knowledge the SDK
+// owns (design D2).
+//
+// Every field defaults to its ZERO value on purpose. A non-empty ServiceName
+// default would make OTEL_SERVICE_NAME permanently unreachable, because a
+// non-empty YAML value wins over the environment.
+type OTLPSection struct {
+	Enabled     bool   `mapstructure:"enabled"`
+	Endpoint    string `mapstructure:"endpoint"`
+	ServiceName string `mapstructure:"service_name"`
 }
 
 // Auth holds all authentication-related configuration: browser sessions, agent
@@ -210,6 +227,9 @@ var keyDefaults = map[string]any{
 	"retention.audit_log_days":               0,
 	"retention.notification_deliveries_days": 0,
 	"observability.request_id_header":        "X-Request-Id",
+	"observability.otlp.enabled":             false,
+	"observability.otlp.endpoint":            "",
+	"observability.otlp.service_name":        "",
 }
 
 // sectionPrefixes returns every dotted key prefix that appears as a parent

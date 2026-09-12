@@ -312,3 +312,32 @@ observability:
   # Some header names are rejected at startup -- see the README's
   # "Observability" section for the reserved list and why.
   request_id_header: X-Request-Id
+
+  # --- OpenTelemetry (OTLP) export -----------------------------------------
+  # Off by default. When false nothing is constructed and no OTel provider is
+  # installed, so the SDK's own no-op takes over at zero cost.
+  #
+  # Only these three keys live here. Everything else comes from the standard
+  # OTEL_* environment variables the SDK already reads: OTEL_EXPORTER_OTLP_
+  # {HEADERS,PROTOCOL,TIMEOUT,COMPRESSION,CERTIFICATE,INSECURE}, OTEL_TRACES_
+  # SAMPLER, OTEL_RESOURCE_ATTRIBUTES, and the batch tuning knobs -- which use
+  # THREE different prefixes: OTEL_BSP_* for spans, OTEL_BLRP_* for logs, and
+  # OTEL_METRIC_EXPORT_* for metrics.
+  #
+  # A non-empty value here wins over the corresponding OTEL_* variable; an
+  # empty one defers to the environment.
+  otlp:
+    # 'enabled' MUST stay uncommented even when false: a section whose every
+    # child is commented out is a null mapping that fails the boot.
+    enabled: false
+    # OTLP/HTTP collector base URL. The scheme is REQUIRED and must be http or
+    # https -- "otel-collector:4318" is REJECTED at startup, because without a
+    # scheme the exporter would silently post to an empty host forever.
+    # http:// means plaintext, https:// means TLS.
+    # Credentials belong in OTEL_EXPORTER_OTLP_HEADERS, not in this URL.
+    # Leave empty to use OTEL_EXPORTER_OTLP_ENDPOINT (or the per-signal
+    # OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT) instead.
+    # endpoint: ""
+    # service.name on every exported span, metric and log record.
+    # Leave empty to use OTEL_SERVICE_NAME, falling back to "diyddns".
+    # service_name: ""
