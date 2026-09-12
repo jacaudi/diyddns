@@ -24,9 +24,13 @@ import (
 
 const testEndpoint = "http://192.0.2.1:4318" // TEST-NET-1, RFC 5737: never routable
 
-// shutdownBudget is a LOCAL constant. server.TelemetryShutdownTimeout does not
-// exist until Task 7, and internal/telemetry must not import internal/server
-// just to read it. Task 7 keeps the two in step.
+// shutdownBudget is a LOCAL constant, deliberately duplicating
+// server.TelemetryShutdownTimeout's value (20s). internal/telemetry cannot
+// import internal/server to read it directly (Fix round 1, S6): Task 9 makes
+// internal/server import internal/telemetry, so the reverse import here would
+// be a cycle. There is no single-source option available across this package
+// boundary -- the two constants must be changed together BY HAND if the
+// budget ever changes; nothing enforces that mechanically.
 const shutdownBudget = 20 * time.Second
 
 // Enabled with a valid endpoint constructs real instruments and a real logger

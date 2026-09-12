@@ -16,10 +16,12 @@ package telemetry
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -29,7 +31,7 @@ import (
 
 	// would be ambiguous against "log/slog" (imported above), sdklog (below),
 	// and this repo's own convention of naming *slog.Logger parameters `log`
-	// (e.g. internal/server/server.go:70). The alias keeps every log-shaped
+	// (e.g. internal/server/server.go:94). The alias keeps every log-shaped
 	// identifier in this file distinct.
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
@@ -85,6 +87,13 @@ type Providers struct {
 
 	// shutdown holds one func per constructed provider. Empty when inert.
 	shutdown []func(context.Context) error
+
+	// shutdownOnce and shutdownErr make Shutdown safe to call concurrently
+	// WITH ITSELF (Fix round 1, S1). A second concurrent caller blocks in
+	// Do() until the first completes, then returns the same cached result,
+	// rather than racing the first caller's read-then-clear of shutdown.
+	shutdownOnce sync.Once
+	shutdownErr  error
 
 	// logger is stored by SetErrorHandler and used by ObserveDB. Nil until
 	// SetErrorHandler runs; ObserveDB drops rather than panicking if so.
@@ -253,10 +262,52 @@ func (p *Providers) ObserveDB(db *sql.DB) {
 	}
 }
 
-// Shutdown flushes and stops every constructed provider. Bounded by ctx.
+// Shutdown flushes and stops every constructed provider, CONCURRENTLY across
+// providers, and collects every error rather than returning on the first --
+// the pattern Server.Run already uses for the feed hub's collect-both-errors
+// property (server.go:387-394).
+//
+// Concurrency is load-bearing, not stylistic: each provider's worst-case
+// export is 12.5s, so sequential shutdowns would need a 37.5s budget and no
+// single number would fit.
+//
+// Idempotent, INCLUDING against itself (Fix round 1, S1): sync.Once means a
+// second call -- whether after the first has returned, or concurrent with it
+// -- returns (or blocks until it can return) the SAME cached result, rather
+// than re-running the funcs or racing the first call's read-then-clear of
+// p.shutdown. No caller does this today, but this method's entire subject is
+// concurrency, so it must tolerate being called that way itself.
 func (p *Providers) Shutdown(ctx context.Context) error {
-	if p == nil || len(p.shutdown) == 0 {
+	if p == nil {
 		return nil
 	}
-	return nil // Task 7 implements the concurrent fan-out.
+	p.shutdownOnce.Do(func() {
+		if len(p.shutdown) == 0 {
+			return
+		}
+		funcs := p.shutdown
+		// Clearing here is no longer what makes a second call idempotent --
+		// shutdownOnce already guarantees this closure body runs exactly once,
+		// so a second call never reaches this line regardless. It is kept for
+		// GC hygiene: it lets the closures (and whatever they hold onto --
+		// exporters, HTTP clients) be collected once Shutdown has run, rather
+		// than being retained on p.shutdown for the rest of *Providers's
+		// lifetime.
+		p.shutdown = nil
+
+		errs := make([]error, len(funcs))
+		var wg sync.WaitGroup
+		for i, fn := range funcs {
+			// wg.Go, NOT `wg.Add(1); go func(){ defer wg.Done(); ... }()`.
+			// golangci-lint's modernize/waitgroupgo flags the older form, a
+			// suppressing comment directive is forbidden (Constraint 4), and
+			// Constraint 3 wants modern Go anyway.
+			wg.Go(func() {
+				errs[i] = fn(ctx)
+			})
+		}
+		wg.Wait()
+		p.shutdownErr = errors.Join(errs...)
+	})
+	return p.shutdownErr
 }

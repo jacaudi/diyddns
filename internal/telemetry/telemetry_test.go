@@ -66,3 +66,22 @@ func TestNilProviders_IsSafe(t *testing.T) {
 		t.Errorf("nil Providers Shutdown: %v", err)
 	}
 }
+
+// Shutdown is idempotent: serveCmd's defer may run after an earlier explicit
+// call on a failure path. This runs against a *disabled* Providers, so it
+// exercises the len(p.shutdown) == 0 early return, not the concurrent
+// fan-out itself. The fan-out's own properties (genuine concurrency, joining
+// every error, not re-invoking funcs on a second call) are pinned in-package
+// by shutdown_test.go's TestShutdown_* stub tests (Fix round 1, C1); the
+// black-hole and reachable-collector scenarios against REAL providers are
+// covered by internal/server/telemetry_blackhole_test.go, which needs
+// internal/server's test helpers.
+func TestShutdown_IsIdempotent(t *testing.T) {
+	tel, _ := telemetry.New(t.Context(), config.OTLPSection{Enabled: false}, slog.LevelInfo, version.Current(), nil)
+	if err := tel.Shutdown(t.Context()); err != nil {
+		t.Fatalf("first Shutdown: %v", err)
+	}
+	if err := tel.Shutdown(t.Context()); err != nil {
+		t.Errorf("second Shutdown: %v", err)
+	}
+}

@@ -32,6 +32,30 @@ const oidcDiscoverTimeout = 15 * time.Second
 
 const shutdownTimeout = 15 * time.Second
 
+// TelemetryShutdownTimeout bounds how long telemetry.Providers.Shutdown may
+// run, which happens AFTER the HTTP drain. It exceeds the 12.5s worst case
+// for a SINGLE export attempt-with-retries (MaxElapsedTime 5s + final
+// backoff 4.5s + one 3s attempt), so a shutdown with an EMPTY queue on every
+// signal -- the common case, and what the black-hole test exercises --
+// returns well inside budget.
+//
+// Fix round 1, S5: this does NOT guarantee every queued span/log/metric gets
+// flushed. A non-empty queue can need MULTIPLE sequential exports:
+// sdk/trace's batchSpanProcessor drains in MaxExportBatchSize (512) batches
+// against a MaxQueueSize (2048) queue -- up to 4 batches, each its own
+// 12.5s-worst-case export, on context.Background() rather than the caller's
+// ctx (batch_span_processor.go's drainQueue, :362-391) -- so a large enough
+// backlog against a dead collector can exceed this budget. Shutdown still
+// RETURNS within it regardless: the SDK's own Shutdown abandons the draining
+// goroutine at ctx expiry (batch_span_processor.go:179-184), it just may not
+// have finished flushing. Same posture as the operator-overridable
+// per-attempt timeout (Task 4's OTEL_EXPORTER_OTLP_TIMEOUT): documented, not
+// clamped.
+//
+// Exported: Task 13 wires cmd/diyddns-server's deferred Shutdown call
+// through this budget.
+const TelemetryShutdownTimeout = 20 * time.Second
+
 // enrollmentCodeTTL is how long a freshly-minted enrollment code stays valid
 // before it must be redeemed. Fixed for Plan 04 — no config key yet.
 const enrollmentCodeTTL = 15 * time.Minute
