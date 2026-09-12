@@ -8,6 +8,7 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.38.0
 	github.com/descope/virtualwebauthn v1.0.5
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-logr/logr v1.4.4
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/spf13/cobra v1.10.2
@@ -35,7 +36,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
-	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect

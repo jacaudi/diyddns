@@ -5,7 +5,12 @@
 // handed to its consumer, so "disabled" means the consumer holds a no-op and
 // nothing else in the process changes. The only globals it will install are
 // the two diagnostic ones, otel.SetErrorHandler and otel.SetLogger (Task 6),
-// which have no injection alternative (see SetErrorHandler).
+// which have no injection alternative (see SetErrorHandler). otel.SetLogger is
+// installed TWICE on the enabled path -- once early, by New itself, against a
+// caller-supplied bootstrap logger, before construction can log anything
+// through it; once again by SetErrorHandler, against the final application
+// logger. See New's and SetErrorHandler's doc comments for why both are
+// necessary.
 package telemetry
 
 import (
@@ -19,7 +24,9 @@ import (
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
 
+	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log" // aliased: a bare `log` identifier
+
 	// would be ambiguous against "log/slog" (imported above), sdklog (below),
 	// and this repo's own convention of naming *slog.Logger parameters `log`
 	// (e.g. internal/server/server.go:70). The alias keeps every log-shaped
@@ -91,9 +98,37 @@ type Providers struct {
 // logLevel is the already-parsed logging.level; it feeds the minsev processor
 // in Task 5. It is parsed by the caller, before New, because parsing can fail
 // and New cannot return an error.
-func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info version.Info) (*Providers, Status) {
+//
+// bootstrap is used ONLY to install the second diagnostic channel (see
+// below) before construction runs; New never logs through it itself. Pass nil
+// on the disabled path, or when the caller has no logger yet -- New installs
+// nothing when bootstrap is nil, matching the "disabled parses no OTEL_*"
+// requirement below.
+func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info version.Info, bootstrap *slog.Logger) (*Providers, Status) {
 	if !cfg.Enabled {
 		return inert(), Status{}
+	}
+
+	// PHASE ONE of the two-phase diagnostic install, and it must run before
+	// buildResource and every build* below: every SDK diagnostic this package
+	// exists to surface (a malformed OTEL_* timeout, endpoint, header, or TLS
+	// path) is logged via otel/internal/global from INSIDE
+	// otlp{trace,metric,log}http.New, i.e. during construction -- before
+	// SetErrorHandler exists to call, since SetErrorHandler is a method on the
+	// *Providers this function returns. Phase two (SetErrorHandler) reinstalls
+	// this same channel with the final application logger once construction
+	// succeeds. Both phases are safe because otel.SetLogger is an
+	// unconditional atomic store, not a once
+	// (otel@v1.46.0/internal/global/internal_logging.go:33-35) -- unlike
+	// otel.SetErrorHandler's delegation, which IS once-only. See
+	// setDiagnostics's doc comment for the once-only citation
+	// (handler.go:24-29).
+	//
+	// Nothing installs when bootstrap is nil: the disabled path above already
+	// returned, and a caller with no logger yet (there is none today; Task 13
+	// wires this) must not force one into existence just to satisfy this call.
+	if bootstrap != nil {
+		otel.SetLogger(otelLogr(bootstrap))
 	}
 
 	// An endpoint must come from somewhere. Four variables can supply it, so
@@ -216,17 +251,6 @@ func (p *Providers) ObserveDB(db *sql.DB) {
 	if p == nil || db == nil {
 		return
 	}
-}
-
-// SetErrorHandler routes OTel's two internal diagnostic channels to logger
-// (Task 6). It is a NO-OP when p is inert: installing a process global nothing
-// will ever call is the same "structure without a present requirement" design
-// D10 removed elsewhere.
-func (p *Providers) SetErrorHandler(logger *slog.Logger) {
-	if p == nil || len(p.shutdown) == 0 {
-		return
-	}
-	p.logger = logger
 }
 
 // Shutdown flushes and stops every constructed provider. Bounded by ctx.

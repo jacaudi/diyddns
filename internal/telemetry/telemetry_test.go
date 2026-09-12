@@ -14,7 +14,7 @@ import (
 // Disabled is the DEFAULT configuration. Every accessor must return a usable
 // no-op so no call site nil-checks (design D5, acceptance criterion 1).
 func TestNew_DisabledIsInert(t *testing.T) {
-	tel, st := telemetry.New(t.Context(), config.OTLPSection{Enabled: false}, slog.LevelInfo, version.Current())
+	tel, st := telemetry.New(t.Context(), config.OTLPSection{Enabled: false}, slog.LevelInfo, version.Current(), nil)
 	if tel == nil {
 		t.Fatal("New returned nil; it must never return nil")
 	}
@@ -39,7 +39,7 @@ func TestNew_DisabledIsInert(t *testing.T) {
 // the bridge branch, and otelslog.NewHandler dereferences a nil provider and
 // panics AT BOOT on the telemetry-DISABLED path.
 func TestNew_DisabledLoggerProviderIsGenuineNil(t *testing.T) {
-	tel, _ := telemetry.New(t.Context(), config.OTLPSection{Enabled: false}, slog.LevelInfo, version.Current())
+	tel, _ := telemetry.New(t.Context(), config.OTLPSection{Enabled: false}, slog.LevelInfo, version.Current(), nil)
 	if lp := tel.LoggerProvider(); lp != nil {
 		t.Fatalf("LoggerProvider() must be a genuine nil interface, got non-nil holding %T", lp)
 	}

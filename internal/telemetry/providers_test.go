@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net/http"
@@ -293,9 +294,97 @@ func TestNew_EnabledExportsToConfiguredEndpoint(t *testing.T) {
 	}
 }
 
+// The second diagnostic channel exists to catch exactly this: a malformed
+// OTEL_* variable, reported nowhere else. The "parse duration" diagnostic
+// fires INSIDE otlptracehttp.New (otlptracehttp@v1.46.0/internal/envconfig
+// /envconfig.go:75), during buildTraces -- before SetErrorHandler exists to
+// call, since SetErrorHandler is a method on the *Providers New returns. Only
+// an EARLY install, using a bootstrap logger passed into New itself, can
+// capture it.
+func TestNew_BootstrapCapturesConstructionTimeDiagnostics(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_TIMEOUT", "")
+	// Non-empty and malformed: applyOurTimeout(signalTraces) sees this as
+	// "operator set a timeout" and does NOT pass our own WithTimeout override,
+	// so the SDK's own envconfig parse of this exact value runs and fails.
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "not-a-number")
+
+	var buf bytes.Buffer
+	bootstrap := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	tel, st := New(t.Context(), config.OTLPSection{Enabled: true, Endpoint: testEndpoint}, slog.LevelInfo, version.Current(), bootstrap)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+		defer cancel()
+		_ = tel.Shutdown(ctx)
+	})
+	if st.Fatal {
+		t.Fatalf("a malformed OTEL_EXPORTER_OTLP_TIMEOUT must not be Fatal (the SDK logs and falls back to its default), got %+v", st)
+	}
+
+	found := false
+	for _, r := range records(t, &buf) {
+		if msg, _ := r["msg"].(string); msg == "parse duration" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal(`bootstrap logger never saw the "parse duration" diagnostic -- the early otel.SetLogger install in New is missing or runs too late`)
+	}
+}
+
+// A non-nil bootstrap must be inert on the DISABLED path, which is this
+// feature's default. A disabled server constructs no exporters, so no
+// construction-time diagnostic can exist to capture -- this is currently true
+// only by code-flow inspection (the early install sits after the `!cfg.Enabled`
+// return), so it gets a test rather than an argument.
+//
+// Endpoint is set to a valid value DESPITE Enabled: false: correct code never
+// looks at it (the disabled short-circuit returns first), so this is inert
+// for correct code. It matters for what this test actually exercises: with a
+// valid endpoint, a mutant that deletes the `!cfg.Enabled` guard runs all the
+// way through buildTraces (proven -- 2 real "parse duration" records land in
+// the buffer), so the records assertion below is checked against genuine
+// construction, not against the unrelated missing-endpoint degrade path. An
+// empty endpoint does NOT make that mutant slip past undetected -- the
+// missing-endpoint branch sets a non-zero Status even on the disabled path
+// once the guard is gone, and the Status assertion below already catches
+// that -- but it would catch a different failure than the one this test
+// documents itself as proving, which is why Endpoint is set regardless.
+func TestNew_DisabledInstallsNothingEvenWithBootstrapAndMalformedEnv(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_TIMEOUT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "not-a-number")
+
+	var buf bytes.Buffer
+	bootstrap := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	tel, st := New(t.Context(), config.OTLPSection{Enabled: false, Endpoint: testEndpoint}, slog.LevelInfo, version.Current(), bootstrap)
+	if tel == nil {
+		t.Fatal("New returned nil; it must never return nil")
+	}
+	if st.Reason != "" || st.Fatal {
+		t.Errorf("disabled must be a zero Status, got %+v", st)
+	}
+	if got := records(t, &buf); len(got) != 0 {
+		t.Fatalf("got %d records on the disabled path with a non-nil bootstrap, want 0 "+
+			"(a disabled server must construct no exporters and parse no OTEL_*)", len(got))
+	}
+}
+
 func telemetryNew(t *testing.T, cfg config.OTLPSection) (*Providers, Status) {
 	t.Helper()
-	return New(t.Context(), cfg, slog.LevelInfo, version.Current())
+	return New(t.Context(), cfg, slog.LevelInfo, version.Current(), nil)
 }
 
 // The SDK's DEFAULT histogram boundaries are millisecond-shaped
