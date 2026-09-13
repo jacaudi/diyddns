@@ -3,10 +3,12 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +20,11 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -78,7 +85,7 @@ func TestNew_FailsClosedOnBadSecretKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := testConfig(t, tt.secretKey)
-			if _, err := server.New(cfg, memStore(t), discard()); err == nil {
+			if _, err := server.New(cfg, memStore(t), discard(), server.NopInstruments{}); err == nil {
 				t.Fatalf("New() with secret_key %q = nil error, want fail-closed error", tt.secretKey)
 			}
 		})
@@ -87,7 +94,7 @@ func TestNew_FailsClosedOnBadSecretKey(t *testing.T) {
 
 func TestServer_AllEndpoints(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
-	handler, _, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -131,7 +138,7 @@ func TestServer_AllEndpoints(t *testing.T) {
 func TestServer_RunShutsDownOnCancel(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
 	cfg.Server.Listen = "127.0.0.1:0"
-	s, err := server.New(cfg, memStore(t), discard())
+	s, err := server.New(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -166,7 +173,7 @@ func TestServer_OIDCDegradesWhenNotRequired(t *testing.T) {
 		Scopes:       []string{"openid"},
 	}
 
-	handler, _, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -199,7 +206,7 @@ func TestServer_OIDCFailsClosedWhenRequired(t *testing.T) {
 		Scopes:       []string{"openid"},
 	}
 
-	if _, _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{}); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when oidc required but discovery fails")
 	}
 }
@@ -222,7 +229,7 @@ func TestHandler_FailsClosedOnUnresolvableWebAuthnRP(t *testing.T) {
 		t.Fatalf("test setup: expected empty base_url/rp_origin, got %q/%q", cfg.Server.BaseURL, cfg.Auth.WebAuthn.RPOrigin)
 	}
 
-	if _, _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{}); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when passkey login is available but the WebAuthn RP is unresolvable")
 	}
 }
@@ -243,7 +250,7 @@ func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	if _, _, err := server.Handler(cfg, memStore(t), discard()); err != nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{}); err != nil {
 		t.Fatalf("server.Handler() = %v, want no error when hide_local_login_ui tolerates an unresolvable RP", err)
 	}
 }
@@ -255,7 +262,7 @@ func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing
 // Task-8-era placeholder).
 func TestServer_PasskeyRoutesWired(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
-	handler, _, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -303,7 +310,7 @@ func TestServer_ServeBoot(t *testing.T) {
 
 	cfg := testConfig(t, validSecretKey())
 	cfg.Server.Listen = addr
-	s, err := server.New(cfg, memStore(t), discard())
+	s, err := server.New(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -429,7 +436,7 @@ func retentionConfig(t *testing.T, ipDays, perDeviceMax, auditDays int) config.S
 
 func TestNew_WarnsWhenRetentionEnabled(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := server.New(retentionConfig(t, 90, 0, 365), memStore(t), bufferLogger(&buf)); err != nil {
+	if _, err := server.New(retentionConfig(t, 90, 0, 365), memStore(t), bufferLogger(&buf), server.NopInstruments{}); err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
 	out := buf.String()
@@ -452,7 +459,7 @@ func TestNew_WarnsWhenRetentionEnabled(t *testing.T) {
 
 func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := server.New(retentionConfig(t, 0, 0, 0), memStore(t), bufferLogger(&buf)); err != nil {
+	if _, err := server.New(retentionConfig(t, 0, 0, 0), memStore(t), bufferLogger(&buf), server.NopInstruments{}); err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
 	if strings.Contains(buf.String(), "retention enabled") {
@@ -474,11 +481,12 @@ func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 // request had 404'd, had leaked a template, or had never reached AccessLog.
 func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log.json")
-	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path})
+	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path}, nil)
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
-	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log)
+	inst := newRecordingInstruments(t)
+	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log, inst)
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -579,5 +587,125 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	}
 	if rejectedID != ids[1] {
 		t.Errorf("session auth rejected: request_id = %q, want %q (huma api group's echoed id)", rejectedID, ids[1])
+	}
+
+	// THE §4.4 GUARD. For every row, the span name must match the same route
+	// the access log recorded. Moving Trace inside AccessLog, or reading
+	// r.Pattern instead of r2.Pattern, both fail this block too -- but BOTH
+	// are already caught elsewhere in the tree (TestTrace_SpanNameIsRouteTemplate,
+	// internal/server/middleware, catches the r.Pattern/r2.Pattern swap
+	// directly). What is uniquely caught HERE, and by nothing else in the
+	// tree (verified: `go test ./internal/...` against the mutation stays
+	// green everywhere except this test), is deleting
+	// middleware.Trace(inst.Tracer(), inst.RequestDuration()) from handler()'s
+	// Chain call (server.go:369) entirely: nothing else in this repo drives a
+	// request through server.Handler and asserts a span was ever produced.
+	//
+	// Read the ALREADY-COLLECTED spans; do not re-drive the requests. This test
+	// has a known pre-existing race on its log-file read, and a second pass
+	// would widen it.
+	spans := inst.spans.GetSpans()
+	if len(spans) != len(tests) {
+		t.Fatalf("got %d spans, want %d (one per row)", len(spans), len(tests))
+	}
+	// ORDER IS DELIBERATELY NOT ASSERTED -- matching spans[i] to tests[i] was a
+	// real flake that CI caught and 60 local runs did not. span.End() is the
+	// OUTERMOST deferred call in Trace, so it runs after the response has been
+	// written; meanwhile these rows close their response bodies WITHOUT draining
+	// them, which stops net/http reusing the connection (measured: 2 distinct
+	// server connections for these 7 requests). So the next request can be
+	// served by a second goroutine that reaches span.End() before the previous
+	// one does, and the export order is whatever order the goroutines finish in.
+	// Reproduced under -race with a 20ms sleep before span.End(): 9-14 of every
+	// 20 runs failed, always swapping exactly these two rows --
+	//   webui static prefix: span name = "HTTP GET", want "GET /static/"
+	//   unmatched (404):     span name = "GET /static/", want "HTTP GET"
+	// -- the pair straddling the connection boundary, which is precisely what CI
+	// reported. Every name was individually correct; only the order was not.
+	//
+	// A multiset still fails on any wrong, missing or extra name, and the two
+	// mutations this block exists for are both caught by it: deleting
+	// middleware.Trace from handler()'s chain yields 0 spans (the check above),
+	// and reading r.Pattern instead of r2.Pattern collapses every name to
+	// "HTTP GET"/"HTTP POST". The per-row name-to-route correspondence is
+	// already pinned against the access log earlier in this test.
+	wantNames := map[string]int{}
+	for _, tt := range tests {
+		want := tt.wantRoute
+		if want == "" {
+			want = "HTTP " + tt.method // the 404 and 405 rows
+		}
+		wantNames[want]++
+	}
+	gotNames := map[string]int{}
+	for _, s := range spans {
+		gotNames[s.Name]++
+	}
+	if !maps.Equal(gotNames, wantNames) {
+		t.Errorf("span names = %v, want %v (order is deliberately not asserted)", gotNames, wantNames)
+	}
+}
+
+// recordingInstruments backs server.Instruments with an in-memory span
+// exporter, so a test can assert on emitted spans. The meter provider it
+// builds has no reader attached: RequestDuration/DeliveryCount exist only so
+// Trace and notify.Worker have somewhere to record into without a nil
+// panic -- nothing in this file asserts on their values, so no reader is
+// wired up (fix round 2, I4: an earlier revision of this comment claimed a
+// manual metric reader that was never built).
+//
+// SimpleSpanProcessor, NOT BatchSpanProcessor: batching exports asynchronously
+// and every assertion against spans would race.
+type recordingInstruments struct {
+	spans      *tracetest.InMemoryExporter
+	tracer     trace.Tracer
+	requestDur metric.Float64Histogram
+	deliveries metric.Int64Counter
+}
+
+func newRecordingInstruments(t *testing.T) *recordingInstruments {
+	t.Helper()
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exp)))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+	mp := sdkmetric.NewMeterProvider()
+	t.Cleanup(func() { _ = mp.Shutdown(t.Context()) })
+	meter := mp.Meter("test")
+	dur, _ := meter.Float64Histogram("http.server.request.duration", metric.WithUnit("s"))
+	cnt, _ := meter.Int64Counter("diyddns.notification.delivery", metric.WithUnit("{delivery}"))
+	return &recordingInstruments{spans: exp, tracer: tp.Tracer("test"), requestDur: dur, deliveries: cnt}
+}
+
+func (r *recordingInstruments) Tracer() trace.Tracer                     { return r.tracer }
+func (r *recordingInstruments) RequestDuration() metric.Float64Histogram { return r.requestDur }
+func (r *recordingInstruments) DeliveryCount() metric.Int64Counter       { return r.deliveries }
+func (r *recordingInstruments) ObserveDB(*sql.DB)                        {}
+
+// observeDBRecorder embeds NopInstruments so it stays a working Instruments
+// for every other method, and records only the *sql.DB ObserveDB receives --
+// this is the seam TestNew_CallsObserveDB pins.
+type observeDBRecorder struct {
+	server.NopInstruments
+	db *sql.DB
+}
+
+// ObserveDB records db for the test to inspect.
+func (o *observeDBRecorder) ObserveDB(db *sql.DB) { o.db = db }
+
+// TestNew_CallsObserveDB pins that New wires the store's *sql.DB into
+// Instruments.ObserveDB. Nothing else in this task's suite drives New with an
+// Instruments that can observe the call, so without this test deleting the
+// inst.ObserveDB(st.DB()) line in New survives silently (fix round 1, B1).
+func TestNew_CallsObserveDB(t *testing.T) {
+	inst := &observeDBRecorder{}
+	st := memStore(t)
+	if _, err := server.New(testConfig(t, validSecretKey()), st, discard(), inst); err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	if inst.db == nil {
+		t.Fatal("server.New did not call inst.ObserveDB(st.DB())")
+	}
+	if inst.db != st.DB() {
+		t.Errorf("inst.ObserveDB received %p, want the store's own *sql.DB (%p)", inst.db, st.DB())
 	}
 }

@@ -16,8 +16,8 @@ import (
 
 // routesTestConfig builds a config that handler() accepts. Both overrides are
 // load-bearing and the server fails closed without them: auth.hmac.secret_key
-// must decode to 32 bytes (server.go:55-58), and server.base_url must be set or
-// WebAuthn RP resolution fails (server.go:91-95).
+// must decode to 32 bytes (server.go:144-147), and server.base_url must be set or
+// WebAuthn RP resolution fails (server.go:221-225).
 func routesTestConfig(t *testing.T) config.Server {
 	t.Helper()
 	v := viper.New()

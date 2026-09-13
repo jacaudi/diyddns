@@ -54,7 +54,8 @@ func (b *syncBuffer) String() string {
 // mux — with the feed enabled, one minted token, and one member device, and
 // serves it over a real listener. Every test here goes through the real
 // chain: a bare feed handler would pass while production 501s if AccessLog's
-// recorder ever lost its Unwrap (design §5.1).
+// recorder ever lost its Unwrap (design §5.1). See upgrade_trace_test.go for
+// why this package carries no separate test for that invariant.
 //
 // Cleanup order is load-bearing. t.Cleanup is LIFO, so registering the store's
 // Close FIRST and the server's SECOND makes the server (and every pump it
@@ -91,7 +92,7 @@ func chain(t *testing.T, logBuf *syncBuffer) (*httptest.Server, *feed.Hub, *stor
 		w = logBuf
 	}
 	log := slog.New(slog.NewJSONHandler(w, nil))
-	h, hub, err := server.Handler(cfg, st, log)
+	h, hub, err := server.Handler(cfg, st, log, server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}

@@ -127,7 +127,7 @@ func TestNew_WiresRetentionIntoTheServer(t *testing.T) {
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	srv, err := New(cfg, openTestStore(t), discardLog())
+	srv, err := New(cfg, openTestStore(t), discardLog(), NopInstruments{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

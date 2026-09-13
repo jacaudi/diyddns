@@ -9,20 +9,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/server"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
+
+	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/log/embedded"
 )
 
 // logRecords runs fn with a logger writing JSON to a temp file, then returns
 // the decoded records. Output is a file path because NewLogger's only
-// non-stderr/stdout sink is a path (logging.go:31).
+// non-stderr/stdout sink is a path (logging.go's os.OpenFile branch).
 func logRecords(t *testing.T, fn func(*slog.Logger)) []map[string]any {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "log.json")
-	log, err := server.NewLogger(config.LoggingSection{Level: "debug", Format: "json", Output: path})
+	log, err := server.NewLogger(config.LoggingSection{Level: "debug", Format: "json", Output: path}, nil)
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
@@ -122,6 +126,45 @@ func TestNewLogger_WithGroupNestsRequestID(t *testing.T) {
 	}
 }
 
+// TestParseLogLevel proves the extracted helper (Step 13.0) parses the same
+// set of values NewLogger accepts, including case-insensitivity, and rejects
+// the same bad input NewLogger does. cmd/diyddns-server needs this exported
+// so it can parse logging.level once and hand the result to both NewLogger
+// (indirectly, since NewLogger calls this internally) and telemetry.New,
+// which needs the already-parsed level and cannot call NewLogger itself.
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		name    string
+		level   string
+		want    slog.Level
+		wantErr bool
+	}{
+		{"debug", "debug", slog.LevelDebug, false},
+		{"info", "info", slog.LevelInfo, false},
+		{"warn", "warn", slog.LevelWarn, false},
+		{"error", "error", slog.LevelError, false},
+		{"uppercase", "INFO", slog.LevelInfo, false},
+		{"bad level", "loud", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := server.ParseLogLevel(tt.level)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseLogLevel: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseLogLevel(%q) = %v, want %v", tt.level, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewLogger(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -135,7 +178,7 @@ func TestNewLogger(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			log, err := server.NewLogger(tt.cfg)
+			log, err := server.NewLogger(tt.cfg, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error")
@@ -149,5 +192,108 @@ func TestNewLogger(t *testing.T) {
 				t.Fatal("nil logger")
 			}
 		})
+	}
+}
+
+// fakeLoggerProvider is a hand-written otellog.LoggerProvider fake (per
+// go-standards.md §8.4: prefer interface-based fakes over mock-generation
+// libraries) used to prove LazyLoggerProvider's delegation without pulling in
+// the SDK's own LoggerProvider.
+type fakeLoggerProvider struct {
+	embedded.LoggerProvider
+
+	enabled bool
+
+	mu      sync.Mutex
+	emitted int
+}
+
+func (f *fakeLoggerProvider) Logger(string, ...otellog.LoggerOption) otellog.Logger {
+	return &fakeLogger{provider: f}
+}
+
+type fakeLogger struct {
+	embedded.Logger
+	provider *fakeLoggerProvider
+}
+
+func (f *fakeLogger) Enabled(context.Context, otellog.EnabledParameters) bool {
+	return f.provider.enabled
+}
+
+func (f *fakeLogger) Emit(context.Context, otellog.Record) {
+	f.provider.mu.Lock()
+	defer f.provider.mu.Unlock()
+	f.provider.emitted++
+}
+
+// An empty LazyLoggerProvider must report Enabled false and drop every Emit,
+// so a MultiHandler branch built around it before the real provider exists
+// (Revision 6's ordering) is harmless.
+func TestLazyLoggerProvider_EmptySlotDisablesAndDrops(t *testing.T) {
+	var lp server.LazyLoggerProvider
+	logger := lp.Logger("test")
+
+	if logger.Enabled(t.Context(), otellog.EnabledParameters{}) {
+		t.Error("an empty LazyLoggerProvider must report Enabled false")
+	}
+	logger.Emit(t.Context(), otellog.Record{}) // must not panic, must drop
+}
+
+// Once Store fills the slot, both Enabled and Emit must delegate to the
+// stored provider -- on the SAME Logger value a long-lived otelslog.Handler
+// would have obtained before the slot was filled.
+func TestLazyLoggerProvider_FilledSlotDelegates(t *testing.T) {
+	var lp server.LazyLoggerProvider
+	logger := lp.Logger("test") // obtained BEFORE Store, like otelslog.NewHandler does
+
+	fake := &fakeLoggerProvider{enabled: true}
+	lp.Store(fake)
+
+	if !logger.Enabled(t.Context(), otellog.EnabledParameters{}) {
+		t.Error("a filled LazyLoggerProvider must delegate Enabled to the stored provider")
+	}
+	logger.Emit(t.Context(), otellog.Record{})
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.emitted != 1 {
+		t.Errorf("stored provider received %d Emit calls, want 1", fake.emitted)
+	}
+}
+
+// Store races with concurrent Enabled/Emit calls on a Logger obtained before
+// the store -- exactly the shape cmd/diyddns-server's startup produces once
+// the server starts handling requests concurrently with telemetry.New still
+// running. -race must find nothing.
+func TestLazyLoggerProvider_StoreIsRaceFree(t *testing.T) {
+	var lp server.LazyLoggerProvider
+	logger := lp.Logger("test")
+	fake := &fakeLoggerProvider{enabled: true}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		lp.Store(fake)
+	})
+	wg.Go(func() {
+		for range 100 {
+			logger.Enabled(t.Context(), otellog.EnabledParameters{})
+			logger.Emit(t.Context(), otellog.Record{})
+		}
+	})
+	wg.Wait()
+
+	// Fix round 1, I6: this must be a behaviour guard, not just a race probe --
+	// it would pass against empty-bodied Store/Enabled/Emit just as readily.
+	// By the time Store's goroutine has returned, the slot IS filled, so a
+	// fresh Enabled/Emit through the SAME logger must delegate.
+	if !logger.Enabled(t.Context(), otellog.EnabledParameters{}) {
+		t.Error("after Store returns, Enabled must delegate to the stored provider")
+	}
+	logger.Emit(t.Context(), otellog.Record{})
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.emitted == 0 {
+		t.Error("after Store returns, Emit must delegate to the stored provider")
 	}
 }

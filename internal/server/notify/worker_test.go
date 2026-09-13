@@ -20,6 +20,11 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/store"
+
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -188,23 +193,23 @@ func readDelivery(t *testing.T, st *store.Store, id int64) deliveryRow {
 	return r
 }
 
-func newTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts int) *Worker {
+func newTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts int, deliveries metric.Int64Counter) *Worker {
 	allowed, err := ParseAllowed(allowedCIDRs)
 	if err != nil {
 		panic(err)
 	}
 	clients := NewClients(allowed, 2*time.Second)
-	return NewWorker(st, clients, testKey(), maxAttempts, nopAudit{}, halfJitter, discardLog())
+	return NewWorker(st, clients, testKey(), maxAttempts, nopAudit{}, halfJitter, discardLog(), deliveries)
 }
 
 // newLoggingTestWorker mirrors newTestWorker above, but takes a logger, since
 // that helper hardcodes discardLog().
-func newLoggingTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts int, log *slog.Logger) *Worker {
+func newLoggingTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts int, log *slog.Logger, deliveries metric.Int64Counter) *Worker {
 	allowed, err := ParseAllowed(allowedCIDRs)
 	if err != nil {
 		panic(err)
 	}
-	return NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), maxAttempts, nopAudit{}, halfJitter, log)
+	return NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), maxAttempts, nopAudit{}, halfJitter, log, deliveries)
 }
 
 // findRecord returns the first JSON record in buf whose msg matches, or fails.
@@ -279,7 +284,7 @@ func TestDeliver_2xxIsDelivered(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -304,7 +309,7 @@ func TestDeliver_410IsTerminalOnFirstAttempt(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -329,7 +334,7 @@ func TestDeliver_500IsRetried(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5) // well above 1 attempt
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{}) // well above 1 attempt
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -357,7 +362,7 @@ func TestDeliver_ExhaustionSetsFailed(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1) // exhausted after one attempt
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1, noop.Int64Counter{}) // exhausted after one attempt
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -384,7 +389,7 @@ func TestDeliver_EndpointTestIsOneShot(t *testing.T) {
 
 	// Configured maxAttempts is generous; endpoint.test must still exhaust
 	// after exactly one attempt.
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -403,7 +408,7 @@ func TestDeliver_BlockedTargetRecordsNoAddress(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), target)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	// last_failure is the only column that could carry a leaked address (the
@@ -437,7 +442,7 @@ func TestDeliver_SignatureVariesButBodyDoesNot(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 	forceDueNow(t, st, id) // skip the real backoff wait
 	w.sweep(t.Context())
@@ -464,7 +469,7 @@ func TestSweep_SkipsDisabledEndpoints(t *testing.T) {
 	id := seedDelivery(t, st, ep, EventIPChanged)
 	setEndpointEnabled(t, st, ep, false)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -490,7 +495,7 @@ func TestDeliver_ClientSelectionIsReDerived(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), "ftp://127.0.0.1/hook")
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -519,7 +524,7 @@ func TestDeliver_UnsupportedStoredSchemeIsInternal(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), "ftp://127.0.0.1/hook")
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 1, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -548,7 +553,7 @@ func TestDeliver_HTTPSchemeUsesHTTPClient(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), "http://127.0.0.1/hook")
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := NewWorker(st, clients, testKey(), 5, nopAudit{}, halfJitter, discardLog())
+	w := NewWorker(st, clients, testKey(), 5, nopAudit{}, halfJitter, discardLog(), noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	if !httpCalled {
@@ -584,7 +589,7 @@ func TestSweep_CtxErrSkipsRemainingRows(t *testing.T) {
 	id1 := seedDelivery(t, st, ep, EventIPChanged)
 	id2 := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	fc := &fakeErrCtx{Context: t.Context()}
 	fc.err.Store(true)
 	w.sweep(fc)
@@ -617,7 +622,7 @@ func TestAttempt_CtxErrReturnsEmptyClass(t *testing.T) {
 		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
 	}
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	fc := &fakeErrCtx{Context: t.Context()}
 	fc.err.Store(true)
 	if class := w.attempt(fc, due[0]); class != "" {
@@ -641,7 +646,7 @@ func TestDeliverOne_CtxErrSkipsWriteBack(t *testing.T) {
 		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
 	}
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	fc := &fakeErrCtx{Context: t.Context()}
 	fc.err.Store(true)
 	w.deliverOne(fc, due[0])
@@ -723,7 +728,7 @@ func TestDeliver_302IsRejectedNotDelivered(t *testing.T) {
 	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
 	id := seedDelivery(t, st, ep, EventIPChanged)
 
-	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5)
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	row := readDelivery(t, st, id)
@@ -752,7 +757,7 @@ func TestDeliver_BlockedTargetAuditsRejection(t *testing.T) {
 		t.Fatalf("ParseAllowed: %v", err)
 	}
 	audit := &capturingAudit{}
-	w := NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), 1, audit, halfJitter, discardLog())
+	w := NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), 1, audit, halfJitter, discardLog(), noop.Int64Counter{})
 	w.sweep(t.Context())
 
 	if len(audit.entries) != 1 {
@@ -779,7 +784,7 @@ func TestDeliver_LogsInfoOnDelivered(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log).sweep(t.Context())
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log, noop.Int64Counter{}).sweep(t.Context())
 
 	line := findRecord(t, &buf, "notify: delivered")
 	if line["level"] != "INFO" {
@@ -805,7 +810,7 @@ func TestDeliver_LogsWarnOn410Gone(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log).sweep(t.Context())
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log, noop.Int64Counter{}).sweep(t.Context())
 
 	line := findRecord(t, &buf, "notify: delivery failed permanently")
 	if line["level"] != "WARN" {
@@ -830,7 +835,7 @@ func TestDeliver_SilentWhileRetrying(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log).sweep(t.Context())
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log, noop.Int64Counter{}).sweep(t.Context())
 
 	if strings.Contains(buf.String(), "delivery failed permanently") {
 		t.Errorf("emitted a terminal record while still retrying: %s", buf.String())
@@ -851,7 +856,7 @@ func TestDeliver_LogsWarnWhenAttemptsExhausted(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 1, log).sweep(t.Context())
+	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 1, log, noop.Int64Counter{}).sweep(t.Context())
 
 	line := findRecord(t, &buf, "notify: delivery failed permanently")
 	if line["level"] != "WARN" {
@@ -859,5 +864,153 @@ func TestDeliver_LogsWarnWhenAttemptsExhausted(t *testing.T) {
 	}
 	if line["attempts"].(float64) != 1 {
 		t.Errorf("attempts = %v, want 1", line["attempts"])
+	}
+}
+
+// classCounts flattens a collected ResourceMetrics into class -> count for
+// diyddns.notification.delivery. It also asserts EVERY data point carries
+// exactly one attribute (class): the cardinality-bounded-by-construction
+// claim at worker.go:161-165 is otherwise pure prose -- an unbounded
+// caller-supplied attribute (e.g. an endpoint URL) would flow straight
+// through classCounts's map[string]int64 unnoticed, since it only ever reads
+// the "class" key and ignores every other attribute.
+func classCounts(t *testing.T, rm metricdata.ResourceMetrics) map[string]int64 {
+	t.Helper()
+	out := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "diyddns.notification.delivery" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want Sum[int64]", m.Name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				if n := dp.Attributes.Len(); n != 1 {
+					t.Errorf("data point has %d attributes, want exactly 1 (class) -- %v", n, dp.Attributes)
+				}
+				v, _ := dp.Attributes.Value("class")
+				out[v.AsString()] += dp.Value
+			}
+		}
+	}
+	return out
+}
+
+// One increment per attempt, labelled with the terminal class.
+func TestDeliverOne_CountsByClass(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	counter, err := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).
+		Meter("test").Int64Counter("diyddns.notification.delivery")
+	if err != nil {
+		t.Fatalf("Int64Counter: %v", err)
+	}
+
+	// An endpoint that answers 410 Gone, so the terminal class is deterministic.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	t.Cleanup(srv.Close)
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	seedDelivery(t, st, ep, EventIPChanged)
+	due, err := st.NotificationDeliveries().DueForAttempt(t.Context(), store.NowUnix(), 10)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
+	}
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, counter)
+	w.deliverOne(t.Context(), due[0])
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := classCounts(t, rm); got["gone"] != 1 {
+		t.Errorf("class=gone count = %d, want 1 (all counts: %v)", got["gone"], got)
+	}
+}
+
+// A delivered attempt increments the counter under class="delivered" and
+// nothing else -- the other half of design test 5
+// (docs/designs/2026-09-09-diyddns-101-otlp-observability-design.md:1566-1568:
+// "increments with the right class for a delivered and a failed delivery").
+// TestDeliverOne_CountsByClass above only proves the failed half; without
+// this test, hard-coding the label to FailureGone or skipping the Add call
+// entirely for a delivered attempt both pass every other test in this file.
+func TestDeliverOne_CountsByClass_Delivered(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	counter, err := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).
+		Meter("test").Int64Counter("diyddns.notification.delivery")
+	if err != nil {
+		t.Fatalf("Int64Counter: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), srv.URL)
+	seedDelivery(t, st, ep, EventIPChanged)
+	due, err := st.NotificationDeliveries().DueForAttempt(t.Context(), store.NowUnix(), 10)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
+	}
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, counter)
+	w.deliverOne(t.Context(), due[0])
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	got := classCounts(t, rm)
+	if got["delivered"] != 1 {
+		t.Errorf("class=delivered count = %d, want 1 (all counts: %v)", got["delivered"], got)
+	}
+	if len(got) != 1 {
+		t.Errorf("counted %d distinct classes, want exactly 1 (delivered): %v", len(got), got)
+	}
+}
+
+// A context cancelled mid-attempt records NOTHING. attempt returns "" at
+// worker.go:246 for that case and deliverOne returns early at :153-160 without
+// a write-back; the metric must match those semantics rather than emitting a
+// class="" series with an already-cancelled context.
+//
+// Uses the SAME fakeErrCtx technique as TestDeliverOne_CtxErrSkipsWriteBack
+// (worker_test.go:639), so attempt() genuinely returns "" through its own
+// guard.
+func TestDeliverOne_CancelledAttemptRecordsNothing(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	counter, err := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).
+		Meter("test").Int64Counter("diyddns.notification.delivery")
+	if err != nil {
+		t.Fatalf("Int64Counter: %v", err)
+	}
+
+	st := newTestStore(t)
+	ep := seedUserAndEndpoint(t, st, testKey(), "http://127.0.0.1:1/hook") // connection refused
+	seedDelivery(t, st, ep, EventIPChanged)
+	due, err := st.NotificationDeliveries().DueForAttempt(t.Context(), store.NowUnix(), 10)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("DueForAttempt: err=%v rows=%d", err, len(due))
+	}
+
+	w := newTestWorker(st, []string{"127.0.0.0/8"}, 5, counter)
+	fc := &fakeErrCtx{Context: t.Context()}
+	fc.err.Store(true)
+	w.deliverOne(fc, due[0])
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := classCounts(t, rm); len(got) != 0 {
+		t.Errorf("a cancelled attempt recorded %v, want nothing", got)
 	}
 }
