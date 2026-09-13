@@ -56,6 +56,22 @@ func (h requestIDHandler) WithGroup(name string) slog.Handler {
 	return requestIDHandler{inner: h.inner.WithGroup(name)}
 }
 
+// ParseLogLevel parses cfg.Logging.Level (debug|info|warn|error, case
+// insensitive) into a slog.Level.
+//
+// Extracted from NewLogger (Task 13, Step 13.0) so cmd/diyddns-server can
+// parse the level once and hand the result to telemetry.New, which needs the
+// already-parsed level to feed its minsev log processor and cannot get it
+// from NewLogger's return value (NewLogger returns only a *slog.Logger).
+// NewLogger itself keeps calling this so the two never drift.
+func ParseLogLevel(level string) (slog.Level, error) {
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(strings.ToUpper(level))); err != nil {
+		return 0, fmt.Errorf("server: log level %q: %w", level, err)
+	}
+	return l, nil
+}
+
 // NewLogger builds a slog.Logger from the logging config: level (debug|info|
 // warn|error), format (json|text), and output (stderr|stdout|<path>).
 //
@@ -75,9 +91,9 @@ func (h requestIDHandler) WithGroup(name string) slog.Handler {
 // second MultiHandler branch, paying a Record.Clone plus attribute conversion
 // per record on a server with no provider to offer at all.
 func NewLogger(cfg config.LoggingSection, lp otellog.LoggerProvider) (*slog.Logger, error) {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(strings.ToUpper(cfg.Level))); err != nil {
-		return nil, fmt.Errorf("server: log level %q: %w", cfg.Level, err)
+	level, err := ParseLogLevel(cfg.Level)
+	if err != nil {
+		return nil, err
 	}
 
 	var w io.Writer

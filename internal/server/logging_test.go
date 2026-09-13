@@ -126,6 +126,45 @@ func TestNewLogger_WithGroupNestsRequestID(t *testing.T) {
 	}
 }
 
+// TestParseLogLevel proves the extracted helper (Step 13.0) parses the same
+// set of values NewLogger accepts, including case-insensitivity, and rejects
+// the same bad input NewLogger does. cmd/diyddns-server needs this exported
+// so it can parse logging.level once and hand the result to both NewLogger
+// (indirectly, since NewLogger calls this internally) and telemetry.New,
+// which needs the already-parsed level and cannot call NewLogger itself.
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		name    string
+		level   string
+		want    slog.Level
+		wantErr bool
+	}{
+		{"debug", "debug", slog.LevelDebug, false},
+		{"info", "info", slog.LevelInfo, false},
+		{"warn", "warn", slog.LevelWarn, false},
+		{"error", "error", slog.LevelError, false},
+		{"uppercase", "INFO", slog.LevelInfo, false},
+		{"bad level", "loud", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := server.ParseLogLevel(tt.level)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseLogLevel: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseLogLevel(%q) = %v, want %v", tt.level, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewLogger(t *testing.T) {
 	tests := []struct {
 		name    string
