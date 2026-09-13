@@ -7,10 +7,19 @@ package middleware
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"time"
 	"uuid"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/semconv/v1.43.0/httpconv"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // maxRequestIDLen bounds an inbound correlation id. 128 admits a UUIDv7 (36)
@@ -161,6 +170,211 @@ func Recover(log *slog.Logger) func(http.Handler) http.Handler {
 				}
 			}()
 			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// spanName builds a LOW-CARDINALITY span name. pattern is r.Pattern, the route
+// template the mux annotated; it is empty on a 404 and on a 405 (path matched,
+// method did not). The raw path is never used: it carries device and user ids.
+//
+// DELIBERATE DIVERGENCE from design §4.5, which writes the formula as
+// `method + " " + pattern`. r.Pattern ALREADY carries the method -- it is
+// "GET /devices/{id}", not "/devices/{id}" (verified against
+// net/http/server.go's findHandler, which returns the pattern's own str field,
+// the literal registration string; see the design's own §4.2 table) -- so the
+// design's formula would render "GET GET /devices/{id}". Returning pattern
+// alone is correct. Do not "fix" this against the design text.
+func spanName(method, pattern string) string {
+	if pattern == "" {
+		return "HTTP " + method
+	}
+	return pattern
+}
+
+// maxServerAddressLen bounds what r.Host may contribute to a span attribute.
+// 253 is the maximum length of a DNS name, so no legitimate Host header --
+// registered name, punycode IDN, or IP literal -- is refused by it.
+//
+// The bound is needed for the same reason maxRequestIDLen is: r.Host is
+// attacker-chosen, server.go sets no MaxHeaderBytes so an over-length value
+// arrives whole up to Go's 1 MiB default, and the trace SDK's default
+// AttributeValueLengthLimit is -1, unlimited
+// (sdk/trace@v1.46.0/span_limits.go:9-11). The span then sits in the batch
+// processor's 2048-slot queue across the export window, so the bytes are
+// RETAINED rather than freed at end of request -- an unauthenticated caller
+// must not get to write unbounded bytes into a buffer with that lifetime.
+//
+// Kept separate from maxRequestIDLen deliberately: that one is sized to admit
+// a W3C traceparent, this one by what a hostname can be. Same hazard,
+// different rules over different values; expected to diverge.
+const maxServerAddressLen = 253
+
+// serverAddress returns the host without the port, or "" when the host is
+// longer than maxServerAddressLen or carries a byte outside printable ASCII.
+// semconv defines server.address as the host alone, with server.port a separate
+// attribute this design does not emit; r.Host carries both.
+//
+// An out-of-range host is DROPPED, not truncated or scrubbed, mirroring
+// validRequestID: this package does not repair an untrusted value. Truncating
+// would also split a multi-byte sequence mid-rune and would leave a
+// plausible-looking host that is not the one the client sent.
+//
+// THE ASCII CHECK IS NOT COSMETIC, and length does not subsume it.
+// httpguts.ValidHeaderFieldValue permits 0x80-0xFF, so net/http hands those
+// bytes through intact, and an OTLP attribute value is a protobuf `string`
+// field -- which google.golang.org/protobuf REFUSES to marshal when it is not
+// valid UTF-8 ("string field contains invalid UTF-8", measured directly against
+// proto.Marshal of a KeyValue holding "\xff\xfe"). The exporter marshals a
+// whole batch at once, so ONE request with a two-byte non-ASCII Host drops
+// every span batched with it, and a caller repeating it stops trace export
+// process-wide. That is a remote, unauthenticated denial of observability.
+//
+// The predicate is duplicated from validRequestID rather than extracted, for
+// the same reason the two length bounds are separate: a correlation id and a
+// hostname have different legitimate alphabets and are expected to diverge.
+// They coincide at printable ASCII today by arithmetic, not by a shared rule.
+//
+// IPv6 is asymmetric here, and deliberately so: net.SplitHostPort splits
+// "[2001:db8::1]:8080" into "2001:db8::1" (port AND brackets stripped), but
+// "[2001:db8::1]" alone has no port for SplitHostPort to find, so it errors
+// and this function returns the bracketed literal UNCHANGED. Both are valid
+// server.address values for the same host; verified against net.SplitHostPort
+// directly, not assumed.
+func serverAddress(host string) string {
+	if len(host) > maxServerAddressLen {
+		return ""
+	}
+	for i := range len(host) {
+		if host[i] < 0x20 || host[i] > 0x7E {
+			return ""
+		}
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+// knownHTTPMethods is the semconv-known method set, read from the pinned
+// go.opentelemetry.io/otel/semconv/v1.43.0/httpconv package's own
+// RequestMethod* constants -- NOT hand-typed. That package lists TEN methods,
+// not the nine RFC 9110 verbs alone: it also carries QUERY, the
+// httpbis-safe-method-w-body draft method semconv's own attribute_group.go
+// documents alongside RFC 9110 and RFC 5789 (PATCH) as sources for the
+// "known" set (attribute_group.go:7222-7226 in the pinned semconv).
+var knownHTTPMethods = map[string]struct{}{
+	string(httpconv.RequestMethodConnect): {},
+	string(httpconv.RequestMethodDelete):  {},
+	string(httpconv.RequestMethodGet):     {},
+	string(httpconv.RequestMethodHead):    {},
+	string(httpconv.RequestMethodOptions): {},
+	string(httpconv.RequestMethodPatch):   {},
+	string(httpconv.RequestMethodPost):    {},
+	string(httpconv.RequestMethodPut):     {},
+	string(httpconv.RequestMethodTrace):   {},
+	string(httpconv.RequestMethodQuery):   {},
+}
+
+// normalizeMethod maps a method semconv knows to itself, and everything else
+// to httpconv.RequestMethodOther ("_OTHER"), per semconv's http.request.method
+// definition: "If the HTTP request method is not known to instrumentation, it
+// MUST set the http.request.method attribute to _OTHER"
+// (attribute_group.go:7228-7229, pinned semconv v1.43.0).
+//
+// Matching is CASE-SENSITIVE, deliberately: the same definition also states
+// "HTTP method names are case-sensitive and http.request.method attribute
+// value MUST match a known HTTP method name exactly" (attribute_group.go:
+// 7249-7250) -- so "get" is not "GET" and normalizes to _OTHER exactly like
+// any other unknown token.
+//
+// Without this, Go's net/http server accepts any RFC 9110 token as a method
+// and hands it straight to the handler: an unauthenticated caller can mint
+// one span name and one metric time series per junk verb sent over raw TCP.
+// The SDK's default cardinality limit (sdk/metric@v1.46.0's
+// defaultCardinalityLimit, 2000 datapoints) turns that into a
+// denial-of-telemetry rather than an OOM -- legitimate routes spill into
+// otel.metric.overflow once the budget fills, permanently under cumulative
+// temporality.
+func normalizeMethod(method string) string {
+	if _, ok := knownHTTPMethods[method]; ok {
+		return method
+	}
+	return string(httpconv.RequestMethodOther)
+}
+
+// Trace starts a server span per request and records its duration.
+//
+// IT MUST SIT OUTSIDE AccessLog. Trace calls r.WithContext, and any middleware
+// doing so between AccessLog and the mux makes the mux annotate a COPY, which
+// silently empties r.Pattern on every access-log record (server.go:294-300).
+//
+// It reads Pattern off the request it passed DOWN, never off its own r. That
+// looks like a typo and is not: r is the outer request the mux never touches.
+//
+// tracer and dur are INJECTED, never read from the OTel globals. Reading
+// globals would put process-wide state under the test suite and make these
+// tests order-dependent.
+func Trace(tracer trace.Tracer, dur metric.Float64Histogram) func(http.Handler) http.Handler {
+	prop := propagation.TraceContext{}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+			// Normalized once, used everywhere r.Method would otherwise feed a
+			// cardinality surface (fix round 1, B1): the span name fallback
+			// below, the span attribute, and the histogram label. A raw,
+			// unauthenticated method must never reach any of the three.
+			method := normalizeMethod(r.Method)
+			ctx, span := tracer.Start(ctx, "HTTP "+method, trace.WithSpanKind(trace.SpanKindServer))
+			defer span.End()
+
+			start := time.Now()
+			// The SAME statusRecorder type AccessLog uses. That is load-bearing,
+			// not convenience: it implements Unwrap (see its comment), which a
+			// WebSocket upgrade walks looking for http.Hijacker. A bespoke
+			// writer wrapper without Unwrap 501s every /feed stream.
+			rec := &statusRecorder{ResponseWriter: w}
+
+			r2 := r.WithContext(ctx)
+			next.ServeHTTP(rec, r2)
+
+			if rec.status == 0 {
+				rec.status = http.StatusOK // same defaulting AccessLog applies
+			}
+
+			// r2, NEVER r. See the doc comment.
+			route := r2.Pattern
+			span.SetName(spanName(method, route))
+
+			// attrs holds the THREE attributes the span and the histogram
+			// share; server.address is span-only (never on the metric -- the
+			// original design's histogram carries method, route, and status
+			// only, per TestTrace_HistogramAttributeSet) and is appended just
+			// for the span. Built once and sliced, not duplicated: a second
+			// hand-typed list is exactly how the _OTHER normalization above
+			// could drift between the span and the metric (fix round 1, S1's
+			// mutation and the risk B1 raised for the histogram specifically).
+			attrs := [4]attribute.KeyValue{
+				semconv.HTTPRequestMethodKey.String(method),
+				semconv.HTTPRouteKey.String(route),
+				semconv.HTTPResponseStatusCodeKey.Int(rec.status),
+				semconv.ServerAddressKey.String(serverAddress(r.Host)),
+			}
+			span.SetAttributes(attrs[:]...)
+			if rec.status >= 500 {
+				// 4xx is not a server fault: a rejected credential must not mark
+				// the span Error.
+				span.SetStatus(codes.Error, http.StatusText(rec.status))
+			}
+
+			// attrs[:3:3], not attrs[:3]: the full-slice expression caps the
+			// capacity at 3 so a future append here cannot silently overwrite
+			// server.address at attrs[3] and put an attacker-chosen host on the
+			// metric, where the SDK's cardinality limit turns it into a
+			// denial-of-telemetry (see normalizeMethod's comment). No append
+			// exists yet -- today only statement order protects it, since
+			// metric.WithAttributes copies before sorting.
+			dur.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(attrs[:3:3]...))
 		})
 	}
 }
