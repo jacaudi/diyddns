@@ -408,7 +408,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 		// G404 flags: it needs no seeding and jitter timing is not
 		// security-sensitive regardless (see poller.go's defaultRandFloat).
 		notifier = notify.NewWorker(st, clients, key, cfg.Notifications.MaxAttempts,
-			service.NewAuditWriter(st), rand.Float64, log)
+			service.NewAuditWriter(st), rand.Float64, log, inst.DeliveryCount())
 	}
 
 	return &Server{

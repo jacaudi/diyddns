@@ -18,6 +18,9 @@ import (
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -73,14 +76,29 @@ type Worker struct {
 	audit       AuditSink
 	randFloat   func() float64
 	log         *slog.Logger
+
+	// deliveries counts one attempt per terminal class. The OTel metric API,
+	// not internal/server's Instruments interface: internal/server imports
+	// THIS package (server.go:23), so the reverse import would be a cycle.
+	//
+	// This counts attempts MADE, not attempts RECORDED: attempt's ctx.Err()
+	// guard (worker.go:245-246) only covers the client.Do error branch, so a
+	// cancellation landing between a successful client.Do and
+	// UpdateAfterAttempt still increments this counter, then fails the
+	// write-back -- the row is retried and counted again after restart. This
+	// counter and notification_deliveries.attempts can diverge across a
+	// shutdown; they are not meant to reconcile.
+	deliveries metric.Int64Counter
 }
 
 // NewWorker constructs a Worker. key is the raw AEAD key passed to
 // auth.OpenSecret, not a base64 string. randFloat is the jitter seam
 // (injected the same way internal/client/poller/poller.go:163-164 injects
-// its own); production callers pass a real [0,1) source.
-func NewWorker(st *store.Store, cs *Clients, key []byte, maxAttempts int, audit AuditSink, randFloat func() float64, log *slog.Logger) *Worker {
-	return &Worker{st: st, clients: cs, key: key, maxAttempts: maxAttempts, audit: audit, randFloat: randFloat, log: log}
+// its own); production callers pass a real [0,1) source. deliveries is the
+// OTel counter incremented once per delivery attempt (see deliverOne); pass
+// noop.Int64Counter{} when telemetry is off.
+func NewWorker(st *store.Store, cs *Clients, key []byte, maxAttempts int, audit AuditSink, randFloat func() float64, log *slog.Logger, deliveries metric.Int64Counter) *Worker {
+	return &Worker{st: st, clients: cs, key: key, maxAttempts: maxAttempts, audit: audit, randFloat: randFloat, log: log, deliveries: deliveries}
 }
 
 // Run sweeps for due deliveries every notifierInterval until ctx is
@@ -135,8 +153,16 @@ func (w *Worker) deliverOne(ctx context.Context, d store.DueDelivery) {
 	if class == "" {
 		// ctx was cancelled mid-attempt (server shutting down): no write-back.
 		// The row stays exactly as selected and is retried after restart.
+		// No metric either -- an empty class on an already-cancelled context is
+		// a series nobody wants, and not recording matches the write-back
+		// semantics above.
 		return
 	}
+	// Cardinality is bounded by construction: the class set is a compile-time
+	// constant (worker.go:50-55) plus store.DeliveryDelivered. NO per-endpoint
+	// or per-user attribute -- those are unbounded, and under design D8 they
+	// are not on the span either.
+	w.deliveries.Add(ctx, 1, metric.WithAttributes(attribute.String("class", class)))
 
 	attempts := d.Attempts + 1
 	var (
