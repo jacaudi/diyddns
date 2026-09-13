@@ -1,16 +1,21 @@
 // Package telemetry constructs the OpenTelemetry providers DIYDDNS exports
 // through, and owns their shutdown. It is inert unless explicitly enabled.
 //
-// It installs NO OTel provider globals (design D10): every instrument is
-// handed to its consumer, so "disabled" means the consumer holds a no-op and
-// nothing else in the process changes. The only globals it will install are
-// the two diagnostic ones, otel.SetErrorHandler and otel.SetLogger (Task 6),
-// which have no injection alternative (see SetErrorHandler). otel.SetLogger is
-// installed TWICE on the enabled path -- once early, by New itself, against a
-// caller-supplied bootstrap logger, before construction can log anything
-// through it; once again by SetErrorHandler, against the final application
-// logger. See New's and SetErrorHandler's doc comments for why both are
-// necessary.
+// It installs NO OTel provider globals, and NO diagnostic globals either
+// (design D10): every instrument is handed to its consumer, so "disabled"
+// means the consumer holds a no-op and nothing else in the process changes.
+//
+// REVISION 6 (2026-09-12 maintainer ruling, rolling back part of Task 6): New
+// used to take a bootstrap *slog.Logger and install otel.SetLogger early,
+// against it, so a malformed OTEL_* variable reported from inside exporter
+// construction would be captured before SetErrorHandler could otherwise
+// install a channel. That ordering problem is now solved by the CALLER
+// instead: cmd/diyddns-server installs otel.SetLogger against its own logger
+// BEFORE calling New, using server.LazyLoggerProvider to give NewLogger a
+// slot it can fill once New returns the real provider. New goes back to
+// installing nothing at all -- SetErrorHandler remains the only place this
+// package ever touches an OTel global, and it is opt-in, called once
+// construction has succeeded.
 package telemetry
 
 import (
@@ -26,7 +31,6 @@ import (
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
 
-	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log" // aliased: a bare `log` identifier
 
 	// would be ambiguous against "log/slog" (imported above), sdklog (below),
@@ -41,12 +45,19 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
-// instrumentationName is the scope every signal this package emits is
+// InstrumentationName is the scope every signal this package emits is
 // attributed to. Declared HERE rather than in Task 5 so the literal has exactly
 // one home: Task 5 does not modify inert() or Tracer(), so declaring it there
 // would leave two stale copies of the same string with nothing keeping them in
 // step.
-const instrumentationName = "github.com/jacaudi/diyddns"
+//
+// Exported (Fix round 1, I5): server.NewLogger's MultiHandler branch names the
+// otelslog scope for the logs signal, and until this constant was exported
+// that name was a second, hand-copied literal with nothing keeping it in step
+// with this one -- logs were the one signal Task 10 let drift from traces and
+// metrics. internal/server already imports internal/telemetry for
+// NewLoggerProvider; using the same constant there closes the gap.
+const InstrumentationName = "github.com/jacaudi/diyddns"
 
 // Status reports why telemetry is not exporting. A zero Status means nothing
 // has gone wrong -- not that telemetry is exporting; New returns a zero
@@ -108,36 +119,14 @@ type Providers struct {
 // in Task 5. It is parsed by the caller, before New, because parsing can fail
 // and New cannot return an error.
 //
-// bootstrap is used ONLY to install the second diagnostic channel (see
-// below) before construction runs; New never logs through it itself. Pass nil
-// on the disabled path, or when the caller has no logger yet -- New installs
-// nothing when bootstrap is nil, matching the "disabled parses no OTEL_*"
-// requirement below.
-func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info version.Info, bootstrap *slog.Logger) (*Providers, Status) {
+// New installs NO globals of its own (design D10, restored by Revision 6): a
+// malformed OTEL_* variable reported from inside exporter construction is the
+// CALLER's responsibility to capture, by installing otel.SetLogger against
+// its own logger before calling New -- see the package doc comment and
+// server.LazyLoggerProvider.
+func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info version.Info) (*Providers, Status) {
 	if !cfg.Enabled {
 		return inert(), Status{}
-	}
-
-	// PHASE ONE of the two-phase diagnostic install, and it must run before
-	// buildResource and every build* below: every SDK diagnostic this package
-	// exists to surface (a malformed OTEL_* timeout, endpoint, header, or TLS
-	// path) is logged via otel/internal/global from INSIDE
-	// otlp{trace,metric,log}http.New, i.e. during construction -- before
-	// SetErrorHandler exists to call, since SetErrorHandler is a method on the
-	// *Providers this function returns. Phase two (SetErrorHandler) reinstalls
-	// this same channel with the final application logger once construction
-	// succeeds. Both phases are safe because otel.SetLogger is an
-	// unconditional atomic store, not a once
-	// (otel@v1.46.0/internal/global/internal_logging.go:33-35) -- unlike
-	// otel.SetErrorHandler's delegation, which IS once-only. See
-	// setDiagnostics's doc comment for the once-only citation
-	// (handler.go:24-29).
-	//
-	// Nothing installs when bootstrap is nil: the disabled path above already
-	// returned, and a caller with no logger yet (there is none today; Task 13
-	// wires this) must not force one into existence just to satisfy this call.
-	if bootstrap != nil {
-		otel.SetLogger(otelLogr(bootstrap))
 	}
 
 	// An endpoint must come from somewhere. Four variables can supply it, so
@@ -206,7 +195,7 @@ func anyOTLPEndpointEnv() bool {
 // inert returns a Providers whose every accessor is a working no-op.
 func inert() *Providers {
 	return &Providers{
-		tracer:     tracenoop.NewTracerProvider().Tracer(instrumentationName),
+		tracer:     tracenoop.NewTracerProvider().Tracer(InstrumentationName),
 		requestDur: metricnoop.Float64Histogram{},
 		deliveries: metricnoop.Int64Counter{},
 	}
@@ -216,7 +205,7 @@ func inert() *Providers {
 // no-op otherwise. Never nil.
 func (p *Providers) Tracer() trace.Tracer {
 	if p == nil || p.tracer == nil {
-		return tracenoop.NewTracerProvider().Tracer(instrumentationName)
+		return tracenoop.NewTracerProvider().Tracer(InstrumentationName)
 	}
 	return p.tracer
 }

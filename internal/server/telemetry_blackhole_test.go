@@ -87,7 +87,7 @@ func TestBlackHoledCollector_DoesNotDegradeCheckin(t *testing.T) {
 
 	tel, st := telemetry.New(t.Context(),
 		config.OTLPSection{Enabled: true, Endpoint: "http://192.0.2.1:4318"},
-		slog.LevelInfo, version.Current(), discard())
+		slog.LevelInfo, version.Current())
 	if st.Fatal {
 		t.Fatalf("New: %s", st.Reason)
 	}
@@ -289,7 +289,7 @@ func TestShutdown_LeavesNoGoroutines(t *testing.T) {
 
 	tel, st := telemetry.New(t.Context(),
 		config.OTLPSection{Enabled: true, Endpoint: srv.URL},
-		slog.LevelInfo, version.Current(), discard())
+		slog.LevelInfo, version.Current())
 	if st.Fatal {
 		t.Fatalf("New: %s", st.Reason)
 	}

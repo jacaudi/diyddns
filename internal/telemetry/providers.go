@@ -76,12 +76,22 @@ func minsevFor(l slog.Level) minsev.Severity {
 //
 // It is declared in THIS task, not Task 10, because buildLogsFor is its first
 // user and Task 10 does not modify buildLogsFor: declaring it there would leave
-// Task 5 uncompilable. Same reasoning as instrumentationName in Task 2.
+// Task 5 uncompilable. Same reasoning as InstrumentationName in Task 2.
 func newLoggerProvider(proc sdklog.Processor, sev minsev.Severity, extra ...sdklog.LoggerProviderOption) *sdklog.LoggerProvider {
 	opts := append([]sdklog.LoggerProviderOption{
 		sdklog.WithProcessor(minsev.NewLogProcessor(proc, sev)),
 	}, extra...)
 	return sdklog.NewLoggerProvider(opts...)
+}
+
+// NewLoggerProvider builds a LoggerProvider around proc with the SAME minsev
+// gating New applies, so a caller can exercise the gating rather than its own
+// wiring.
+//
+// It takes NO testing.TB: that would link testing, flag and regexp into the
+// server binary. The caller owns the returned provider's Shutdown.
+func NewLoggerProvider(proc sdklog.Processor, level slog.Level) *sdklog.LoggerProvider {
+	return newLoggerProvider(proc, minsevFor(level))
 }
 
 // buildTraces constructs the tracer provider and stores p.tracer.
@@ -109,7 +119,7 @@ func (p *Providers) buildTraces(ctx context.Context, cfg config.OTLPSection, res
 		sdktrace.WithResource(res),
 	)
 	p.shutdown = append(p.shutdown, tp.Shutdown)
-	p.tracer = tp.Tracer(instrumentationName)
+	p.tracer = tp.Tracer(InstrumentationName)
 	return Status{}
 }
 
@@ -139,7 +149,7 @@ func (p *Providers) buildMetrics(ctx context.Context, cfg config.OTLPSection, re
 		sdkmetric.WithResource(res),
 	)
 	p.shutdown = append(p.shutdown, mp.Shutdown)
-	p.meter = mp.Meter(instrumentationName)
+	p.meter = mp.Meter(InstrumentationName)
 
 	dur, err := newRequestDuration(p.meter)
 	if err != nil {

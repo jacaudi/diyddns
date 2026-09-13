@@ -475,7 +475,7 @@ func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 // request had 404'd, had leaked a template, or had never reached AccessLog.
 func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log.json")
-	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path})
+	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path}, nil)
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}

@@ -274,7 +274,7 @@ func TestSetErrorHandler_NilLoggerIsNoOp(t *testing.T) {
 	}
 }
 
-// otelLogr's doc comment makes two checkable claims: Error records arrive
+// OtelLogr's doc comment makes two checkable claims: Error records arrive
 // structured, and V(1) Warns (OTel's global.Warn -- internal_logging.go:60-61)
 // land at slog level -1 and stay below Info (go-logr/logr@v1.4.4/slogsink.go
 // :68-73). This test pins both halves so a future reader cannot "fix" the
@@ -282,7 +282,7 @@ func TestSetErrorHandler_NilLoggerIsNoOp(t *testing.T) {
 func TestOtelLogr_ErrorIsStructuredWarnStaysBelowInfo(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	lg := otelLogr(base)
+	lg := OtelLogr(base)
 
 	lg.Error(errors.New("boom"), "exporter failed")
 	rs := records(t, &buf)
@@ -316,5 +316,50 @@ func TestRateLimited_NoRecoveredRecord(t *testing.T) {
 		if msg, _ := r["msg"].(string); strings.Contains(strings.ToLower(msg), "recover") {
 			t.Errorf("found a recovery record %q; the ErrorHandler interface cannot signal recovery", msg)
 		}
+	}
+}
+
+// reentrantHandler is a minimal slog.Handler whose Handle calls back into fn
+// -- standing in for a future path where h.log's own Handler triggers ANOTHER
+// otel error (sdk/log/logger.go:69-71 calls otel.Handle, i.e. rateLimited.Handle,
+// on the CALLER's goroutine for a processor error).
+type reentrantHandler struct {
+	fn func(context.Context, slog.Record) error
+}
+
+func (h reentrantHandler) Enabled(context.Context, slog.Level) bool        { return true }
+func (h reentrantHandler) Handle(ctx context.Context, r slog.Record) error { return h.fn(ctx, r) }
+func (h reentrantHandler) WithAttrs([]slog.Attr) slog.Handler              { return h }
+func (h reentrantHandler) WithGroup(string) slog.Handler                   { return h }
+
+// Handle must NOT hold h.mu while calling h.log's own Handler: a future
+// reachable path (see reentrantHandler's doc comment) re-enters Handle from
+// INSIDE that call, on the SAME goroutine -- and sync.Mutex is not reentrant,
+// so holding the lock across the log call would self-deadlock instead of
+// merely recursing. Bounded by a channel-with-timeout, per the brief: a bare
+// reentrant call would hang the whole suite if this regresses.
+func TestRateLimited_HandleDoesNotDeadlockOnReentrantLog(t *testing.T) {
+	var h *rateLimited
+	reentered := false
+	handler := reentrantHandler{fn: func(context.Context, slog.Record) error {
+		reentered = true
+		h.Handle(errors.New("reentrant"))
+		return nil
+	}}
+	h = &rateLimited{log: slog.New(handler), now: time.Now}
+
+	done := make(chan struct{})
+	go func() {
+		h.Handle(errors.New("boom"))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle deadlocked on a reentrant call from inside its own logger's Handle")
+	}
+	if !reentered {
+		t.Fatal("test setup bug: the reentrant handler never ran")
 	}
 }
