@@ -91,7 +91,7 @@ func chain(t *testing.T, logBuf *syncBuffer) (*httptest.Server, *feed.Hub, *stor
 		w = logBuf
 	}
 	log := slog.New(slog.NewJSONHandler(w, nil))
-	h, hub, err := server.Handler(cfg, st, log)
+	h, hub, err := server.Handler(cfg, st, log, server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}

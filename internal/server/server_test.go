@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -78,7 +79,7 @@ func TestNew_FailsClosedOnBadSecretKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := testConfig(t, tt.secretKey)
-			if _, err := server.New(cfg, memStore(t), discard()); err == nil {
+			if _, err := server.New(cfg, memStore(t), discard(), server.NopInstruments{}); err == nil {
 				t.Fatalf("New() with secret_key %q = nil error, want fail-closed error", tt.secretKey)
 			}
 		})
@@ -87,7 +88,7 @@ func TestNew_FailsClosedOnBadSecretKey(t *testing.T) {
 
 func TestServer_AllEndpoints(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
-	handler, _, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestServer_AllEndpoints(t *testing.T) {
 func TestServer_RunShutsDownOnCancel(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
 	cfg.Server.Listen = "127.0.0.1:0"
-	s, err := server.New(cfg, memStore(t), discard())
+	s, err := server.New(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -166,7 +167,7 @@ func TestServer_OIDCDegradesWhenNotRequired(t *testing.T) {
 		Scopes:       []string{"openid"},
 	}
 
-	handler, _, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestServer_OIDCFailsClosedWhenRequired(t *testing.T) {
 		Scopes:       []string{"openid"},
 	}
 
-	if _, _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{}); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when oidc required but discovery fails")
 	}
 }
@@ -222,7 +223,7 @@ func TestHandler_FailsClosedOnUnresolvableWebAuthnRP(t *testing.T) {
 		t.Fatalf("test setup: expected empty base_url/rp_origin, got %q/%q", cfg.Server.BaseURL, cfg.Auth.WebAuthn.RPOrigin)
 	}
 
-	if _, _, err := server.Handler(cfg, memStore(t), discard()); err == nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{}); err == nil {
 		t.Fatal("server.Handler() = nil error, want fail-closed error when passkey login is available but the WebAuthn RP is unresolvable")
 	}
 }
@@ -243,7 +244,7 @@ func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	if _, _, err := server.Handler(cfg, memStore(t), discard()); err != nil {
+	if _, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{}); err != nil {
 		t.Fatalf("server.Handler() = %v, want no error when hide_local_login_ui tolerates an unresolvable RP", err)
 	}
 }
@@ -255,7 +256,7 @@ func TestHandler_TolerantOfUnresolvableWebAuthnRPWhenLocalLoginHidden(t *testing
 // Task-8-era placeholder).
 func TestServer_PasskeyRoutesWired(t *testing.T) {
 	cfg := testConfig(t, validSecretKey())
-	handler, _, err := server.Handler(cfg, memStore(t), discard())
+	handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -303,7 +304,7 @@ func TestServer_ServeBoot(t *testing.T) {
 
 	cfg := testConfig(t, validSecretKey())
 	cfg.Server.Listen = addr
-	s, err := server.New(cfg, memStore(t), discard())
+	s, err := server.New(cfg, memStore(t), discard(), server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -429,7 +430,7 @@ func retentionConfig(t *testing.T, ipDays, perDeviceMax, auditDays int) config.S
 
 func TestNew_WarnsWhenRetentionEnabled(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := server.New(retentionConfig(t, 90, 0, 365), memStore(t), bufferLogger(&buf)); err != nil {
+	if _, err := server.New(retentionConfig(t, 90, 0, 365), memStore(t), bufferLogger(&buf), server.NopInstruments{}); err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
 	out := buf.String()
@@ -452,7 +453,7 @@ func TestNew_WarnsWhenRetentionEnabled(t *testing.T) {
 
 func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := server.New(retentionConfig(t, 0, 0, 0), memStore(t), bufferLogger(&buf)); err != nil {
+	if _, err := server.New(retentionConfig(t, 0, 0, 0), memStore(t), bufferLogger(&buf), server.NopInstruments{}); err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
 	if strings.Contains(buf.String(), "retention enabled") {
@@ -478,7 +479,7 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
-	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log)
+	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log, server.NopInstruments{})
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -579,5 +580,34 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	}
 	if rejectedID != ids[1] {
 		t.Errorf("session auth rejected: request_id = %q, want %q (huma api group's echoed id)", rejectedID, ids[1])
+	}
+}
+
+// observeDBRecorder embeds NopInstruments so it stays a working Instruments
+// for every other method, and records only the *sql.DB ObserveDB receives --
+// this is the seam TestNew_CallsObserveDB pins.
+type observeDBRecorder struct {
+	server.NopInstruments
+	db *sql.DB
+}
+
+// ObserveDB records db for the test to inspect.
+func (o *observeDBRecorder) ObserveDB(db *sql.DB) { o.db = db }
+
+// TestNew_CallsObserveDB pins that New wires the store's *sql.DB into
+// Instruments.ObserveDB. Nothing else in this task's suite drives New with an
+// Instruments that can observe the call, so without this test deleting the
+// inst.ObserveDB(st.DB()) line in New survives silently (fix round 1, B1).
+func TestNew_CallsObserveDB(t *testing.T) {
+	inst := &observeDBRecorder{}
+	st := memStore(t)
+	if _, err := server.New(testConfig(t, validSecretKey()), st, discard(), inst); err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	if inst.db == nil {
+		t.Fatal("server.New did not call inst.ObserveDB(st.DB())")
+	}
+	if inst.db != st.DB() {
+		t.Errorf("inst.ObserveDB received %p, want the store's own *sql.DB (%p)", inst.db, st.DB())
 	}
 }

@@ -307,7 +307,7 @@ func normalizeMethod(method string) string {
 //
 // IT MUST SIT OUTSIDE AccessLog. Trace calls r.WithContext, and any middleware
 // doing so between AccessLog and the mux makes the mux annotate a COPY, which
-// silently empties r.Pattern on every access-log record (server.go:294-300).
+// silently empties r.Pattern on every access-log record (server.go:346-354).
 //
 // It reads Pattern off the request it passed DOWN, never off its own r. That
 // looks like a typo and is not: r is the outer request the mux never touches.

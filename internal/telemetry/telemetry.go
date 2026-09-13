@@ -31,7 +31,7 @@ import (
 
 	// would be ambiguous against "log/slog" (imported above), sdklog (below),
 	// and this repo's own convention of naming *slog.Logger parameters `log`
-	// (e.g. internal/server/server.go:94). The alias keeps every log-shaped
+	// (e.g. internal/server/server.go:143). The alias keeps every log-shaped
 	// identifier in this file distinct.
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
@@ -265,7 +265,7 @@ func (p *Providers) ObserveDB(db *sql.DB) {
 // Shutdown flushes and stops every constructed provider, CONCURRENTLY across
 // providers, and collects every error rather than returning on the first --
 // the pattern Server.Run already uses for the feed hub's collect-both-errors
-// property (server.go:387-394).
+// property (server.go:456-463).
 //
 // Concurrency is load-bearing, not stylistic: each provider's worst-case
 // export is 12.5s, so sequential shutdowns would need a 37.5s budget and no

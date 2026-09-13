@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,12 +71,12 @@ func requireBlackHole(t *testing.T) {
 	}
 }
 
-// Design §10 test 3: assertions (a) and (c) only.
+// Design §10 test 3: assertions (a), (b), and (c).
 //
 //   - (a), the skip guard, is requireBlackHole above.
-//   - (b) -- /agent/v1/checkin answers within its normal budget -- needs
-//     server.Handler to hold the telemetry, which arrives in Task 9; see the
-//     comment inline below.
+//   - (b) -- /agent/v1/checkin answers within its normal budget, even while
+//     an export is live and retrying against the black hole -- is asserted
+//     by the checkin loop below, against a real server.Handler holding tel.
 //   - (c) -- Shutdown returns on its own, inside the worst-case budget --
 //     is asserted below.
 //   - (d) -- goleak, Shutdown leaves nothing running -- is NOT asserted
@@ -90,12 +91,61 @@ func TestBlackHoledCollector_DoesNotDegradeCheckin(t *testing.T) {
 	if st.Fatal {
 		t.Fatalf("New: %s", st.Reason)
 	}
+	// Fix round 1, S5: without this, every t.Fatalf below (and any future
+	// one added to this function) exits the test with tel's batch processor
+	// and OTLP clients still retrying against the black hole for the rest of
+	// the package run -- Shutdown is sync.Once-idempotent, so registering it
+	// here is free and changes nothing about assertion (c) below, which
+	// still calls tel.Shutdown itself and gets its own elapsed/ctx checks.
+	t.Cleanup(func() { _ = tel.Shutdown(context.Background()) })
 
-	// (b) -- /agent/v1/checkin answers within its normal budget -- is NOT
-	// asserted here. It needs server.Handler to hold the telemetry, and that
-	// parameter arrives in Task 9. Task 9 appends the checkin-latency loop to
-	// THIS test. Asserting it now, against a server telemetry is not wired
-	// into, would pass without proving anything.
+	// (b) /agent/v1/checkin answers within its normal budget even while the
+	// exporters are live and retrying against the black hole. This is THE
+	// standing constraint of the whole design: /agent/v1/checkin is the
+	// device liveness path and telemetry must never degrade it.
+	h, hub, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), discard(), tel)
+	if err != nil {
+		t.Fatalf("server.Handler: %v", err)
+	}
+	t.Cleanup(func() { _ = hub.Shutdown(context.Background()) })
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	// Fix round 1, S2: a fixed 20-iteration TIGHT loop finishes in ~25ms,
+	// entirely BEFORE sdktrace.WithBatcher's 5s default schedule delay ever
+	// fires a first export attempt -- so the original claim that these
+	// checkins run "while the exporters are ... retrying" was false; nothing
+	// is retrying yet when the loop ends. Running for 7s crosses that first
+	// export attempt (which then fails against the black hole and enters
+	// retry-with-backoff), so later iterations genuinely exercise the
+	// checkin path while an export is in flight and retrying -- but a TIGHT
+	// 7s loop against an in-process httptest.Server fires thousands of
+	// checkins, each minting its own span: that floods the batch processor's
+	// 2048-span queue well past its 512-span export batch size, which then
+	// needs multiple SEQUENTIAL 12.5s-worst-case exports to drain at
+	// Shutdown (see TelemetryShutdownTimeout's doc comment) and blew
+	// Shutdown's 20s ctx budget in testing. Pacing at 200ms -- an order of
+	// magnitude looser than any real device's check-in cadence -- keeps the
+	// span count in the same ballpark as the original 20-iteration loop
+	// while still spanning the 5s tick.
+	deadline := time.Now().Add(7 * time.Second)
+	for i := 0; time.Now().Before(deadline); i++ {
+		start := time.Now()
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost,
+			srv.URL+"/agent/v1/checkin", strings.NewReader("{}"))
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("checkin %d: %v", i, err)
+		}
+		_ = resp.Body.Close()
+		// An unauthenticated checkin answers 401 immediately. The status does
+		// not matter here; the LATENCY does.
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("checkin %d took %s with a black-holed collector; "+
+				"telemetry must never be on the request path", i, elapsed)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	// (c) Shutdown returns ON ITS OWN, inside the worst-case bound, rather
 	// than being truncated by ctx.
@@ -109,19 +159,79 @@ func TestBlackHoledCollector_DoesNotDegradeCheckin(t *testing.T) {
 	// Shutdown from one being cut off by ctx. The two properties that
 	// actually matter are checked directly instead: ctx must NOT have
 	// expired (Shutdown finished on its own), and elapsed must stay under
-	// the single-export worst case (12.5s -- MaxElapsedTime 5s + final
-	// backoff 4.5s + one 3s attempt, task-7-report.md's arithmetic section).
+	// the worst case for the number of sequential exports THIS test's own
+	// checkin loop forces (see below), not an arbitrary number.
 	//
 	// Fix round 2: widened the ceiling from 12.5s+500ms to 12.5s+5s. The
 	// tighter margin was flagged as tight enough to flake on a loaded CI
 	// runner -- 500ms of headroom over a 12.5s bound leaves no room for
 	// scheduling noise under contention, and this test measures wall-clock
 	// against a real (if black-holed) network stack, not a mocked clock.
-	// 5s keeps the check meaningfully below the 20s ctx budget (an
-	// implementation that actually needed the full budget would still be
-	// caught) while giving enough slack that ordinary CI jitter cannot flip
-	// this from PASS to FAIL on its own.
-	ctx, cancel := context.WithTimeout(context.Background(), server.TelemetryShutdownTimeout)
+	//
+	// Task 9 fix round 1, S2 (second effect): extending the checkin loop
+	// above to 7s -- needed so later checkins genuinely overlap a live
+	// export retry, per that loop's own comment -- means this Shutdown call
+	// now ALWAYS has to drain AT LEAST two sequential exports, not one: the
+	// automatic export sdktrace.WithBatcher's 5s schedule-delay tick starts
+	// mid-loop (already in flight when Shutdown is called), plus at least
+	// one more for the spans that queued after that tick fired. That is a
+	// different, harder case than server.TelemetryShutdownTimeout's doc
+	// comment describes ("a shutdown with an EMPTY queue ... the common
+	// case") -- that comment is corrected alongside this change, since this
+	// test no longer matches it. The budget below is LOCAL to this
+	// assertion, not server.TelemetryShutdownTimeout itself (which stays
+	// sized for main.go's real single-export, empty-queue shutdown path --
+	// Task 9 does not touch that production constant).
+	//
+	// Fix round 3: the mechanism behind "more than one sequential export" is
+	// NOT queue overflow, and this test cannot reach the
+	// MaxQueueSize(2048)/MaxExportBatchSize(512) structural ceiling
+	// server.TelemetryShutdownTimeout's doc comment describes for a
+	// long-lived production backlog -- span count at Shutdown here is ~35,
+	// nowhere near either number, and a re-reviewer's standalone probe
+	// (reproducing this test's exact WithBatcher/RetryConfig/black-hole
+	// mechanics, 12 runs, with otel.SetLogger capturing the SDK's internal
+	// "exporting spans" debug line before every attempt) measured batch
+	// sizes of 1-25 across every run. Confirmed by reading
+	// sdk@v1.46.0/trace/batch_span_processor.go directly: a failed export
+	// DROPS its batch unconditionally before checking the error
+	// (batch_span_processor.go:305-310, "A new batch is always created
+	// after exporting, even if the batch failed") -- the drain structurally
+	// cannot loop on the same spans, so queue depth cannot chain exports.
+	//
+	// The REAL mechanism is a race in the SDK's own processQueue select:
+	// exportSpans resets its 5s ticker BEFORE blocking on the network call,
+	// so by the time a stuck export finally returns (up to 12.5s later),
+	// the ticker has already re-fired. At that moment the timer channel and
+	// the just-closed stop channel are BOTH ready, and Go's select between
+	// them is pseudo-random -- losing that pick chains one more full export
+	// attempt before the goroutine notices Shutdown was requested. This has
+	// NO code-enforced ceiling: it is a decaying-probability tail, not a
+	// structural bound. The re-reviewer's 12-run probe measured 7x2, 4x3,
+	// 1x4 chained exports; Task 9's own re-verification independently
+	// produced 2-, 3-, and 4-export runs across its fix rounds.
+	//
+	// The budget below is therefore a GENEROUS EMPIRICAL MARGIN over an
+	// unbounded tail, not a proof of a maximum -- a 5th (or Nth) chained
+	// export is less likely on every additional link, but not impossible,
+	// and could still exceed it. It is sized at 4 chained exports because
+	// that is the worst this test and its reviewers have observed across
+	// ~20+ real runs, not because anything in the SDK enforces 4 as a
+	// limit. If this test ever flakes on the elapsed ceiling, the fix is
+	// widening this margin (or bounding the SDK's own retry/backoff
+	// further), not hunting for a bug that made a 5th chain happen --
+	// nothing here guarantees it can't. The two properties that matter are
+	// checked directly: ctx.Err() == nil stays the PRIMARY assertion -- it
+	// is what actually proves Shutdown returned on its own rather than
+	// being truncated; the elapsed ceiling is the secondary, looser check
+	// that still catches a genuine hang while tolerating the chain lengths
+	// actually observed.
+	const (
+		perExportWorstCase = 12500 * time.Millisecond                // MaxElapsedTime 5s + backoff 4.5s + one 3s attempt
+		observedChainDepth = 4                                       // worst chain length observed across ~20+ real runs; NOT an SDK-enforced ceiling (see above)
+		worstCase          = perExportWorstCase * observedChainDepth // 50s
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), worstCase+7500*time.Millisecond) // 57.5s
 	defer cancel()
 	start := time.Now()
 	_ = tel.Shutdown(ctx) // an error against a black hole is expected and fine
@@ -129,8 +239,8 @@ func TestBlackHoledCollector_DoesNotDegradeCheckin(t *testing.T) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		t.Errorf("Shutdown's ctx expired (%v) before Shutdown returned on its own; elapsed=%s", ctxErr, elapsed)
 	}
-	if elapsed > 17500*time.Millisecond {
-		t.Errorf("Shutdown took %s, want under ~12.5s (the worst case across providers, with headroom)", elapsed)
+	if elapsed > worstCase+5*time.Second { // 55s
+		t.Errorf("Shutdown took %s, want under ~%s (%d chained worst-case exports, with headroom)", elapsed, worstCase, observedChainDepth)
 	}
 }
 

@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,11 @@ import (
 	"github.com/jacaudi/diyddns/internal/server/webui"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
+
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // oidcDiscoverTimeout bounds the synchronous discovery attempt made at
@@ -36,8 +42,16 @@ const shutdownTimeout = 15 * time.Second
 // run, which happens AFTER the HTTP drain. It exceeds the 12.5s worst case
 // for a SINGLE export attempt-with-retries (MaxElapsedTime 5s + final
 // backoff 4.5s + one 3s attempt), so a shutdown with an EMPTY queue on every
-// signal -- the common case, and what the black-hole test exercises --
-// returns well inside budget.
+// signal -- the common case in production, a clean signal with nothing
+// queued -- returns well inside budget.
+//
+// Task 9 fix round 1, S2: this is NOT what
+// TestBlackHoledCollector_DoesNotDegradeCheckin exercises for its own
+// Shutdown call. That test's checkin loop deliberately runs long enough to
+// force TWO sequential exports (see its own comments), which needs a wider,
+// LOCAL budget it computes itself rather than reusing this constant. This
+// constant's sizing is unchanged and still governs main.go's real shutdown
+// path (Task 13), where an empty or near-empty queue is the expected case.
 //
 // Fix round 1, S5: this does NOT guarantee every queued span/log/metric gets
 // flushed. A non-empty queue can need MULTIPLE sequential exports:
@@ -59,6 +73,41 @@ const TelemetryShutdownTimeout = 20 * time.Second
 // enrollmentCodeTTL is how long a freshly-minted enrollment code stays valid
 // before it must be redeemed. Fixed for Plan 04 — no config key yet.
 const enrollmentCodeTTL = 15 * time.Minute
+
+// Instruments supplies the telemetry seams the HTTP stack records through.
+//
+// Declared HERE, at the consumer, so internal/server does not import
+// internal/telemetry -- the same shape service.Notifier uses
+// (service/checkin.go:30-31: "Declared here, at its consumer ... so
+// implementations satisfy it structurally and never import this package").
+// *telemetry.Providers satisfies it structurally.
+//
+// Every method returns a working no-op rather than nil when telemetry is off,
+// so no call site nil-checks. ObserveDB returns NOTHING by design: an error
+// here would be errcheck-forced into a `return nil, err` inside New, making a
+// telemetry failure a reason the server refuses to start.
+type Instruments interface {
+	Tracer() trace.Tracer
+	RequestDuration() metric.Float64Histogram
+	DeliveryCount() metric.Int64Counter
+	ObserveDB(*sql.DB)
+}
+
+// NopInstruments is the zero-cost Instruments tests and telemetry-disabled
+// callers use. Exported so internal/server/feed's tests can reach it.
+type NopInstruments struct{}
+
+// Tracer returns a no-op tracer.
+func (NopInstruments) Tracer() trace.Tracer { return tracenoop.NewTracerProvider().Tracer("nop") }
+
+// RequestDuration returns a no-op histogram.
+func (NopInstruments) RequestDuration() metric.Float64Histogram { return metricnoop.Float64Histogram{} }
+
+// DeliveryCount returns a no-op counter.
+func (NopInstruments) DeliveryCount() metric.Int64Counter { return metricnoop.Int64Counter{} }
+
+// ObserveDB does nothing.
+func (NopInstruments) ObserveDB(*sql.DB) {}
 
 // Server owns the HTTP server lifecycle.
 type Server struct {
@@ -283,10 +332,13 @@ func registerFeed(mux *http.ServeMux, cfg config.Server, st *store.Store, feedAu
 }
 
 // handler builds the fully-wrapped handler: buildMux's ServeMux inside the
-// RequestID → AccessLog → Recover middleware chain. It also returns the OIDC
-// manager buildMux constructs, so New/Run can launch its background
-// RetryLoop.
-func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, error) {
+// RequestID → Trace → AccessLog → Recover middleware chain. It also returns
+// the OIDC manager buildMux constructs, so New/Run can launch its background
+// RetryLoop. inst supplies the tracer and histogram Trace records through --
+// telemetry.Providers is inert (a working no-op) when disabled, so callers
+// pass it unconditionally; NopInstruments{} is for tests and other callers
+// that hold no *telemetry.Providers at all.
+func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, error) {
 	mux, oidcMgr, _, _, allowedPrivateCIDRs, hub, err := buildMux(cfg, st, log)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -297,9 +349,25 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 	// handed it. Insert any middleware between AccessLog and mux that calls
 	// r.WithContext or r.Clone and the mux annotates a copy instead: route
 	// silently goes empty on every access-log record, with nothing failing.
-	// (Recover is safe here precisely because it forwards r untouched.)
+	//
+	// Trace calls r.WithContext, so it goes OUTSIDE AccessLog, never inside.
+	// (Recover is safe where it is precisely because it forwards r untouched.)
+	//
+	// Consequence, not a defect: because Recover sits INSIDE Trace, a panic
+	// raised by Trace's own code (tracer.Start, prop.Extract, span.End,
+	// span.SetAttributes, dur.Record) is outside the application's recovery
+	// boundary on every request -- net/http's own conn.serve recovers it
+	// instead, and the connection is dropped rather than answered with a
+	// clean 500. Moving Recover outermost would close that gap but would
+	// cost the access-log record for panicking requests (AccessLog needs to
+	// run to completion to log), which is the worse trade-off; left as is.
+	//
+	// RequestID sits outside Trace too, and that ordering is unconstrained by
+	// the AccessLog hazard above: nothing in Trace reads the request id, and
+	// RequestID's own r.WithContext is already outside AccessLog either way.
 	return middleware.Chain(mux,
 		middleware.RequestID(cfg.Observability.RequestIDHeader),
+		middleware.Trace(inst.Tracer(), inst.RequestDuration()),
 		middleware.AccessLog(log),
 		middleware.Recover(log),
 	), oidcMgr, allowedPrivateCIDRs, hub, nil
@@ -309,8 +377,8 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 // stream hub beside it. Exported for black-box testing via httptest: the hub
 // lets a test revoke a token's streams or drive Shutdown, which no HTTP
 // route can. The OIDC manager is only needed by New/Run, so this discards it.
-func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler, *feed.Hub, error) {
-	h, _, _, hub, err := handler(cfg, st, log)
+func Handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *feed.Hub, error) {
+	h, _, _, hub, err := handler(cfg, st, log, inst)
 	return h, hub, err
 }
 
@@ -318,15 +386,16 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger) (http.Handler
 // OIDC, and service dependency graph via handler. Returns an error if
 // cfg.Auth.HMAC.SecretKey is missing or invalid, or OIDC is required but
 // unreachable (fail-closed).
-func New(cfg config.Server, st *store.Store, log *slog.Logger) (*Server, error) {
+func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (*Server, error) {
 	// allowedPrivateCIDRs is parsed once inside handler->buildMux and returned
 	// here rather than re-parsed: commit 74930fa claimed this reuse without
 	// actually doing it (New called notify.ParseAllowed a second time on the
 	// same config value), so this is now the genuine single call.
-	h, mgr, allowedPrivateCIDRs, hub, err := handler(cfg, st, log)
+	h, mgr, allowedPrivateCIDRs, hub, err := handler(cfg, st, log, inst)
 	if err != nil {
 		return nil, err
 	}
+	inst.ObserveDB(st.DB())
 
 	var notifier *notify.Worker
 	if cfg.Notifications.Enabled {
