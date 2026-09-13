@@ -1,9 +1,13 @@
 // Package telemetry constructs the OpenTelemetry providers DIYDDNS exports
 // through, and owns their shutdown. It is inert unless explicitly enabled.
 //
-// It installs NO OTel provider globals, and NO diagnostic globals either
-// (design D10): every instrument is handed to its consumer, so "disabled"
-// means the consumer holds a no-op and nothing else in the process changes.
+// It installs NO OTel provider globals (design D10): every instrument is
+// handed to its consumer, so "disabled" means the consumer holds a no-op and
+// nothing else in the process changes. SetErrorHandler is the single
+// exception, and it is opt-in, called only once construction has succeeded,
+// and a no-op on an inert *Providers -- see its doc comment. The caller's own
+// otel.SetLogger install is gated on observability.otlp.enabled for the same
+// reason (cmd/diyddns-server/main.go).
 //
 // REVISION 6 (2026-09-12 maintainer ruling, rolling back part of Task 6): New
 // used to take a bootstrap *slog.Logger and install otel.SetLogger early,
@@ -27,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -63,8 +68,9 @@ const InstrumentationName = "github.com/jacaudi/diyddns"
 // has gone wrong -- not that telemetry is exporting; New returns a zero
 // Status on the disabled path too, where nothing is exported at all.
 //
-// THE FATAL RULE, stated once and applied nowhere else. Fatal is true in
-// exactly two cases:
+// THE FATAL RULE, stated once HERE: no other site decides what is Fatal. Only
+// one site ACTS on it -- cmd/diyddns-server's serveCmd, which refuses to boot.
+// Fatal is true in exactly two cases:
 //
 //	(a) the operator gave a value that cannot mean anything -- a malformed
 //	    endpoint (Task 4);
@@ -80,9 +86,10 @@ type Status struct {
 	Fatal  bool
 }
 
-// Providers will own the three OTel providers and their exporters once Tasks
-// 3-6 construct them; today it holds only the inert no-op fallbacks. A nil
-// *Providers is valid and inert: every method tolerates it.
+// Providers owns the three OTel providers and their exporters. A nil
+// *Providers is valid and inert: every method tolerates it, and so does the
+// zero value inert() returns, which holds no-op instruments and no providers
+// at all.
 type Providers struct {
 	tracer     trace.Tracer
 	requestDur metric.Float64Histogram
@@ -92,8 +99,9 @@ type Providers struct {
 	// after the store is open.
 	meter metric.Meter
 
-	// loggerProvider is nil until Task 5 constructs it. CONCRETE type, never
-	// the otellog.LoggerProvider interface: see LoggerProvider()'s comment.
+	// loggerProvider is nil on the inert path, where no provider is built at
+	// all. CONCRETE type, never the otellog.LoggerProvider interface: see
+	// LoggerProvider()'s comment.
 	loggerProvider *sdklog.LoggerProvider
 
 	// shutdown holds one func per constructed provider. Empty when inert.
@@ -111,13 +119,22 @@ type Providers struct {
 	logger *slog.Logger
 }
 
+// partialShutdownTimeout bounds the drain New performs when a later builder
+// fails after an earlier one succeeded. Deliberately far smaller than
+// server.TelemetryShutdownTimeout's 20s: nothing has been recorded yet, so
+// every provider alive on this path drains an EMPTY queue and its exporter's
+// Shutdown does no network I/O. The bound exists only so a future exporter
+// that does dial on Shutdown cannot hang startup indefinitely.
+const partialShutdownTimeout = 5 * time.Second
+
 // New constructs the providers. It NEVER returns an error and never returns
 // nil -- every failure path returns an inert *Providers plus a Status
 // describing why (design D5).
 //
 // logLevel is the already-parsed logging.level; it feeds the minsev processor
-// in Task 5. It is parsed by the caller, before New, because parsing can fail
-// and New cannot return an error.
+// buildLogsFor wraps around the log batch processor, so OTLP and stdout gate
+// at the same level (design D4). It is parsed by the caller, before New,
+// because parsing can fail and New cannot return an error.
 //
 // New installs NO globals of its own (design D10, restored by Revision 6): a
 // malformed OTEL_* variable reported from inside exporter construction is the
@@ -157,16 +174,25 @@ func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info 
 	// Each build* appends its provider's Shutdown to p.shutdown before it can
 	// fail, so a later failure still drains what was already constructed: the
 	// inline _ = p.Shutdown(ctx) below runs against p, not against the
-	// inert() this function then returns to the caller. That drain is a no-op
-	// until Task 7 implements Shutdown's fan-out (today Shutdown always
-	// returns nil without calling anything in p.shutdown).
+	// inert() this function then returns to the caller.
+	//
+	// A Fatal Status therefore always hands back an inert *Providers with an
+	// EMPTY shutdown slice -- whatever was built has already been drained here.
+	// cmd/diyddns-server leans on that: its Fatal branch returns before any
+	// other startup step, and its own deferred tel.Shutdown has nothing left
+	// to do.
 	for _, build := range []func(context.Context, config.OTLPSection, *resource.Resource) Status{
 		p.buildTraces,
 		p.buildMetrics,
 		p.buildLogsFor(logLevel),
 	} {
 		if st := build(ctx, cfg, res); st.Fatal {
-			_ = p.Shutdown(ctx)
+			// BOUNDED, not ctx as-is: ctx here is cmd.Context(), which is
+			// never cancelled during startup, so a provider Shutdown that
+			// blocked would hang the boot with no deadline to stop it.
+			dctx, cancel := context.WithTimeout(ctx, partialShutdownTimeout)
+			_ = p.Shutdown(dctx)
+			cancel()
 			return inert(), st
 		}
 	}
@@ -241,13 +267,21 @@ func (p *Providers) LoggerProvider() otellog.LoggerProvider {
 	return p.loggerProvider
 }
 
-// ObserveDB registers the sql.DBStats callback against db (Task 12). It
-// returns NOTHING: returning an error would put an errcheck-forced
-// `return nil, err` inside server.New, making a telemetry failure a reason the
-// server refuses to start -- exactly what design D5 forbids.
+// ObserveDB registers the sql.DBStats callback against db. It returns
+// NOTHING: returning an error would put an errcheck-forced `return nil, err`
+// inside server.New, making a telemetry failure a reason the server refuses
+// to start -- exactly what design D5 forbids.
+//
+// A failed registration is reported through the logger SetErrorHandler
+// stored, and dropped rather than panicking if ObserveDB somehow runs before
+// SetErrorHandler.
 func (p *Providers) ObserveDB(db *sql.DB) {
-	if p == nil || db == nil {
+	if p == nil || db == nil || p.meter == nil {
 		return
+	}
+	if err := registerDBStats(p.meter, db); err != nil && p.logger != nil {
+		p.logger.LogAttrs(context.Background(), slog.LevelWarn,
+			"telemetry: db stats registration failed", slog.Any("error", err))
 	}
 }
 

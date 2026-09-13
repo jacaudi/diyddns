@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,11 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
@@ -479,7 +485,8 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
-	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log, server.NopInstruments{})
+	inst := newRecordingInstruments(t)
+	h, _, err := server.Handler(testConfig(t, validSecretKey()), memStore(t), log, inst)
 	if err != nil {
 		t.Fatalf("server.Handler: %v", err)
 	}
@@ -581,7 +588,98 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	if rejectedID != ids[1] {
 		t.Errorf("session auth rejected: request_id = %q, want %q (huma api group's echoed id)", rejectedID, ids[1])
 	}
+
+	// THE §4.4 GUARD. For every row, the span name must match the same route
+	// the access log recorded. Moving Trace inside AccessLog, or reading
+	// r.Pattern instead of r2.Pattern, both fail this block too -- but BOTH
+	// are already caught elsewhere in the tree (TestTrace_SpanNameIsRouteTemplate,
+	// internal/server/middleware, catches the r.Pattern/r2.Pattern swap
+	// directly). What is uniquely caught HERE, and by nothing else in the
+	// tree (verified: `go test ./internal/...` against the mutation stays
+	// green everywhere except this test), is deleting
+	// middleware.Trace(inst.Tracer(), inst.RequestDuration()) from handler()'s
+	// Chain call (server.go:369) entirely: nothing else in this repo drives a
+	// request through server.Handler and asserts a span was ever produced.
+	//
+	// Read the ALREADY-COLLECTED spans; do not re-drive the requests. This test
+	// has a known pre-existing race on its log-file read, and a second pass
+	// would widen it.
+	spans := inst.spans.GetSpans()
+	if len(spans) != len(tests) {
+		t.Fatalf("got %d spans, want %d (one per row)", len(spans), len(tests))
+	}
+	// ORDER IS DELIBERATELY NOT ASSERTED -- matching spans[i] to tests[i] was a
+	// real flake that CI caught and 60 local runs did not. span.End() is the
+	// OUTERMOST deferred call in Trace, so it runs after the response has been
+	// written; meanwhile these rows close their response bodies WITHOUT draining
+	// them, which stops net/http reusing the connection (measured: 2 distinct
+	// server connections for these 7 requests). So the next request can be
+	// served by a second goroutine that reaches span.End() before the previous
+	// one does, and the export order is whatever order the goroutines finish in.
+	// Reproduced under -race with a 20ms sleep before span.End(): 9-14 of every
+	// 20 runs failed, always swapping exactly these two rows --
+	//   webui static prefix: span name = "HTTP GET", want "GET /static/"
+	//   unmatched (404):     span name = "GET /static/", want "HTTP GET"
+	// -- the pair straddling the connection boundary, which is precisely what CI
+	// reported. Every name was individually correct; only the order was not.
+	//
+	// A multiset still fails on any wrong, missing or extra name, and the two
+	// mutations this block exists for are both caught by it: deleting
+	// middleware.Trace from handler()'s chain yields 0 spans (the check above),
+	// and reading r.Pattern instead of r2.Pattern collapses every name to
+	// "HTTP GET"/"HTTP POST". The per-row name-to-route correspondence is
+	// already pinned against the access log earlier in this test.
+	wantNames := map[string]int{}
+	for _, tt := range tests {
+		want := tt.wantRoute
+		if want == "" {
+			want = "HTTP " + tt.method // the 404 and 405 rows
+		}
+		wantNames[want]++
+	}
+	gotNames := map[string]int{}
+	for _, s := range spans {
+		gotNames[s.Name]++
+	}
+	if !maps.Equal(gotNames, wantNames) {
+		t.Errorf("span names = %v, want %v (order is deliberately not asserted)", gotNames, wantNames)
+	}
 }
+
+// recordingInstruments backs server.Instruments with an in-memory span
+// exporter, so a test can assert on emitted spans. The meter provider it
+// builds has no reader attached: RequestDuration/DeliveryCount exist only so
+// Trace and notify.Worker have somewhere to record into without a nil
+// panic -- nothing in this file asserts on their values, so no reader is
+// wired up (fix round 2, I4: an earlier revision of this comment claimed a
+// manual metric reader that was never built).
+//
+// SimpleSpanProcessor, NOT BatchSpanProcessor: batching exports asynchronously
+// and every assertion against spans would race.
+type recordingInstruments struct {
+	spans      *tracetest.InMemoryExporter
+	tracer     trace.Tracer
+	requestDur metric.Float64Histogram
+	deliveries metric.Int64Counter
+}
+
+func newRecordingInstruments(t *testing.T) *recordingInstruments {
+	t.Helper()
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exp)))
+	t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+	mp := sdkmetric.NewMeterProvider()
+	t.Cleanup(func() { _ = mp.Shutdown(t.Context()) })
+	meter := mp.Meter("test")
+	dur, _ := meter.Float64Histogram("http.server.request.duration", metric.WithUnit("s"))
+	cnt, _ := meter.Int64Counter("diyddns.notification.delivery", metric.WithUnit("{delivery}"))
+	return &recordingInstruments{spans: exp, tracer: tp.Tracer("test"), requestDur: dur, deliveries: cnt}
+}
+
+func (r *recordingInstruments) Tracer() trace.Tracer                     { return r.tracer }
+func (r *recordingInstruments) RequestDuration() metric.Float64Histogram { return r.requestDur }
+func (r *recordingInstruments) DeliveryCount() metric.Int64Counter       { return r.deliveries }
+func (r *recordingInstruments) ObserveDB(*sql.DB)                        {}
 
 // observeDBRecorder embeds NopInstruments so it stays a working Instruments
 // for every other method, and records only the *sql.DB ObserveDB receives --

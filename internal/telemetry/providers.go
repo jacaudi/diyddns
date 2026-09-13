@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -167,7 +168,7 @@ func (p *Providers) buildMetrics(ctx context.Context, cfg config.OTLPSection, re
 
 // newDeliveryCounter builds the notification delivery counter. Unit
 // {delivery} per design §7.2. Bounded cardinality by construction: the class
-// attribute comes from a compile-time constant set (notify/worker.go:46-51)
+// attribute comes from a compile-time constant set (notify/worker.go:50-55)
 // plus "delivered".
 //
 // Extracted to its own function, mirroring newRequestDuration, so the unit
@@ -243,4 +244,40 @@ func newRequestDuration(meter metric.Meter) (metric.Float64Histogram, error) {
 	// attribute set while keeping the semconv name, unit, description and --
 	// the non-negotiable part -- the seconds-shaped bucket boundaries.
 	return h.Inst(), nil
+}
+
+// registerDBStats registers the sql.DBStats observable. It issues NO query and
+// holds no connection -- DB.Stats reads fields under db.mu (sql.go:1223).
+//
+// The names are deliberately in a diyddns. namespace. OTel semconv defines
+// db.client.connection.wait_time as a Float64Histogram of per-acquisition wait
+// (semconv/v1.43.0/dbconv/metric.go:1595-1598: ClientConnectionWaitTime embeds
+// metric.Float64Histogram); these are cumulative counters fed from DBStats, a
+// different instrument type with different meaning, so reusing the reserved
+// name would be a duplicate-name conflict for any pipeline also carrying the
+// real one. db.client.connection.waits is not a semconv name at all.
+func registerDBStats(meter metric.Meter, db *sql.DB) error {
+	waitTime, err := meter.Float64ObservableCounter(
+		"diyddns.db.connection.wait_time",
+		metric.WithUnit("s"),
+		metric.WithDescription("Cumulative time blocked waiting for the single SQLite connection."),
+	)
+	if err != nil {
+		return err
+	}
+	waits, err := meter.Int64ObservableCounter(
+		"diyddns.db.connection.waits",
+		metric.WithUnit("{wait}"),
+		metric.WithDescription("Cumulative number of waits for the single SQLite connection."),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		s := db.Stats()
+		o.ObserveFloat64(waitTime, s.WaitDuration.Seconds())
+		o.ObserveInt64(waits, s.WaitCount)
+		return nil
+	}, waitTime, waits)
+	return err
 }

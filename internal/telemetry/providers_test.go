@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,11 @@ import (
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+
+	_ "modernc.org/sqlite"
 )
 
 const testEndpoint = "http://192.0.2.1:4318" // TEST-NET-1, RFC 5737: never routable
@@ -43,11 +48,8 @@ func TestNew_EnabledIsReal(t *testing.T) {
 		// Shutdown would return immediately without flushing and could leave
 		// batch-worker goroutines alive.
 		//
-		// Shutdown itself is still a Task-7 stub (telemetry.go's Shutdown
-		// always returns nil without calling anything in p.shutdown), so this
-		// call flushes nothing and the three providers' batch-worker
-		// goroutines leak for the rest of the test binary's life until Task 7
-		// implements the real fan-out.
+		// testEndpoint is a black hole, so this drain spends the retry profile
+		// before giving up -- which is what shutdownBudget is sized for.
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 		defer cancel()
 		_ = tel.Shutdown(ctx)
@@ -307,17 +309,14 @@ func TestNew_EnabledExportsToConfiguredEndpoint(t *testing.T) {
 			span.End()
 			tel.RequestDuration().Record(t.Context(), 0.01)
 
-			// Drive tel.shutdown directly rather than tel.Shutdown: Shutdown
-			// itself is still a Task-7 stub (telemetry.go's Shutdown always
-			// returns nil without calling any of these funcs), so calling it
-			// here would flush nothing and this test would pass vacuously.
-			// Task 7 must revisit this test once Shutdown does its own
-			// fan-out, and can likely delete this direct-drive workaround.
+			// Shutdown, not a hand-rolled loop over tel.shutdown: its fan-out
+			// is what flushes the two pipelines, and driving the funcs directly
+			// would exercise this test's own wiring instead of production's.
+			// NOT t.Context(): it is still live here, but Background makes the
+			// budget the only thing bounding the flush.
 			ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 			defer cancel()
-			for _, fn := range tel.shutdown {
-				_ = fn(ctx)
-			}
+			_ = tel.Shutdown(ctx)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -390,6 +389,64 @@ func TestNew_DisabledIgnoresMalformedEnv(t *testing.T) {
 	}
 	if tel.LoggerProvider() != nil {
 		t.Error("LoggerProvider() must be a genuine nil interface on the disabled path")
+	}
+}
+
+// Nothing else proves buildTraces' sdktrace.WithResource(res) is wired: delete
+// it and the tracer provider silently substitutes the memoized
+// resource.Default(), whose service.name is "unknown_service:<binary>" --
+// every resource_test case still passes, because they all exercise
+// buildResource directly rather than what the providers were built with.
+//
+// The assertion is available because a recording span's concrete type
+// implements sdktrace.ReadOnlySpan, which exposes Resource(). Only the trace
+// signal has such a seam through New's public surface; the metrics and logs
+// providers would need the httptest collector to decode OTLP protobuf bodies,
+// and that is deliberately not built -- those two remain uncovered.
+//
+// The collector is REACHABLE so t.Cleanup's Shutdown returns immediately
+// instead of spending the retry profile against a black hole.
+func TestNew_TracerCarriesTheBuiltResource(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	// t.Cleanup, not defer: cleanups run LIFO AFTER the test function's defers,
+	// so registering the collector's Close first is what keeps it listening
+	// until the Shutdown registered below has flushed through it.
+	t.Cleanup(srv.Close)
+
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+
+	const want = "resource-probe"
+	tel, st := telemetryNew(t, config.OTLPSection{Enabled: true, Endpoint: srv.URL, ServiceName: want})
+	if st.Fatal || st.Reason != "" {
+		t.Fatalf("enabled+valid endpoint must be a zero Status, got %+v", st)
+	}
+	t.Cleanup(func() {
+		// NOT t.Context(): it is already cancelled by the time Cleanup runs.
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+		defer cancel()
+		_ = tel.Shutdown(ctx)
+	})
+
+	_, span := tel.Tracer().Start(t.Context(), "probe")
+	span.End()
+	ros, ok := span.(sdktrace.ReadOnlySpan)
+	if !ok {
+		t.Fatalf("span is %T, which does not expose ReadOnlySpan.Resource()", span)
+	}
+	got, ok := ros.Resource().Set().Value(semconv.ServiceNameKey)
+	if !ok {
+		t.Fatalf("the tracer provider's resource carries no service.name: %v", ros.Resource())
+	}
+	if got.AsString() != want {
+		t.Errorf("service.name on the tracer provider's resource = %q, want %q -- "+
+			"buildTraces is not passing the resource buildResource built", got.AsString(), want)
 	}
 }
 
@@ -469,4 +526,128 @@ func TestDeliveryCount_HasCorrectUnit(t *testing.T) {
 		}
 	}
 	t.Fatal("diyddns.notification.delivery was never recorded")
+}
+
+// The DBStats callback must emit two CUMULATIVE counters and issue no query.
+//
+// Driven through (&Providers{...}).ObserveDB, NOT registerDBStats directly:
+// calling registerDBStats bypasses the exported method entirely, so a mutant
+// that guts ObserveDB's body (leaving only its nil guards) would leave every
+// test in this file green, while TestNew_CallsObserveDB (server_test.go)
+// only pins that server.New calls Instruments.ObserveDB, never that the
+// telemetry package's own implementation does anything once called. Fix
+// round 2, C1.
+func TestObserveDB_EmitsCumulativeCounters(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+
+	(&Providers{meter: mp.Meter(InstrumentationName)}).ObserveDB(db)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	want := map[string]bool{
+		"diyddns.db.connection.wait_time": false,
+		"diyddns.db.connection.waits":     false,
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if _, ok := want[m.Name]; !ok {
+				continue
+			}
+			want[m.Name] = true
+			switch d := m.Data.(type) {
+			case metricdata.Sum[float64]:
+				if !d.IsMonotonic {
+					t.Errorf("%s must be monotonic (WaitDuration is Add-only)", m.Name)
+				}
+			case metricdata.Sum[int64]:
+				if !d.IsMonotonic {
+					t.Errorf("%s must be monotonic (WaitCount is Add-only)", m.Name)
+				}
+			default:
+				t.Errorf("%s is %T, want a monotonic Sum — NOT a gauge", m.Name, m.Data)
+			}
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("%s was never emitted", name)
+		}
+	}
+}
+
+// TestObserveDB_EmitsCumulativeCounters only proves the two instruments are
+// monotonic Sums; it never drives a real wait, so a callback that observes a
+// hardcoded 0 instead of reading db.Stats() would pass it too. This test
+// forces a REAL wait on the single connection (SetMaxOpenConns(1)) and
+// asserts the callback reports it, closing that gap.
+func TestObserveDB_ReflectsRealDBStats(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+
+	registerDBStats(mp.Meter(InstrumentationName), db)
+
+	// Hold the single connection in a transaction, then start a second
+	// acquisition on another goroutine. With MaxOpenConns(1) and the one
+	// connection already in use, database/sql queues that second request and
+	// increments its wait counters (sql.go:1363-1368) before it can proceed.
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	waiterDone := make(chan struct{})
+	go func() {
+		defer close(waiterDone)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		_, _ = db.ExecContext(ctx, "SELECT 1")
+	}()
+	time.Sleep(50 * time.Millisecond) // let the waiter queue behind tx
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	<-waiterDone
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	var gotWaits int64
+	var gotWaitTime float64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch d := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				if m.Name == "diyddns.db.connection.waits" {
+					gotWaits = d.DataPoints[0].Value
+				}
+			case metricdata.Sum[float64]:
+				if m.Name == "diyddns.db.connection.wait_time" {
+					gotWaitTime = d.DataPoints[0].Value
+				}
+			}
+		}
+	}
+	if gotWaits == 0 {
+		t.Error("diyddns.db.connection.waits = 0, want > 0 -- did the callback actually call db.Stats()?")
+	}
+	if gotWaitTime <= 0 {
+		t.Error("diyddns.db.connection.wait_time = 0, want > 0 -- did the callback actually call db.Stats()?")
+	}
 }
