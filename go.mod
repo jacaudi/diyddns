@@ -7,7 +7,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/danielgtaylor/huma/v2 v2.38.0
 	github.com/descope/virtualwebauthn v1.0.5
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/go-logr/logr v1.4.4
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/pressly/goose/v3 v3.27.1
