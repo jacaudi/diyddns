@@ -14,6 +14,7 @@
 * **feed:** admin-only outbound integrations and a gateway feed ([#106](https://github.com/jacaudi/diyddns/issues/106)) ([#109](https://github.com/jacaudi/diyddns/issues/109)) ([949a62f](https://github.com/jacaudi/diyddns/commit/949a62f2c8a330d291a3eaeb476d78dd6c0af16c))
 * **notify:** notify configured endpoints when a device's public IP changes ([#99](https://github.com/jacaudi/diyddns/issues/99)) ([3cb3aa5](https://github.com/jacaudi/diyddns/commit/3cb3aa5b80e016b6ff95258e589a1887e1d2cafb))
 * **observability:** export logs, metrics and traces over OTLP ([#116](https://github.com/jacaudi/diyddns/issues/116)) ([1f4556b](https://github.com/jacaudi/diyddns/commit/1f4556bd97eb83e32d14ffa9056894bcb3fcfd2b)), closes [#101](https://github.com/jacaudi/diyddns/issues/101)
+* **observability:** make the server diagnosable in production ([#104](https://github.com/jacaudi/diyddns/issues/104)) ([b399fee](https://github.com/jacaudi/diyddns/commit/b399fee3c167e68bdf6accef98bb10d48866b861)), closes [#100](https://github.com/jacaudi/diyddns/issues/100)
 * **server:** add opt-in retention pruning for ip_history and audit_log ([#96](https://github.com/jacaudi/diyddns/issues/96)) ([1618d8c](https://github.com/jacaudi/diyddns/commit/1618d8c4a754002aa2080b60c4b3af33c9e8f116))
 * **webui:** admin page listing every device with current IPs and last seen ([#113](https://github.com/jacaudi/diyddns/issues/113)) ([58b57c2](https://github.com/jacaudi/diyddns/commit/58b57c2b16bdfc3306ecfefeed9d8058d92edb46)), closes [#105](https://github.com/jacaudi/diyddns/issues/105)
 
