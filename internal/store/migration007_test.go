@@ -139,8 +139,10 @@ func TestMigration007_SeededRoundTrip(t *testing.T) {
 	}
 
 	// --- Up ------------------------------------------------------------
-	if err := goose.UpContext(ctx, db, "."); err != nil {
-		t.Fatalf("goose up to head: %v", err)
+	// Pinned to 7, not head: this test exercises 00007's Up/Down/re-Up in
+	// isolation, and must keep doing so as later migrations are added.
+	if err := goose.UpToContext(ctx, db, ".", 7); err != nil {
+		t.Fatalf("goose up to 7: %v", err)
 	}
 	if n := countRows(t, ctx, db, `SELECT count(*) FROM notification_endpoints`); n != 0 {
 		t.Errorf("endpoints after Up = %d, want 0 (D15: pre-00007 rows are dropped)", n)
@@ -162,7 +164,7 @@ func TestMigration007_SeededRoundTrip(t *testing.T) {
 	}
 
 	// --- Down ----------------------------------------------------------
-	if err := goose.DownContext(ctx, db, "."); err != nil {
+	if err := goose.DownToContext(ctx, db, ".", 6); err != nil {
 		t.Fatalf("goose down from 7: %v", err)
 	}
 	if v, err := goose.GetDBVersionContext(ctx, db); err != nil || v != 6 {
@@ -188,7 +190,7 @@ func TestMigration007_SeededRoundTrip(t *testing.T) {
 	}
 
 	// --- re-Up ----------------------------------------------------------
-	if err := goose.UpContext(ctx, db, "."); err != nil {
+	if err := goose.UpToContext(ctx, db, ".", 7); err != nil {
 		t.Fatalf("re-Up after Down: %v", err)
 	}
 	if v, err := goose.GetDBVersionContext(ctx, db); err != nil || v != 7 {
