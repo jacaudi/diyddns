@@ -118,6 +118,7 @@ type Server struct {
 	notifier   *notify.Worker // nil when notifications are disabled
 	hub        *feed.Hub      // always non-nil; closes live streams on shutdown
 	retention  config.RetentionSection
+	sweeper    *sweeper // nil until the #127 policy is wired in (Task 9); nil-guarded by runPruner
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -436,7 +437,7 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-	go runPruner(ctx, s.st, s.retention, s.log)
+	go runPruner(ctx, s.st, s.retention, s.sweeper, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 	if s.notifier != nil {
 		go s.notifier.Run(ctx)

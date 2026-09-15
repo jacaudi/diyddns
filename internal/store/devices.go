@@ -442,6 +442,36 @@ func (r *DeviceRepo) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// AdvanceWarnLevel records one family's new ladder level, pinned on both
+// confirmation instants exactly as ExpireFamilies is (D8) and on the level the
+// sweep read, so two overlapping ticks cannot double-advance it.
+//
+// The pin on fromLevel is not in the design: it is the same idempotence
+// argument D8 makes for the instants, applied to the level, and it costs one
+// clause.
+func (r *DeviceRepo) AdvanceWarnLevel(ctx context.Context, id string, family, level, fromLevel int,
+	pinV4, pinV6, now int64) (bool, error) {
+	// The column is chosen from a closed set, never from input.
+	col := "v4_warn_level"
+	if family == 6 {
+		col = "v6_warn_level"
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET `+col+` = ?, updated_at = ?
+		  WHERE id = ? AND `+col+` = ?
+		    AND COALESCE(v4_confirmed_at, 0) = ?
+		    AND COALESCE(v6_confirmed_at, 0) = ?`,
+		level, now, id, fromLevel, pinV4, pinV6)
+	if err != nil {
+		return false, fmt.Errorf("devices.AdvanceWarnLevel: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("devices.AdvanceWarnLevel: RowsAffected: %w", err)
+	}
+	return n == 1, nil
+}
+
 // FeedDevice is one row of the gateway feed (design #106 §4.2): a member
 // device's id, label, current addresses and last-seen time. It carries no
 // user id (D21) and none of the device's other columns.

@@ -97,7 +97,7 @@ func TestRunPruner_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runPruner(ctx, st, config.RetentionSection{}, discardLog())
+		runPruner(ctx, st, config.RetentionSection{}, nil, discardLog())
 		close(done)
 	}()
 
