@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // Device represents a registered client device in DIYDDNS.
@@ -57,6 +59,12 @@ func nullIfZero(n int64) any {
 		return nil
 	}
 	return n
+}
+
+// placeholders returns a comma-separated "?" placeholder list of length n, for
+// building a dynamic IN (...) clause whose argument count varies per call.
+func placeholders(n int) string {
+	return strings.Join(slices.Repeat([]string{"?"}, n), ",")
 }
 
 // scanInt64 scans a possibly-NULL INTEGER column to a Go int64 (0 if NULL).

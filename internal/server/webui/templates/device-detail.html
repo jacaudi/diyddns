@@ -41,9 +41,11 @@
     <div class="card-head"><h2>Current addresses</h2></div>
     <div class="card-body stack-sm">
       <div><div class="muted">IPv4</div>
-        {{template "copyOrDash" .Device.CurrentIPv4}}</div>
+        {{if .IPv4LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv4LastKnown}}, {{.IPv4LastKnownAt}})</span>
+        {{else}}{{template "copyOrDash" .Device.CurrentIPv4}}{{end}}</div>
       <div><div class="muted">IPv6</div>
-        {{template "copyOrDash" .Device.CurrentIPv6}}</div>
+        {{if .IPv6LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv6LastKnown}}, {{.IPv6LastKnownAt}})</span>
+        {{else}}{{template "copyOrDash" .Device.CurrentIPv6}}{{end}}</div>
     </div>
   </div>
 

@@ -1,9 +1,21 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
+
+// appendHistory appends one ip_history row at observedAt, for tests that need
+// exact control over row ordering rather than whatever NowUnix() returns.
+func appendHistory(t *testing.T, ctx context.Context, s *Store, deviceID, ipv4, ipv6 string, observedAt int64) {
+	t.Helper()
+	if _, err := s.IPHistory().Append(ctx, IPHistory{
+		DeviceID: deviceID, IPv4: ipv4, IPv6: ipv6, ObservedAt: observedAt,
+	}); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+}
 
 // ---------- 1. Append returns row with ID > 0 ----------
 
@@ -579,5 +591,96 @@ func TestIPHistoryPruneCapDisabledKeepsLatest(t *testing.T) {
 	}
 	if latest.ObservedAt != 300 {
 		t.Errorf("Latest.ObservedAt = %d, want 300", latest.ObservedAt)
+	}
+}
+
+// ---------- LatestAddressPerFamily ----------
+
+// D17, and the trap: the newest ip_history row for an expired device is the
+// EXPIRY row, whose cleared family is NULL. The read must return the newest
+// row that actually CARRIES an address.
+//
+// A test that only asserts "some row was found" passes against the broken
+// query. This one pins the value.
+func TestLatestAddressPerFamily_SkipsTheExpiryRow(t *testing.T) {
+	st, ctx := newTestStore(t)
+	u := seedUser(t, st)
+	d := seedDevice(t, st, u.ID)
+
+	// A real report, then the sweep's expiry row.
+	appendHistory(t, ctx, st, d.ID, "203.0.113.9", "2001:db8::1", 1000)
+	appendHistory(t, ctx, st, d.ID, "", "2001:db8::1", 2000) // v4 cleared
+
+	got, err := st.IPHistory().LatestAddressPerFamily(ctx, []string{d.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[d.ID].IPv4 != "203.0.113.9" {
+		t.Errorf("IPv4 = %q, want 203.0.113.9 from the newest row that carries one", got[d.ID].IPv4)
+	}
+	if got[d.ID].IPv4At != 1000 {
+		t.Errorf("IPv4At = %d, want 1000 (that row's observed_at)", got[d.ID].IPv4At)
+	}
+	// v6 was never cleared, so its newest row is the expiry row itself.
+	if got[d.ID].IPv6 != "2001:db8::1" || got[d.ID].IPv6At != 2000 {
+		t.Errorf("IPv6 = %q at %d, want 2001:db8::1 at 2000", got[d.ID].IPv6, got[d.ID].IPv6At)
+	}
+}
+
+// ONE statement for the whole page, not one per row.
+func TestLatestAddressPerFamily_IsOneStatementForManyDevices(t *testing.T) {
+	st, ctx := newTestStore(t)
+	u := seedUser(t, st)
+	var ids []string
+	for range 25 {
+		d := seedDevice(t, st, u.ID)
+		appendHistory(t, ctx, st, d.ID, "1.2.3.4", "", 1000)
+		appendHistory(t, ctx, st, d.ID, "", "", 2000)
+		ids = append(ids, d.ID)
+	}
+	got, err := st.IPHistory().LatestAddressPerFamily(ctx, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 25 {
+		t.Fatalf("got %d devices, want 25", len(got))
+	}
+	for _, id := range ids {
+		if got[id].IPv4 != "1.2.3.4" {
+			t.Fatalf("%s: IPv4 = %q, want 1.2.3.4", id, got[id].IPv4)
+		}
+	}
+}
+
+func TestLatestAddressPerFamily_EmptyInput(t *testing.T) {
+	st, ctx := newTestStore(t)
+	got, err := st.IPHistory().LatestAddressPerFamily(ctx, nil)
+	if err != nil {
+		t.Fatalf("empty input must not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d entries, want 0", len(got))
+	}
+}
+
+// TestLatestAddressPerFamily_TiesBreakOnID pins the mandated
+// "ORDER BY observed_at DESC, id DESC" (not observed_at alone): two rows can
+// share one observed_at -- the sweep's expiry write and a check-in landing in
+// the same second -- and with only observed_at, SQLite has been verified to
+// return the OLDER row, not the newest INSERT.
+func TestLatestAddressPerFamily_TiesBreakOnID(t *testing.T) {
+	st, ctx := newTestStore(t)
+	u := seedUser(t, st)
+	d := seedDevice(t, st, u.ID)
+
+	appendHistory(t, ctx, st, d.ID, "203.0.113.1", "", 1000)
+	appendHistory(t, ctx, st, d.ID, "203.0.113.2", "", 1000) // same observed_at, higher id
+
+	got, err := st.IPHistory().LatestAddressPerFamily(ctx, []string{d.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[d.ID].IPv4 != "203.0.113.2" {
+		t.Errorf("IPv4 = %q, want 203.0.113.2 (the higher-id row when observed_at ties)", got[d.ID].IPv4)
 	}
 }

@@ -73,6 +73,27 @@ func TestRelTime(t *testing.T) {
 	}
 }
 
+// B12: relTime prints a bare DATE past 48 hours (view.go:92-111), so "23 days
+// ago" needs its own formatter. relTime itself must not change -- it is on
+// every page.
+func TestRelDays(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(100*86400, 0)
+	for _, tc := range []struct {
+		unix int64
+		want string
+	}{
+		{0, "never"},
+		{100 * 86400, "today"},
+		{99 * 86400, "1 day ago"},
+		{77 * 86400, "23 days ago"},
+	} {
+		if got := relDays(tc.unix, now); got != tc.want {
+			t.Errorf("relDays(%d) = %q, want %q", tc.unix, got, tc.want)
+		}
+	}
+}
+
 func TestBaseURL(t *testing.T) {
 	t.Parallel()
 

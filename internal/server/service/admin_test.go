@@ -290,6 +290,34 @@ func TestAdminService_ListAllDevices_ReturnsAll(t *testing.T) {
 	}
 }
 
+// TestAdminService_ListAllDevicesWithExpiry_ReturnsLatestAddress pins that the
+// admin list's counterpart to ListAllDevices reports a device's last-recorded
+// address even after the sweep has cleared current_ipv4 -- the whole point of
+// #127's user-facing half is that clearing an address does not erase where
+// the operator can go find it.
+func TestAdminService_ListAllDevicesWithExpiry_ReturnsLatestAddress(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	usr := seedUser(t, st, "a@x", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+
+	if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{
+		DeviceID: dev.ID, IPv4: "203.0.113.9", ObservedAt: 1000,
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	devices, latest, err := svc.ListAllDevicesWithExpiry(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("len(devices) = %d, want 1", len(devices))
+	}
+	if got := latest[dev.ID].IPv4; got != "203.0.113.9" {
+		t.Errorf("latest[dev.ID].IPv4 = %q, want 203.0.113.9", got)
+	}
+}
+
 func TestAdminService_ListAudit_ReturnsPage(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "a@x", "admin")

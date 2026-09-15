@@ -88,6 +88,64 @@ func TestDeviceService_List_ReturnsOnlyCallersDevices(t *testing.T) {
 	}
 }
 
+// TestDeviceService_ListWithExpiry_ReturnsLatestAddress pins that the owner
+// list's counterpart to List reports a device's last-recorded address even
+// after the sweep has cleared current_ipv4.
+func TestDeviceService_ListWithExpiry_ReturnsLatestAddress(t *testing.T) {
+	st, userID, svc, _ := newDeviceServiceTest(t)
+	dev := seedDevice(t, st, userID, "laptop")
+
+	if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{
+		DeviceID: dev.ID, IPv4: "203.0.113.9", ObservedAt: 1000,
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	devices, latest, err := svc.ListWithExpiry(t.Context(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("len(devices) = %d, want 1", len(devices))
+	}
+	if got := latest[dev.ID].IPv4; got != "203.0.113.9" {
+		t.Errorf("latest[dev.ID].IPv4 = %q, want 203.0.113.9", got)
+	}
+}
+
+// TestDeviceService_LatestAddress_OwnerScoped mirrors ownedDevice's
+// scoping guarantee (Get/Rename/etc): a foreign device's history must not
+// leak through the single-device fallback the detail page uses when none of
+// its five preview rows carries a family's address.
+func TestDeviceService_LatestAddress_OwnerScoped(t *testing.T) {
+	st, userID, svc, _ := newDeviceServiceTest(t)
+	other := seedUser(t, st, "other@b.co", "user")
+	dev := seedDevice(t, st, other.ID, "tablet")
+
+	if _, err := svc.LatestAddress(t.Context(), userID, dev.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("LatestAddress: err = %v, want store.ErrNotFound", err)
+	}
+}
+
+func TestDeviceService_LatestAddress_ReturnsRecordedValue(t *testing.T) {
+	st, userID, svc, _ := newDeviceServiceTest(t)
+	dev := seedDevice(t, st, userID, "laptop")
+
+	if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{
+		DeviceID: dev.ID, IPv4: "203.0.113.9", ObservedAt: 1000,
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	got, err := svc.LatestAddress(t.Context(), userID, dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IPv4 != "203.0.113.9" {
+		t.Errorf("IPv4 = %q, want 203.0.113.9", got.IPv4)
+	}
+}
+
 func TestDeviceService_Rename_OwnerScoped(t *testing.T) {
 	st, userID, svc, _ := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "old-label")

@@ -110,6 +110,29 @@ func relTime(unix int64, now time.Time) string {
 	}
 }
 
+// secondsPerDay converts a day count to seconds for relDays' arithmetic.
+const secondsPerDay = 86400
+
+// relDays renders a coarse age for the staleness surfaces -- "23 days ago" --
+// where relTime would print a bare date, which reads as a fact rather than as
+// an age. Kept separate precisely so relTime's output does not move. A zero
+// timestamp means "never recorded"; today or a future timestamp (clock skew)
+// both read as "today" rather than a negative age.
+func relDays(unix int64, now time.Time) string {
+	if unix == 0 {
+		return "never"
+	}
+	days := int(now.Unix()-unix) / secondsPerDay
+	switch {
+	case days <= 0:
+		return "today"
+	case days == 1:
+		return "1 day ago"
+	default:
+		return fmt.Sprintf("%d days ago", days)
+	}
+}
+
 // absTime renders a unix timestamp as an explicit UTC string for title
 // attributes and detail readouts. The server does not know the viewer's
 // timezone, so every absolute time in the UI is UTC and says so.

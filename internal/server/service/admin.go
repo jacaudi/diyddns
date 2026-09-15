@@ -297,6 +297,23 @@ func (s *AdminService) ListAllDevices(ctx context.Context) ([]store.Device, erro
 	return devices, nil
 }
 
+// ListAllDevicesWithExpiry is ListAllDevices's counterpart for the admin
+// list, unscoped: it also returns each device's last-recorded address per
+// family, for the rows a sweep has cleared. Two statements, the second
+// issued only after ListAll's cursor is closed -- see
+// DeviceService.ListWithExpiry for the same argument.
+func (s *AdminService) ListAllDevicesWithExpiry(ctx context.Context) ([]store.Device, map[string]store.LatestAddress, error) {
+	devices, err := s.st.Devices().ListAll(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.ListAllDevicesWithExpiry: %w", err)
+	}
+	latest, err := latestAddresses(ctx, s.st, devices)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.ListAllDevicesWithExpiry: %w", err)
+	}
+	return devices, latest, nil
+}
+
 // ListAudit returns a cursor-paginated page of audit-log entries.
 func (s *AdminService) ListAudit(ctx context.Context, f store.AuditFilter, cursor string, limit int) (store.AuditPage, error) {
 	page, err := s.st.AuditLog().ListPaginated(ctx, f, cursor, limit)
