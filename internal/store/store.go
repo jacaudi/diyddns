@@ -17,6 +17,15 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// txer is execer plus the read half, satisfied by both *sql.DB and *sql.Tx.
+// Statements that must run on a caller's transaction -- because reaching the
+// pool while it is open would ask a pool of ONE for a second connection and
+// hang the server -- take this rather than *sql.DB.
+type txer interface {
+	execer
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // Store is DIYDDNS's persistence handle. It wraps a single *sql.DB pool
 // configured with the runtime pragmas and migrations applied. Obtain one
 // via Open and release it via Close.

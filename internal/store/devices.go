@@ -179,6 +179,22 @@ func (r *DeviceRepo) GetByID(ctx context.Context, id string) (Device, error) {
 	return d, nil
 }
 
+// getDeviceTx reads one device row via ex. It exists to be called on an open
+// transaction: passing the pool (r.db) instead while that transaction is
+// still open is the deadlock it was written to prevent -- it would ask a
+// pool of one for a second connection and hang the server.
+func getDeviceTx(ctx context.Context, ex txer, id string) (Device, error) {
+	row := ex.QueryRowContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE id = ?`, id)
+	d, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Device{}, fmt.Errorf("devices.getDeviceTx: %w", ErrNotFound)
+		}
+		return Device{}, fmt.Errorf("devices.getDeviceTx: %w", err)
+	}
+	return d, nil
+}
+
 // GetByUserAndLabel fetches a device by (user_id, label).
 // Returns ErrNotFound if no row exists.
 func (r *DeviceRepo) GetByUserAndLabel(ctx context.Context, userID, label string) (Device, error) {
@@ -263,7 +279,7 @@ func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion
 //
 // Besides the addresses it advances the per-family confirmation instants for
 // the families this check-in asserted, and resets those families' warning
-// levels (D12). The reset rides an UNCONDITIONAL write on purpose: revision 8
+// levels (#127 D12). The reset rides an UNCONDITIONAL write on purpose: revision 8
 // put it on a statement that only fired for an already-expired device, so a
 // device that went quiet, took rungs 1 and 2, and came back before its window
 // elapsed kept its stale level and would then fire nothing before removal.
@@ -474,4 +490,90 @@ func (r *DeviceRepo) ListFeed(ctx context.Context) ([]FeedDevice, error) {
 		return nil, fmt.Errorf("devices.ListFeed: rows: %w", err)
 	}
 	return out, nil
+}
+
+// ExpireFamilies clears the due families' addresses, resets those families'
+// warning levels, and appends one ip_history row recording the result -- all
+// in ONE transaction. It reports whether it changed a row.
+//
+// It does NOT reuse updateDeviceIP, and must not: that helper advances
+// last_seen_at, which would show a device that has been silent for a month
+// as having just been seen.
+//
+// The write is pinned on the confirmation instants the sweep read (D8), so it
+// fails outright if the device confirmed anything in between -- a device that
+// came back during the tick is never expired. RowsAffected == 1 is what gates
+// the caller's event.
+// It returns the appended history row's id, which the caller uses as the
+// event's id -- a second read to fetch it would be another connection
+// acquisition for a value this write already knows.
+func (r *DeviceRepo) ExpireFamilies(ctx context.Context, id string, v4Due, v6Due bool,
+	pinV4, pinV6, now int64) (historyID int64, changed bool, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE devices
+		    SET current_ipv4  = CASE WHEN ? THEN NULL ELSE current_ipv4 END,
+		        current_ipv6  = CASE WHEN ? THEN NULL ELSE current_ipv6 END,
+		        v4_warn_level = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
+		        v6_warn_level = CASE WHEN ? THEN 0 ELSE v6_warn_level END,
+		        updated_at    = ?
+		  WHERE id = ?
+		    AND COALESCE(v4_confirmed_at, 0) = ?
+		    AND COALESCE(v6_confirmed_at, 0) = ?
+		    -- At least one due family must actually still HOLD an address.
+		    -- SQLite counts a no-op UPDATE as one affected row, so without this
+		    -- clause calling the method twice with the same pin would report
+		    -- success and append a second history row for a device already
+		    -- cleared. The sweep cannot reach that (candidateQuery's IS NOT
+		    -- NULL guards), but this method is exported and must not depend on
+		    -- its caller for correctness.
+		    AND (   (? AND current_ipv4 IS NOT NULL)
+		         OR (? AND current_ipv6 IS NOT NULL))`,
+		v4Due, v6Due, v4Due, v6Due, now, id, pinV4, pinV6, v4Due, v6Due)
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		// Three causes produce this, indistinguishable from RowsAffected alone:
+		// the pin no longer matches (the expected, contended case); no due
+		// family still holds an address -- either none was flagged due, or a
+		// due family's address was already NULL, which is the repeat-call
+		// case the guard above exists to make a no-op; or id matches no row.
+		// Unlike every other method in this file, a no-match id is
+		// deliberately NOT mapped to ErrNotFound here: the sweep passes ids
+		// it has just read, so that case cannot occur in practice, and
+		// telling it apart from a failed pin would cost a second statement
+		// inside the transaction for a distinction this caller has no use
+		// for.
+		return 0, false, nil
+	}
+
+	// Read the post-write addresses ON tx -- never through r.db, which would
+	// ask a pool of one for a second connection and hang the server.
+	after, err := getDeviceTx(ctx, tx, id)
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: %w", err)
+	}
+	row, err := appendIPHistory(ctx, tx, IPHistory{
+		DeviceID:   id,
+		IPv4:       after.CurrentIPv4,
+		IPv6:       after.CurrentIPv6,
+		ObservedAt: now,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: commit: %w", err)
+	}
+	return row.ID, true, nil
 }
