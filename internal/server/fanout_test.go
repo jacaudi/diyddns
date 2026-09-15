@@ -233,6 +233,10 @@ type expireEvent struct {
 		IPv4 *string `json:"ipv4"`
 		IPv6 *string `json:"ipv6"`
 	} `json:"current"`
+	Previous struct {
+		IPv4 *string `json:"ipv4"`
+		IPv6 *string `json:"ipv6"`
+	} `json:"previous"`
 }
 
 // fanoutHarness wires a fanout with the webhook transport enabled against one
@@ -302,6 +306,32 @@ func (h *fanoutHarness) events() []expireEvent {
 	return out
 }
 
+// stringPtrOrNil mirrors the wire renderer's "" -> null mapping, so a test
+// can build its expected *string the same way notify.RenderIPChanged builds
+// the actual one.
+func stringPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ptrStringEqual compares two possibly-nil *string values by content.
+func ptrStringEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// derefOrNull renders a possibly-nil *string for a test failure message.
+func derefOrNull(s *string) string {
+	if s == nil {
+		return "null"
+	}
+	return *s
+}
+
 // D10: partial expiry emits ip_changed naming the CLEARED family; full expiry
 // emits an all-null current, which README.md:162 already defines as delete.
 func TestExpireAddresses_EmitsIPChanged(t *testing.T) {
@@ -348,6 +378,21 @@ func TestExpireAddresses_EmitsIPChanged(t *testing.T) {
 			allNull := ev[0].Current.IPv4 == nil && ev[0].Current.IPv6 == nil
 			if allNull != tc.wantCurrentNull {
 				t.Errorf("all-null current = %v, want %v", allNull, tc.wantCurrentNull)
+			}
+			// README.md's wire-shape contract for an expiry event: `previous`
+			// ALWAYS carries the address that was in effect just before this
+			// call, whether or not that family was the one cleared -- an
+			// expiry never rewrites history for the family it didn't touch.
+			// Asserted from tc.v4/tc.v6 (the harness's seeded pre-call state),
+			// independent of v4Due/v6Due, so this catches a regression that
+			// nulls `previous` alongside `current` for the cleared family --
+			// exactly the shape the README used to (wrongly) describe.
+			wantPrevIPv4, wantPrevIPv6 := stringPtrOrNil(tc.v4), stringPtrOrNil(tc.v6)
+			if !ptrStringEqual(ev[0].Previous.IPv4, wantPrevIPv4) {
+				t.Errorf("previous.ipv4 = %s, want %s", derefOrNull(ev[0].Previous.IPv4), derefOrNull(wantPrevIPv4))
+			}
+			if !ptrStringEqual(ev[0].Previous.IPv6, wantPrevIPv6) {
+				t.Errorf("previous.ipv6 = %s, want %s", derefOrNull(ev[0].Previous.IPv6), derefOrNull(wantPrevIPv6))
 			}
 		})
 	}

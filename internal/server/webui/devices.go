@@ -113,6 +113,12 @@ func newDeviceRow(d store.Device, latest store.LatestAddress, feed config.FeedSe
 // sweep itself uses (design §10 item 3), so the page and the sweep cannot
 // disagree. "" means the family has never been confirmed, so there is
 // nothing to expire.
+//
+// Rounding is stale.HumanDays, the SAME function the owner email renders
+// with -- not a second copy of the day math. The two used to round in
+// opposite directions (this used to ceil; HumanDays floors), so a rung
+// crossed partway through a day told the owner one number by email and a
+// different one here (fix round, item 3).
 func expiresInText(confirmedAt, window int64, now time.Time) string {
 	if confirmedAt == 0 {
 		return ""
@@ -121,14 +127,7 @@ func expiresInText(confirmedAt, window int64, now time.Time) string {
 	if remaining <= 0 {
 		return "0 days"
 	}
-	days := remaining / secondsPerDay
-	if remaining%secondsPerDay != 0 {
-		days++
-	}
-	if days == 1 {
-		return "1 day"
-	}
-	return fmt.Sprintf("%d days", days)
+	return stale.HumanDays(time.Duration(remaining) * time.Second)
 }
 
 // matchesStatus reports whether the row passes a ?status= filter; an empty

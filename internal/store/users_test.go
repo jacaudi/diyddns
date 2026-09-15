@@ -54,6 +54,32 @@ func TestUserCreateAndGetByID(t *testing.T) {
 	}
 }
 
+// TestUser_IsEnabledAdmin pins the single predicate every "who gets the
+// admin digest / counts toward the last-admin guard" call site now shares
+// (Rule of Three crossed at four production sites -- see store.User's
+// IsEnabledAdmin doc comment).
+func TestUser_IsEnabledAdmin(t *testing.T) {
+	tests := []struct {
+		name     string
+		role     string
+		disabled bool
+		want     bool
+	}{
+		{"enabled admin", roleAdmin, false, true},
+		{"disabled admin", roleAdmin, true, false},
+		{"enabled user", roleUser, false, false},
+		{"disabled user", roleUser, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := User{Role: tt.role, Disabled: tt.disabled}
+			if got := u.IsEnabledAdmin(); got != tt.want {
+				t.Errorf("IsEnabledAdmin() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUserCreateDuplicateEmailReturnsErrConflict(t *testing.T) {
 	s, ctx := newTestStore(t)
 

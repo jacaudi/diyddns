@@ -367,7 +367,7 @@ func buildSweeper(cfg config.Server, st *store.Store, fan *fanout, mailer email.
 					return nil, err
 				}
 				return slices.DeleteFunc(us, func(u store.User) bool {
-					return u.Role != "admin" || u.Disabled
+					return !u.IsEnabledAdmin()
 				}), nil
 			},
 			log,

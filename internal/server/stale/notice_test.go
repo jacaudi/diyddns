@@ -82,6 +82,33 @@ func TestRenderOwnerBody_NamesTheFamilyAndTheSurvivors(t *testing.T) {
 	}
 }
 
+// TestHumanDays pins the ONE rounding rule the owner email and the device
+// list's countdown must share (§10 item 3, fix round): FLOOR, never ceiling,
+// so a deadline notice never over-promises how much time is left. A boundary
+// exactly on a day (72h) and a fractional day just under the next boundary
+// (13d23h30m, the canonical mismatch: floor says "13 days", the OLD ceiling
+// implementation in webui said "14 days") are both pinned.
+func TestHumanDays(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"zero", 0, "under a day"},
+		{"under a day", 23 * time.Hour, "under a day"},
+		{"exactly one day", 24 * time.Hour, "1 day"},
+		{"exactly three days", 72 * time.Hour, "3 days"},
+		{"fractional day rounds DOWN, not up", 13*24*time.Hour + 23*time.Hour + 30*time.Minute, "13 days"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stale.HumanDays(tt.d); got != tt.want {
+				t.Errorf("HumanDays(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
 // familyNameForTest mirrors the package's unexported familyName mapping so
 // the table above can build the exact clause text without exporting it.
 func familyNameForTest(f int) string {

@@ -60,6 +60,62 @@ func adminLister(t *testing.T, emails ...string) stale.AdminLister {
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
+// fakeMailer records the context it was called with, so a test can inspect
+// exactly what reaches email.smtpMailer.Send in production -- the layer
+// whose own SetDeadline call (internal/email/smtp.go) only fires when
+// ctx.Deadline() is set. Wired in via stale.NewSMTPChannel (not a fakeChannel)
+// so these tests exercise the real Dispatcher -> Channel -> Mailer path,
+// proving the bound survives the hop through smtpChannel.Send unchanged.
+type fakeMailer struct {
+	gotCtx context.Context
+}
+
+func (m *fakeMailer) Send(ctx context.Context, _, _, _ string) error {
+	m.gotCtx = ctx
+	return nil
+}
+
+// The pruner goroutine's context (server.go's runPruner, ultimately
+// Server.Run's ctx) has no deadline until shutdown -- context.Background()
+// stands in for it here, since it has the same property (Deadline() reports
+// ok=false) that made the un-bounded delivery hang the sweep tick.
+//
+// TestDispatcher_SendOwner_BoundsTheDeliveryContext and
+// TestDispatcher_SendAdminDigest_BoundsTheDeliveryContext together pin: the
+// context reaching Mailer.Send always carries a deadline, on both delivery
+// paths, regardless of whether the caller's own context had one.
+func TestDispatcher_SendOwner_BoundsTheDeliveryContext(t *testing.T) {
+	fm := &fakeMailer{}
+	d := stale.NewDispatcher(stale.NewSMTPChannel(fm), adminLister(t), discardLogger())
+
+	d.SendOwner(context.Background(), stale.Notice{
+		Owner: store.User{Email: "o@example.test"},
+	})
+
+	if fm.gotCtx == nil {
+		t.Fatal("Mailer.Send was never called")
+	}
+	if _, ok := fm.gotCtx.Deadline(); !ok {
+		t.Error("context passed to Mailer.Send has no deadline -- an unbounded SMTP conversation can hang the sweep tick forever")
+	}
+}
+
+func TestDispatcher_SendAdminDigest_BoundsTheDeliveryContext(t *testing.T) {
+	fm := &fakeMailer{}
+	d := stale.NewDispatcher(stale.NewSMTPChannel(fm), adminLister(t, "a@example.test"), discardLogger())
+
+	d.SendAdminDigest(context.Background(), []stale.Notice{
+		{Owner: store.User{Email: "o@example.test"}},
+	})
+
+	if fm.gotCtx == nil {
+		t.Fatal("Mailer.Send was never called")
+	}
+	if _, ok := fm.gotCtx.Deadline(); !ok {
+		t.Error("context passed to Mailer.Send has no deadline -- an unbounded SMTP conversation can hang the sweep tick forever")
+	}
+}
+
 // D16: owners one-to-one, admins one digest per tick. Recipients are pinned,
 // not just counts: routing every admin delivery to admins[0].Email would
 // still produce two admin deliveries and pass a count-only check, while

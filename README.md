@@ -211,9 +211,12 @@ device, no addresses, `id` always `0`:
 for you to derive from `current`/`previous`. A device that only ever reports IPv4 keeps carrying
 its last-known IPv6 address in both `current.ipv6` and `previous.ipv6`, unchanged, **until it goes
 unconfirmed for `feed.expire_after_days`** (see [Feed expiry](#feed-expiry)), at which point IPv6
-is withdrawn — `current.ipv6` and `previous.ipv6` both go `null` — and `device.ip_changed` names
-`ipv6` in `changed`. Short of that expiry, the presence of a non-null `current.ipv6` does **not**
-mean IPv6 just changed. Trust `changed`, never field presence, for "what happened."
+is withdrawn: that expiry event carries `previous.ipv6` as the address that was just cleared and
+`current.ipv6` as `null`, with `device.ip_changed` naming `ipv6` in `changed` — the same
+"previous differs from current" shape every other change in this event uses. Only a *subsequent*
+event, after the withdrawal has already happened, carries both `current.ipv6` and `previous.ipv6`
+as `null`. Short of that expiry, the presence of a non-null `current.ipv6` does **not** mean IPv6
+just changed. Trust `changed`, never field presence, for "what happened."
 
 An address family that has never been reported is JSON **`null`**, never `""`. Do not treat the
 two as equivalent: `null` means "this device has no IPv6 (or IPv4) on record," while `""` would
@@ -454,7 +457,7 @@ and therefore from the feed — after it has gone that many days without a check
 | `feed.expire_after_days` | `DIYDDNS_FEED_EXPIRE_AFTER_DAYS` | `21` by default; `0` disables the policy; max `36500` |
 
 **`feed.expire_after_days: 0` is the opt-out.** Deliberately on by default (unlike every
-retention key above): a security fix nobody can discover is a fix nobody applies. Set it to `0`
+retention key below): a security fix nobody can discover is a fix nobody applies. Set it to `0`
 to keep every enrolled device's address indefinitely, the same posture DIYDDNS had before this
 policy existed.
 

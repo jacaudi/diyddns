@@ -137,8 +137,10 @@ func (m *smtpMailer) dial(ctx context.Context, addr string) (*smtp.Client, error
 	// dialCtx expires at defaultDialTimeout, which would cut off a legitimate
 	// slow envelope. Callers are expected to supply a deadline. The production
 	// callers are GrantService.deliver (both admin paths — invite and
-	// admin-issued recovery) and GrantService.doSelfServiceRecovery, and each
-	// runs its sends on one bounded context it derives for that whole flow.
+	// admin-issued recovery), GrantService.doSelfServiceRecovery, and
+	// stale.Dispatcher's SendOwner/SendAdminDigest (internal/server/stale/
+	// dispatch.go, the #127 staleness sweep) — each runs its sends on one
+	// bounded context it derives for that whole flow.
 	//
 	// A SetDeadline failure is logged rather than returned: the conversation is
 	// then unbounded, which is worse than bounded but far better than refusing

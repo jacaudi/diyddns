@@ -180,7 +180,7 @@ type FeedSection struct {
 	// cleared from the device and therefore from the feed. 0 disables the
 	// whole policy, which is the documented opt-out.
 	//
-	// Deliberately ON by default (D2), breaking the retention: house rule that
+	// Deliberately ON by default (D2), breaking the retention house rule that
 	// every key defaults to 0. A security fix nobody can discover is a fix
 	// nobody applies; see design §3.1 for the asymmetry that settles it.
 	ExpireAfterDays int `mapstructure:"expire_after_days"`

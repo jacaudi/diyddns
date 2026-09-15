@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/stale"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
@@ -219,6 +220,27 @@ func TestDeviceList_CountdownUsesTheSameWindowAsTheSweep(t *testing.T) {
 
 	if body := h.get(t, "/devices"); !strings.Contains(body, "expires in 6 days") {
 		t.Errorf("countdown missing or the wrong window was used:\n%s", body)
+	}
+}
+
+// TestExpiresInText_AgreesWithTheOwnerEmail: fix round, item 3. The sweep's
+// owner email (stale.HumanDays) and this page's countdown used to round in
+// OPPOSITE directions -- the email floors, the page ceiled -- so a rung
+// crossed partway through a day (the typical case for an hourly sweep) told
+// the owner one number by email and a different one on the device list. Pinned
+// at the canonical mismatch from the review: 13d23h30m remaining reads "13
+// days" (floor, matching the email) not "14 days" (the old ceiling).
+func TestExpiresInText_AgreesWithTheOwnerEmail(t *testing.T) {
+	now := time.Unix(100*86400, 0)
+	window := stale.Window(config.FeedSection{Enabled: true, ExpireAfterDays: 21})
+	// confirmedAt chosen so ExpiresAt(confirmedAt, window) - now.Unix() is
+	// exactly 13d23h30m: elapsed = 21d - 13d23h30m = 7d30m.
+	elapsed := int64((7*24*time.Hour + 30*time.Minute).Seconds())
+	confirmedAt := now.Unix() - elapsed
+
+	got := expiresInText(confirmedAt, window, now)
+	if got != "13 days" {
+		t.Errorf("expiresInText = %q, want %q (floor, matching stale.HumanDays)", got, "13 days")
 	}
 }
 

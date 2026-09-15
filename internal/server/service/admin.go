@@ -67,7 +67,7 @@ func (s *AdminService) enabledAdminCount(ctx context.Context, targetID string) (
 		return 0, false, err
 	}
 	for _, u := range users {
-		if u.Role == "admin" && !u.Disabled {
+		if u.IsEnabledAdmin() {
 			count++
 			if u.ID == targetID {
 				targetIsEnabledAdmin = true

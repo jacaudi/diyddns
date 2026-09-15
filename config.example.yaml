@@ -263,7 +263,7 @@ feed:
 
   # How many days an address may go unconfirmed before it is cleared from the
   # device and therefore from the feed. Default 21. 0 disables the policy.
-  # Maximum 36500 (100 years), for the same overflow reason as retention above.
+  # Maximum 36500 (100 years), for the same overflow reason as retention below.
   # expire_after_days: 21
 
 # Data retention for ip_history and audit_log. Disabled by default: neither

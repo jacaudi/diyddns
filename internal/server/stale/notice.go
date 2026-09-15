@@ -79,7 +79,7 @@ func OwnerSubject(n Notice) string {
 			familyName(n.Family), n.Device.Label)
 	}
 	return fmt.Sprintf("%s address expires in %s: %s",
-		familyName(n.Family), humanDays(n.Remaining), n.Device.Label)
+		familyName(n.Family), HumanDays(n.Remaining), n.Device.Label)
 }
 
 // RenderOwnerBody renders the owner message body; see OwnerSubject for the
@@ -93,7 +93,7 @@ func RenderOwnerBody(n Notice) string {
 	} else {
 		fmt.Fprintf(&b, "The %s address for your device %q will be removed from the gateway "+
 			"feed in %s unless the device reports it again.\n\n",
-			fam, n.Device.Label, humanDays(n.Remaining))
+			fam, n.Device.Label, HumanDays(n.Remaining))
 	}
 	if len(n.Surviving) == 0 {
 		if n.Kind == KindRemoved {
@@ -135,15 +135,25 @@ func RenderAdminDigestBody(ns []Notice) string {
 			continue
 		}
 		fmt.Fprintf(&b, "  %-9s %-4s  %s (%s)\n",
-			humanDays(n.Remaining), familyName(n.Family), n.Device.Label, n.Owner.Email)
+			HumanDays(n.Remaining), familyName(n.Family), n.Device.Label, n.Owner.Email)
 	}
 	return b.String()
 }
 
-// humanDays renders a Duration the way these notices read: "3 days", "1 day",
+// HumanDays renders a Duration the way these notices read: "3 days", "1 day",
 // "under a day". Days only -- the windows are measured in weeks, and an
 // hours-and-minutes rendering would imply a precision the policy lacks.
-func humanDays(d time.Duration) string {
+//
+// FLOORS, deliberately: this is the one place both the owner email
+// (OwnerSubject/RenderOwnerBody below) and the device list's countdown
+// (webui's expiresInText) compute "how long is left," and for a deadline
+// notice under-promising the time remaining is the safe direction --
+// "13 days" when 13d23h30m actually remain is a notice that still arrives in
+// time; "14 days" would not be. Exported so webui can call this exact
+// function instead of keeping its own (previously ceiling) day math, which is
+// what let the email and the page disagree by one day at every rung crossed
+// partway through a day -- the typical case for an hourly sweep.
+func HumanDays(d time.Duration) string {
 	days := int(d.Hours() / 24)
 	switch {
 	case days < 1:
