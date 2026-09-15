@@ -516,7 +516,7 @@ func lastHistoryCursor(t *testing.T, st *store.Store, deviceID string) string {
 // exercised without a real check-in.
 func touchDevice(t *testing.T, st *store.Store, id string, at int64) {
 	t.Helper()
-	if err := st.Devices().Touch(t.Context(), id, at); err != nil {
+	if err := st.Devices().Touch(t.Context(), id, true, true, at); err != nil {
 		t.Fatalf("touch device: %v", err)
 	}
 }

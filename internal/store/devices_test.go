@@ -490,7 +490,7 @@ func TestDeviceRepo_Touch(t *testing.T) {
 		t.Fatalf("create device: %v", err)
 	}
 
-	if err := s.Devices().Touch(ctx, dev.ID, 1_700_000_000); err != nil {
+	if err := s.Devices().Touch(ctx, dev.ID, true, true, 1_700_000_000); err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
 	got, err := s.Devices().GetByID(ctx, dev.ID)
@@ -504,7 +504,7 @@ func TestDeviceRepo_Touch(t *testing.T) {
 		t.Errorf("UpdatedAt not set")
 	}
 
-	if err := s.Devices().Touch(ctx, "nonexistent", 1); !errors.Is(err, ErrNotFound) {
+	if err := s.Devices().Touch(ctx, "nonexistent", true, true, 1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Touch(missing) err = %v, want ErrNotFound", err)
 	}
 }

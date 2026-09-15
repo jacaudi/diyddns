@@ -22,6 +22,26 @@ type Device struct {
 	Disabled      bool
 	CreatedAt     int64
 	UpdatedAt     int64
+
+	// V4ConfirmedAt and V6ConfirmedAt are the last check-in in which the
+	// client ASSERTED that family; 0 if never, stored as NULL.
+	//
+	// These are NOT last_seen_at. Checkin treats an omitted family as "not
+	// asserted this cycle" and preserves the stored value, while Touch
+	// advances last_seen_at on any contact -- so a host that loses IPv6 and
+	// keeps reporting IPv4 every five minutes is never silent, and measuring
+	// expiry from last_seen_at would leave its stale IPv6 prefix in the feed
+	// forever. This distinction is the whole basis of per-family expiry.
+	V4ConfirmedAt int64
+	V6ConfirmedAt int64
+
+	// V4WarnLevel and V6WarnLevel are each family's own warning-ladder
+	// position, 0-4. Per family rather than per device: with one window there
+	// is no "which family is the ladder counting down to" question, so two
+	// independent levels are simpler than one level plus a target plus a
+	// tie-break plus a rule for which contacts reset it.
+	V4WarnLevel int
+	V6WarnLevel int
 }
 
 // DeviceRepo provides persistence operations for Device records.
@@ -49,7 +69,8 @@ func scanInt64(n sql.NullInt64) int64 {
 
 const deviceColumns = `id, user_id, label, secret_hash,
 	current_ipv4, current_ipv6, hostname, os, client_version,
-	last_seen_at, disabled, created_at, updated_at`
+	last_seen_at, disabled, created_at, updated_at,
+	v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level`
 
 func scanDevice(row interface {
 	Scan(dest ...any) error
@@ -58,6 +79,8 @@ func scanDevice(row interface {
 	var currentIPv4, currentIPv6, hostname, osCol, clientVersion sql.NullString
 	var lastSeenAt sql.NullInt64
 	var disabled int64
+	var v4Conf, v6Conf sql.NullInt64
+	var v4Level, v6Level int64
 
 	err := row.Scan(
 		&d.ID,
@@ -73,6 +96,10 @@ func scanDevice(row interface {
 		&disabled,
 		&d.CreatedAt,
 		&d.UpdatedAt,
+		&v4Conf,
+		&v6Conf,
+		&v4Level,
+		&v6Level,
 	)
 	if err != nil {
 		return Device{}, err
@@ -84,6 +111,10 @@ func scanDevice(row interface {
 	d.ClientVersion = scanString(clientVersion)
 	d.LastSeenAt = scanInt64(lastSeenAt)
 	d.Disabled = disabled != 0
+	d.V4ConfirmedAt = scanInt64(v4Conf)
+	d.V6ConfirmedAt = scanInt64(v6Conf)
+	d.V4WarnLevel = int(v4Level)
+	d.V6WarnLevel = int(v6Level)
 	return d, nil
 }
 
@@ -102,8 +133,9 @@ func (r *DeviceRepo) Create(ctx context.Context, d Device) (Device, error) {
 		`INSERT INTO devices
 		 (id, user_id, label, secret_hash,
 		  current_ipv4, current_ipv6, hostname, os, client_version,
-		  last_seen_at, disabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  last_seen_at, disabled, created_at, updated_at,
+		  v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ID,
 		d.UserID,
 		d.Label,
@@ -117,6 +149,10 @@ func (r *DeviceRepo) Create(ctx context.Context, d Device) (Device, error) {
 		boolToInt(d.Disabled),
 		d.CreatedAt,
 		d.UpdatedAt,
+		nullIfZero(d.V4ConfirmedAt),
+		nullIfZero(d.V6ConfirmedAt),
+		d.V4WarnLevel,
+		d.V6WarnLevel,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -211,26 +247,53 @@ func (r *DeviceRepo) ListAll(ctx context.Context) ([]Device, error) {
 
 // UpdateIP updates the IP address fields, metadata, and last_seen_at for a device.
 // Returns ErrNotFound if no row matched.
+//
+// A non-empty address counts as ASSERTED, so it advances that family's
+// confirmation instant and resets its warning level. For a device whose
+// instant was never set (the common case: this is often the first write for a
+// newly seeded or newly enrolled device), passing false instead would leave
+// it NULL, which scanInt64 maps to 0 and the sweep reads as "never
+// confirmed", expiring the device on the next tick.
 func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt int64) error {
-	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os, lastSeenAt, NowUnix())
+	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os,
+		ipv4 != "", ipv6 != "", lastSeenAt, NowUnix())
 }
 
-// updateDeviceIP carries the UPDATE itself, taking updatedAt explicitly so a
-// caller writing several rows for one event can stamp them all identically.
-// Runs on the pool for UpdateIP and on the transaction for RecordIPChange.
-func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt, updatedAt int64) error {
+// updateDeviceIP is the contact write for a check-in that CHANGED an address.
+//
+// Besides the addresses it advances the per-family confirmation instants for
+// the families this check-in asserted, and resets those families' warning
+// levels (D12). The reset rides an UNCONDITIONAL write on purpose: revision 8
+// put it on a statement that only fired for an already-expired device, so a
+// device that went quiet, took rungs 1 and 2, and came back before its window
+// elapsed kept its stale level and would then fire nothing before removal.
+// Reproduced against SQLite: that statement changed 0 rows for exactly that
+// device.
+//
+// Takes updatedAt explicitly so a caller writing several rows for one event
+// can stamp them all identically. Runs on the pool for UpdateIP and on the
+// transaction for RecordIPChange.
+// Each CASE WHEN ? binds a plain bool, not a set — database/sql cannot bind a
+// set to one placeholder. A check-in asserting neither family is reachable
+// (api/checkin.go has no "at least one family" validation); every CASE then
+// takes its ELSE and the four per-family columns are unchanged, which is
+// correct.
+func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersion, hostname, os string,
+	v4Asserted, v6Asserted bool, lastSeenAt, updatedAt int64) error {
 	res, err := ex.ExecContext(ctx,
 		`UPDATE devices
 		 SET current_ipv4 = ?, current_ipv6 = ?, client_version = ?,
-		     hostname = ?, os = ?, last_seen_at = ?, updated_at = ?
+		     hostname = ?, os = ?, last_seen_at = ?, updated_at = ?,
+		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
+		     v6_confirmed_at = CASE WHEN ? THEN ? ELSE v6_confirmed_at END,
+		     v4_warn_level   = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
+		     v6_warn_level   = CASE WHEN ? THEN 0 ELSE v6_warn_level END
 		 WHERE id = ?`,
-		nullIfEmpty(ipv4),
-		nullIfEmpty(ipv6),
-		nullIfEmpty(clientVersion),
-		nullIfEmpty(hostname),
-		nullIfEmpty(os),
-		nullIfZero(lastSeenAt),
-		updatedAt,
+		nullIfEmpty(ipv4), nullIfEmpty(ipv6), nullIfEmpty(clientVersion),
+		nullIfEmpty(hostname), nullIfEmpty(os), nullIfZero(lastSeenAt), updatedAt,
+		v4Asserted, lastSeenAt,
+		v6Asserted, lastSeenAt,
+		v4Asserted, v6Asserted,
 		id,
 	)
 	if err != nil {
@@ -246,13 +309,26 @@ func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersio
 	return nil
 }
 
-// Touch advances last_seen_at (and updated_at) for a device without changing
-// its IP addresses — the liveness signal for a routine, unchanged check-in.
+// Touch is the contact write for a check-in that changed NOTHING. It carries
+// the same instant advance and level reset as updateDeviceIP: the #127
+// headline case -- a device silent past its window that comes back -- arrives
+// on THIS branch whenever the device still holds its lease, which is the
+// common case.
 // Returns ErrNotFound if no row matched.
-func (r *DeviceRepo) Touch(ctx context.Context, id string, lastSeenAt int64) error {
+func (r *DeviceRepo) Touch(ctx context.Context, id string, v4Asserted, v6Asserted bool, lastSeenAt int64) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE devices SET last_seen_at = ?, updated_at = ? WHERE id = ?`,
-		nullIfZero(lastSeenAt), NowUnix(), id,
+		`UPDATE devices
+		 SET last_seen_at = ?, updated_at = ?,
+		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
+		     v6_confirmed_at = CASE WHEN ? THEN ? ELSE v6_confirmed_at END,
+		     v4_warn_level   = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
+		     v6_warn_level   = CASE WHEN ? THEN 0 ELSE v6_warn_level END
+		 WHERE id = ?`,
+		nullIfZero(lastSeenAt), NowUnix(),
+		v4Asserted, lastSeenAt,
+		v6Asserted, lastSeenAt,
+		v4Asserted, v6Asserted,
+		id,
 	)
 	if err != nil {
 		return fmt.Errorf("devices.Touch: %w", err)

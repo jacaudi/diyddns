@@ -66,9 +66,18 @@ func NewCheckinService(st *store.Store, notify Notifier) *CheckinService {
 // updated to the effective values and a new ip_history row is appended.
 //
 // The merge is load-bearing for a DDNS tracker: the /checkin IP fields are
-// optional (design §5A, "omit if unconfirmed"), and Devices.UpdateIP maps
+// optional (design §5A, "omit if unconfirmed"), and store.RecordIPChange maps
 // empty→NULL, so writing raw report values would clobber a stored family a
 // single-stack client simply didn't confirm this cycle — silent data loss.
+//
+// Checkin also owns the per-family assertion contract: v4Asserted/v6Asserted
+// are derived from the RAW report (r.IPv4 != "", r.IPv6 != ""), never from
+// the merged effective values, and are threaded unchanged to both the Touch
+// branch and the RecordIPChange branch. An omitted family is not asserted
+// this cycle and its confirmation instant must not advance, even though its
+// merged value is carried forward unchanged (D6). Deriving assertion from the
+// merged values instead would assert every family on every check-in and
+// silently disable per-family expiry.
 //
 // Routine check-ins are not audited — auditing is reserved for security-
 // relevant events, and a routine IP report is not one of them.
@@ -88,11 +97,15 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 		effV6 = dev.CurrentIPv6
 	}
 
+	// What did the CLIENT actually send? Not what the merge preserved. An
+	// omitted family is "not asserted this cycle" (D6).
+	v4Asserted, v6Asserted := r.IPv4 != "", r.IPv6 != ""
+
 	if effV4 == dev.CurrentIPv4 && effV6 == dev.CurrentIPv6 {
 		// IP unchanged: still a contact. Advance last_seen_at (liveness) so a
 		// stable-IP device is distinguishable from a dead one (#12). "Last
 		// change" remains derivable from the latest ip_history row.
-		if err := s.st.Devices().Touch(ctx, dev.ID, store.NowUnix()); err != nil {
+		if err := s.st.Devices().Touch(ctx, dev.ID, v4Asserted, v6Asserted, store.NowUnix()); err != nil {
 			return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
 		}
 		return CheckinResult{
@@ -115,6 +128,8 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 		ClientVersion: r.ClientVersion,
 		Hostname:      r.Hostname,
 		OS:            r.OS,
+		V4Asserted:    v4Asserted,
+		V6Asserted:    v6Asserted,
 	})
 	if err != nil {
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
