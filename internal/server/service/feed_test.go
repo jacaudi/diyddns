@@ -58,6 +58,87 @@ func TestInFeed(t *testing.T) {
 	}
 }
 
+// seedUserWithDisabled creates and returns a user with a fresh email and the
+// given disabled flag. Distinct from seedUser (enrollment_test.go), whose
+// four-arg signature takes neither the disabled flag nor per-family
+// addresses -- needed here so TestFeedMembership_SQLAndGoAgree's fixture
+// rows can vary owner-disabled independently of device-disabled.
+func seedUserWithDisabled(t *testing.T, ctx context.Context, st *store.Store, disabled bool) store.User {
+	t.Helper()
+	u, err := st.Users().Create(ctx, store.User{Email: store.NewID() + "@example.com", Role: "user", Disabled: disabled})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	return u
+}
+
+// seedDeviceWith creates and returns a device with the given label, per-family
+// addresses and disabled flag. Distinct from seedDevice (checkin_test.go),
+// whose four-arg signature takes neither the disabled flag nor per-family
+// addresses.
+func seedDeviceWith(t *testing.T, ctx context.Context, st *store.Store, userID, label, v4, v6 string, disabled bool) store.Device {
+	t.Helper()
+	d, err := st.Devices().Create(ctx, store.Device{
+		UserID: userID, Label: label, SecretHash: "h",
+		CurrentIPv4: v4, CurrentIPv6: v6, Disabled: disabled,
+	})
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	return d
+}
+
+// #106 D18 states the membership predicate ONCE and both halves implement it:
+// service.inFeed and store's listFeedQuery. No other test runs both over the
+// SAME rows -- TestInFeed and TestDevices_ListFeed have separate fixtures in
+// separate packages -- so the two can drift silently.
+//
+// #127 changes neither half. That is precisely the property worth pinning:
+// clearing the address rather than flagging it works only because both halves
+// already treat an absent address as absent.
+func TestFeedMembership_SQLAndGoAgree(t *testing.T) {
+	st := openTestStore(t)
+	ctx := t.Context()
+
+	type row struct {
+		label                     string
+		v4, v6                    string
+		devDisabled, userDisabled bool
+	}
+	rows := []row{
+		{"dual", "1.2.3.4", "2001:db8::1", false, false},
+		{"v4 only", "1.2.3.4", "", false, false},
+		{"v6 only", "", "2001:db8::1", false, false},
+		{"no address", "", "", false, false},
+		{"device disabled", "1.2.3.4", "", true, false},
+		{"owner disabled", "1.2.3.4", "", false, true},
+		{"no address and disabled", "", "", true, true},
+	}
+
+	want := map[string]bool{}
+	for _, r := range rows {
+		u := seedUserWithDisabled(t, ctx, st, r.userDisabled)
+		d := seedDeviceWith(t, ctx, st, u.ID, r.label, r.v4, r.v6, r.devDisabled)
+		// The Go half, evaluated on the row AS READ -- inFeed's documented rule.
+		want[r.label] = inFeed(d, u)
+	}
+
+	feed, err := st.Devices().ListFeed(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inSQL := map[string]bool{}
+	for _, f := range feed {
+		inSQL[f.Label] = true
+	}
+	for _, r := range rows {
+		if inSQL[r.label] != want[r.label] {
+			t.Errorf("%q: listFeedQuery says %v, inFeed says %v -- D18 requires they agree",
+				r.label, inSQL[r.label], want[r.label])
+		}
+	}
+}
+
 func TestFeedService_MintAuthenticateRevoke(t *testing.T) {
 	st := openTestStore(t)
 	admin := seedUser(t, st, "admin@x", "admin")

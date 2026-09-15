@@ -37,7 +37,7 @@ func TestBuildMux_NotificationsDisabledWiresNopNotifier(t *testing.T) {
 		t.Fatalf("NotificationEndpoints().Create: %v", err)
 	}
 
-	_, _, apiDeps, _, _, _, err := buildMux(cfg, st, discardLog())
+	_, _, apiDeps, _, _, _, _, err := buildMux(cfg, st, discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBuildMux_WebhookOffFeedOnStillFansOut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, apiDeps, _, _, _, err := buildMux(cfg, st, discardLog())
+	_, _, apiDeps, _, _, _, _, err := buildMux(cfg, st, discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
