@@ -168,8 +168,30 @@ type Notifications struct {
 // snapshot at /feed/v1/devices.{txt,json} and the WebSocket stream at
 // /feed/v1/stream. When Enabled is false none of those routes, nor the
 // /admin/feed token page, exists on the mux.
+//
+// ExpireAfterDays is the #127 staleness policy. It is named expire_* rather
+// than stale_* because "stale" already means something else in this product:
+// webui.StatusStale fires after fifteen MINUTES, and a page reading "stale"
+// beside "expires in 20 days" would mislead.
 type FeedSection struct {
 	Enabled bool `mapstructure:"enabled"`
+
+	// ExpireAfterDays is how long an address may go unconfirmed before it is
+	// cleared from the device and therefore from the feed. 0 disables the
+	// whole policy, which is the documented opt-out.
+	//
+	// Deliberately ON by default (D2), breaking the retention: house rule that
+	// every key defaults to 0. A security fix nobody can discover is a fix
+	// nobody applies; see design §3.1 for the asymmetry that settles it.
+	ExpireAfterDays int `mapstructure:"expire_after_days"`
+}
+
+// ExpiryEnabled reports whether the staleness policy runs at all. Both halves
+// matter -- the policy is inert with the feed off and opted out with the
+// window at 0 -- and every caller asks the same question, so it is asked in
+// one place.
+func (f FeedSection) ExpiryEnabled() bool {
+	return f.Enabled && f.ExpireAfterDays > 0
 }
 
 // keyDefaults enumerates every config key, its default, and its env var. Keys
@@ -222,6 +244,7 @@ var keyDefaults = map[string]any{
 	"notifications.timeout":                  "10s",
 	"notifications.max_attempts":             8,
 	"feed.enabled":                           false,
+	"feed.expire_after_days":                 21,
 	"retention.ip_history_days":              0,
 	"retention.ip_history_per_device_max":    0,
 	"retention.audit_log_days":               0,
@@ -326,6 +349,9 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, err
 	}
 	if err := validateRetention(cfg); err != nil {
+		return Server{}, err
+	}
+	if err := validateFeedExpiry(cfg); err != nil {
 		return Server{}, err
 	}
 	if err := validateObservability(cfg); err != nil {
@@ -672,6 +698,18 @@ func validateRetention(cfg Server) error {
 		if k.value < 0 || k.value > maxRetentionDays {
 			return fmt.Errorf("config: %s must be between 0 and %d (got %d)", k.name, maxRetentionDays, k.value)
 		}
+	}
+	return nil
+}
+
+// validateFeedExpiry enforces the #127 window bound. 0 is the opt-out, so the
+// floor is 0 rather than 1; the 36500 ceiling matches maxRetentionDays and
+// exists for the same reason -- days*86400 must not overflow into a huge
+// POSITIVE cutoff that expires everything.
+func validateFeedExpiry(cfg Server) error {
+	if d := cfg.Feed.ExpireAfterDays; d < 0 || d > maxRetentionDays {
+		return fmt.Errorf("config: feed.expire_after_days must be between 0 and %d (got %d)",
+			maxRetentionDays, d)
 	}
 	return nil
 }

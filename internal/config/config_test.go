@@ -1136,3 +1136,86 @@ func TestLoad_OTLPBindsEnv(t *testing.T) {
 		t.Errorf("otlp.service_name = %q, want %q (env var DIYDDNS_OBSERVABILITY_OTLP_SERVICE_NAME was dropped)", got, want)
 	}
 }
+
+// TestLoad_FeedExpireDefault pins the #127 staleness policy's default of 21
+// days, deliberately ON out of the box (design D2).
+func TestLoad_FeedExpireDefault(t *testing.T) {
+	cfg := mustLoadWithDB(t)
+	if got := cfg.Feed.ExpireAfterDays; got != 21 {
+		t.Errorf("ExpireAfterDays = %d, want 21", got)
+	}
+}
+
+// The documented opt-out MUST start. This is the only way an operator turns
+// the policy off, and D2 makes it on by default, so a config that cannot
+// express "off" is a trap.
+func TestLoad_FeedExpireZeroStarts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "database:\n  path: \":memory:\"\nfeed:\n  enabled: true\n  expire_after_days: 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(viper.New(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Feed.ExpireAfterDays != 0 {
+		t.Fatalf("ExpireAfterDays = %d, want 0", cfg.Feed.ExpireAfterDays)
+	}
+	if cfg.Feed.ExpiryEnabled() {
+		t.Error("ExpiryEnabled() is true with the policy opted out")
+	}
+}
+
+func TestLoad_FeedExpireValidation(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"negative", "feed:\n  expire_after_days: -1\n", "feed.expire_after_days"},
+		{"over ceiling", "feed:\n  expire_after_days: 36501\n", "36500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			body := "database:\n  path: \":memory:\"\n" + tc.yaml
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := config.Load(viper.New(), path)
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q missing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// ExpiryEnabled is asked in several places; it must mean the same thing in all
+// of them, so it is tested directly rather than through each caller.
+func TestFeedSection_ExpiryEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		enabled bool
+		days    int
+		want    bool
+	}{
+		{true, 21, true},
+		{true, 0, false},
+		{false, 21, false},
+		{false, 0, false},
+	} {
+		got := config.FeedSection{Enabled: tc.enabled, ExpireAfterDays: tc.days}.ExpiryEnabled()
+		if got != tc.want {
+			t.Errorf("ExpiryEnabled(enabled=%v days=%d) = %v, want %v", tc.enabled, tc.days, got, tc.want)
+		}
+	}
+}
+
+// Every key MUST be in keyDefaults or its DIYDDNS_* env var is silently
+// ignored -- config.Load has no viper.AutomaticEnv(), so binding is explicit.
+func TestLoad_FeedExpireEnvBinding(t *testing.T) {
+	t.Setenv("DIYDDNS_FEED_EXPIRE_AFTER_DAYS", "30")
+	if got := mustLoadWithDB(t).Feed.ExpireAfterDays; got != 30 {
+		t.Fatalf("ExpireAfterDays = %d, want 30 from env", got)
+	}
+}
