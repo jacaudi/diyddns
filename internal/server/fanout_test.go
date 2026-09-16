@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -216,5 +217,201 @@ func TestFanout_NilEnqueuerIsSkipped(t *testing.T) {
 	}
 	if fs.Seq != 1 {
 		t.Errorf("feed_state.seq = %d, want 1", fs.Seq)
+	}
+}
+
+// expireEvent is the harness's decoded view of an enqueued device.ip_changed
+// outbox payload: only the fields TestExpireAddresses_* assert on. Decoding
+// the actual wire payload -- rather than reading fields off an internal
+// struct -- is what proves ExpireAddresses's event matches the wire contract
+// consumers actually see.
+type expireEvent struct {
+	ID      int64    `json:"id"`
+	Type    string   `json:"type"`
+	Changed []string `json:"changed"`
+	Current struct {
+		IPv4 *string `json:"ipv4"`
+		IPv6 *string `json:"ipv6"`
+	} `json:"current"`
+	Previous struct {
+		IPv4 *string `json:"ipv4"`
+		IPv6 *string `json:"ipv6"`
+	} `json:"previous"`
+}
+
+// fanoutHarness wires a fanout with the webhook transport enabled against one
+// enabled endpoint, so TestExpireAddresses_* can read back exactly what
+// ExpireAddresses enqueued via the outbox rather than standing up a stream
+// connection just to observe a broadcast.
+type fanoutHarness struct {
+	t      *testing.T
+	st     *store.Store
+	fanout *fanout
+}
+
+func newFanoutHarness(t *testing.T) *fanoutHarness {
+	t.Helper()
+	st := openTestStore(t)
+	seedEnabledEndpoint(t, st, "ep")
+	return &fanoutHarness{
+		t:      t,
+		st:     st,
+		fanout: newFanout(st, notify.NewEnqueuer(st, discardLog()), feed.New(), discardLog()),
+	}
+}
+
+// seed creates a device with both address families and confirmation instants
+// set, for tests that don't care who owns it.
+func (h *fanoutHarness) seed(t *testing.T, v4, v6 string, v4Confirmed, v6Confirmed int64) store.Device {
+	t.Helper()
+	u, err := h.st.Users().Create(t.Context(), store.User{Email: store.NewID() + "@example.com", Role: "user"})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	d, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: u.ID, Label: store.NewID(), SecretHash: "h",
+		CurrentIPv4: v4, CurrentIPv6: v6,
+		V4ConfirmedAt: v4Confirmed, V6ConfirmedAt: v6Confirmed,
+	})
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	return d
+}
+
+// touch advances deviceID's confirmation instants for both families, so a
+// test can simulate a check-in landing between the sweep's read and its
+// ExpireAddresses call.
+func (h *fanoutHarness) touch(t *testing.T, deviceID string, at int64) {
+	t.Helper()
+	if err := h.st.Devices().Touch(t.Context(), deviceID, true, true, at); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+}
+
+// events returns every device.ip_changed payload enqueued to the webhook
+// outbox so far, decoded to the fields these tests assert on.
+func (h *fanoutHarness) events() []expireEvent {
+	h.t.Helper()
+	due, err := h.st.NotificationDeliveries().DueForAttempt(h.t.Context(), store.NowUnix()+1, 10)
+	if err != nil {
+		h.t.Fatalf("DueForAttempt: %v", err)
+	}
+	out := make([]expireEvent, len(due))
+	for i, d := range due {
+		if err := json.Unmarshal(d.Payload, &out[i]); err != nil {
+			h.t.Fatalf("unmarshal payload: %v", err)
+		}
+	}
+	return out
+}
+
+// stringPtrOrNil mirrors the wire renderer's "" -> null mapping, so a test
+// can build its expected *string the same way notify.RenderIPChanged builds
+// the actual one.
+func stringPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ptrStringEqual compares two possibly-nil *string values by content.
+func ptrStringEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// derefOrNull renders a possibly-nil *string for a test failure message.
+func derefOrNull(s *string) string {
+	if s == nil {
+		return "null"
+	}
+	return *s
+}
+
+// D10: partial expiry emits ip_changed naming the CLEARED family; full expiry
+// emits an all-null current, which README.md:162 already defines as delete.
+func TestExpireAddresses_EmitsIPChanged(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		v4, v6          string
+		v4Due, v6Due    bool
+		wantChanged     []string
+		wantCurrentNull bool
+	}{
+		{"partial: v6 cleared", "1.2.3.4", "2001:db8::1", false, true, []string{"ipv6"}, false},
+		{"full: both cleared", "1.2.3.4", "2001:db8::1", true, true, []string{"ipv4", "ipv6"}, true},
+		{"single stack: last family", "1.2.3.4", "", true, false, []string{"ipv4"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFanoutHarness(t)
+			d := h.seed(t, tc.v4, tc.v6, 1000, 1000)
+
+			ok, err := h.fanout.ExpireAddresses(t.Context(), d, tc.v4Due, tc.v6Due,
+				Confirmed{V4: 1000, V6: 1000})
+			if err != nil || !ok {
+				t.Fatalf("ok=%v err=%v", ok, err)
+			}
+			ev := h.events()
+			if len(ev) != 1 {
+				t.Fatalf("emitted %d events, want 1", len(ev))
+			}
+			// The event's id is the appended ip_history row's id, not a
+			// sentinel -- the (type, id) dedupe rule a consumer applies would
+			// collapse every expiry event to one if this were ever 0.
+			hist, err := h.st.IPHistory().Latest(t.Context(), d.ID)
+			if err != nil {
+				t.Fatalf("IPHistory().Latest: %v", err)
+			}
+			if ev[0].ID != hist.ID {
+				t.Errorf("id = %d, want %d (the appended ip_history row)", ev[0].ID, hist.ID)
+			}
+			if ev[0].Type != notify.EventIPChanged {
+				t.Errorf("type = %q, want %q -- no new event type (D10)", ev[0].Type, notify.EventIPChanged)
+			}
+			if !slices.Equal(ev[0].Changed, tc.wantChanged) {
+				t.Errorf("changed = %v, want %v", ev[0].Changed, tc.wantChanged)
+			}
+			allNull := ev[0].Current.IPv4 == nil && ev[0].Current.IPv6 == nil
+			if allNull != tc.wantCurrentNull {
+				t.Errorf("all-null current = %v, want %v", allNull, tc.wantCurrentNull)
+			}
+			// README.md's wire-shape contract for an expiry event: `previous`
+			// ALWAYS carries the address that was in effect just before this
+			// call, whether or not that family was the one cleared -- an
+			// expiry never rewrites history for the family it didn't touch.
+			// Asserted from tc.v4/tc.v6 (the harness's seeded pre-call state),
+			// independent of v4Due/v6Due, so this catches a regression that
+			// nulls `previous` alongside `current` for the cleared family --
+			// exactly the shape the README used to (wrongly) describe.
+			wantPrevIPv4, wantPrevIPv6 := stringPtrOrNil(tc.v4), stringPtrOrNil(tc.v6)
+			if !ptrStringEqual(ev[0].Previous.IPv4, wantPrevIPv4) {
+				t.Errorf("previous.ipv4 = %s, want %s", derefOrNull(ev[0].Previous.IPv4), derefOrNull(wantPrevIPv4))
+			}
+			if !ptrStringEqual(ev[0].Previous.IPv6, wantPrevIPv6) {
+				t.Errorf("previous.ipv6 = %s, want %s", derefOrNull(ev[0].Previous.IPv6), derefOrNull(wantPrevIPv6))
+			}
+		})
+	}
+}
+
+// D8 again, at the fanout layer: a failed pin emits nothing at all.
+func TestExpireAddresses_FailedPinEmitsNothing(t *testing.T) {
+	h := newFanoutHarness(t)
+	d := h.seed(t, "1.2.3.4", "", 1000, 0)
+	h.touch(t, d.ID, 9000)
+
+	ok, err := h.fanout.ExpireAddresses(t.Context(), d, true, false, Confirmed{V4: 1000, V6: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("reported a change after a failed pin")
+	}
+	if n := len(h.events()); n != 0 {
+		t.Errorf("emitted %d events, want 0", n)
 	}
 }

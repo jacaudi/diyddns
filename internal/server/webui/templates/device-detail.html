@@ -2,28 +2,40 @@
 <div class="breadcrumb"><a href="/devices">Devices</a> / {{.Device.Label}}</div>
 
 {{if .Secret}}
-<div class="card" style="max-width:720px">
-  <div class="card-head"><h2>New secret — shown once</h2></div>
-  <div class="card-body">
-    <div class="callout warn">
-      <strong>⚠ Shown once</strong>
-      This secret is displayed a single time and is not recoverable.
-      <strong>Reloading this page rotates the secret again.</strong>
-    </div>
-    {{template "errorBanner" .BaseURLWarning}}
-    <div class="field">
-      <label>Replace your credentials file, at file mode 0600</label>
-      {{template "copyValue" .Credentials}}
-      <div class="hint">
-        Default location — Linux <code>~/.config/diyddns/credentials.json</code>,
-        macOS <code>~/Library/Application Support/diyddns/credentials.json</code>,
-        Windows <code>%AppData%\diyddns\credentials.json</code>
-        — or whatever path you passed to <code>--credentials-file</code>.
-        Then restart <code>diyddns-client</code>.
+{{/* A modal, open on load. This is the only moment the secret exists in a form
+     anyone can read, and as an inline card at the top of the page it was one
+     more block to scroll past on a page that already has six. `open` on the
+     <details> shows the overlay with no JavaScript, and the summary stays
+     behind it as the way back if it is dismissed before the value is copied --
+     until the page is left, after which the secret is gone for good. */}}
+<details class="modal" open>
+  <summary class="btn">Show the new secret</summary>
+  <div class="modal-panel">
+    <div class="card modal-card">
+      <h2>New secret — shown once</h2>
+      <div class="callout warn">
+        <strong>⚠ Shown once</strong>
+        This secret is displayed a single time and is not recoverable.
+        <strong>Reloading this page rotates the secret again.</strong>
+      </div>
+      {{template "errorBanner" .BaseURLWarning}}
+      <div class="field">
+        <label>Replace your credentials file, at file mode 0600</label>
+        {{template "copyValue" .Credentials}}
+        <div class="hint">
+          Default location — Linux <code>~/.config/diyddns/credentials.json</code>,
+          macOS <code>~/Library/Application Support/diyddns/credentials.json</code>,
+          Windows <code>%AppData%\diyddns\credentials.json</code>
+          — or whatever path you passed to <code>--credentials-file</code>.
+          Then restart <code>diyddns-client</code>.
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" type="button" data-modal-close>Done</button>
       </div>
     </div>
   </div>
-</div>
+</details>
 {{end}}
 
 {{template "errorBanner" .Error}}
@@ -39,11 +51,18 @@
 <div class="grid cols-2">
   <div class="card">
     <div class="card-head"><h2>Current addresses</h2></div>
-    <div class="card-body stack-sm">
-      <div><div class="muted">IPv4</div>
-        {{template "copyOrDash" .Device.CurrentIPv4}}</div>
-      <div><div class="muted">IPv6</div>
-        {{template "copyOrDash" .Device.CurrentIPv6}}</div>
+    {{/* dl.kv, the same component as the Device card beside it: these two cards
+         sit side by side and are both a list of labelled values, so they must
+         not be two different layouts. */}}
+    <div class="card-body">
+      <dl class="kv">
+        <dt>IPv4</dt>
+        <dd>{{if .IPv4LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv4LastKnown}}, {{.IPv4LastKnownAt}})</span>
+          {{else}}{{template "copyOrDash" .Device.CurrentIPv4}}{{if and .ShowExpiry .V4ExpiresIn}}<div class="muted expiry">expires in {{.V4ExpiresIn}}</div>{{end}}{{end}}</dd>
+        <dt>IPv6</dt>
+        <dd>{{if .IPv6LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv6LastKnown}}, {{.IPv6LastKnownAt}})</span>
+          {{else}}{{template "copyOrDash" .Device.CurrentIPv6}}{{if and .ShowExpiry .V6ExpiresIn}}<div class="muted expiry">expires in {{.V6ExpiresIn}}</div>{{end}}{{end}}</dd>
+      </dl>
     </div>
   </div>
 

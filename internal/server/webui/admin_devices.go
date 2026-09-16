@@ -45,7 +45,7 @@ func (h *handler) handleAdminDevices(w http.ResponseWriter, r *http.Request, usr
 		h.logAndFail(w, r, usr, "list users", err)
 		return
 	}
-	devices, err := h.deps.Admin.ListAllDevices(r.Context())
+	devices, latest, err := h.deps.Admin.ListAllDevicesWithExpiry(r.Context())
 	if err != nil {
 		h.logAndFail(w, r, usr, "list all devices", err)
 		return
@@ -58,7 +58,7 @@ func (h *handler) handleAdminDevices(w http.ResponseWriter, r *http.Request, usr
 	rows := make([]adminDeviceRow, 0, len(devices))
 	counts := map[Status]int{}
 	for _, d := range devices {
-		row := newDeviceRow(d, now)
+		row := newDeviceRow(d, latest[d.ID], h.deps.Cfg.Feed, now)
 		counts[row.Status]++
 		if (owner != "" && d.UserID != owner) || !row.matchesStatus(status) {
 			continue
@@ -72,7 +72,7 @@ func (h *handler) handleAdminDevices(w http.ResponseWriter, r *http.Request, usr
 	}
 
 	h.render(w, r, "admin-devices", adminDevicesData{
-		appData: h.newAppData(usr, sess, "All devices", "admin-devices"),
+		appData: h.newAppData(usr, sess, "All Devices", "admin-devices"),
 		Devices: rows,
 		Owners:  ownerOptions(users),
 		Owner:   owner,

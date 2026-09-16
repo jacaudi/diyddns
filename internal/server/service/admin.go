@@ -67,7 +67,7 @@ func (s *AdminService) enabledAdminCount(ctx context.Context, targetID string) (
 		return 0, false, err
 	}
 	for _, u := range users {
-		if u.Role == "admin" && !u.Disabled {
+		if u.IsEnabledAdmin() {
 			count++
 			if u.ID == targetID {
 				targetIsEnabledAdmin = true
@@ -295,6 +295,23 @@ func (s *AdminService) ListAllDevices(ctx context.Context) ([]store.Device, erro
 		return nil, fmt.Errorf("service.ListAllDevices: %w", err)
 	}
 	return devices, nil
+}
+
+// ListAllDevicesWithExpiry is ListAllDevices's counterpart for the admin
+// list, unscoped: it also returns each device's last-recorded address per
+// family, for the rows a sweep has cleared. Two statements, the second
+// issued only after ListAll's cursor is closed -- see
+// DeviceService.ListWithExpiry for the same argument.
+func (s *AdminService) ListAllDevicesWithExpiry(ctx context.Context) ([]store.Device, map[string]store.LatestAddress, error) {
+	devices, err := s.st.Devices().ListAll(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.ListAllDevicesWithExpiry: %w", err)
+	}
+	latest, err := latestAddresses(ctx, s.st, devices)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.ListAllDevicesWithExpiry: %w", err)
+	}
+	return devices, latest, nil
 }
 
 // ListAudit returns a cursor-paginated page of audit-log entries.

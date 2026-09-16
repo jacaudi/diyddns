@@ -9,8 +9,8 @@
         <label for="label">Label</label>
         <input class="input" id="label" name="label" value="{{.Label}}" placeholder="e.g. envoy-prod"
                autocomplete="off" required>
-        <div class="hint">One token per consumer, so each can be revoked on its own.</div>
-        <div class="hint">The token is shown once.</div>
+        <div class="hint">One token per consumer, so each can be revoked on its own. The
+          token is shown once.</div>
       </div>
       <div class="btn-row">
         <button class="btn primary" type="submit">Mint token</button>
@@ -62,7 +62,7 @@
           <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
           <td data-label="Last used" class="muted nowrap">{{template "textOrDash" .LastUsedAbs}}</td>
           <td class="actions">
-            <form method="post" action="/admin/feed/tokens/{{.ID}}/revoke" style="display:inline">
+            <form method="post" action="/admin/feed/tokens/{{.ID}}/revoke">
               <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
               <button class="btn sm danger" type="submit">Revoke</button>
             </form>

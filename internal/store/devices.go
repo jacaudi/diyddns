@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // Device represents a registered client device in DIYDDNS.
@@ -22,6 +24,26 @@ type Device struct {
 	Disabled      bool
 	CreatedAt     int64
 	UpdatedAt     int64
+
+	// V4ConfirmedAt and V6ConfirmedAt are the last check-in in which the
+	// client ASSERTED that family; 0 if never, stored as NULL.
+	//
+	// These are NOT last_seen_at. Checkin treats an omitted family as "not
+	// asserted this cycle" and preserves the stored value, while Touch
+	// advances last_seen_at on any contact -- so a host that loses IPv6 and
+	// keeps reporting IPv4 every five minutes is never silent, and measuring
+	// expiry from last_seen_at would leave its stale IPv6 prefix in the feed
+	// forever. This distinction is the whole basis of per-family expiry.
+	V4ConfirmedAt int64
+	V6ConfirmedAt int64
+
+	// V4WarnLevel and V6WarnLevel are each family's own warning-ladder
+	// position, 0-4. Per family rather than per device: with one window there
+	// is no "which family is the ladder counting down to" question, so two
+	// independent levels are simpler than one level plus a target plus a
+	// tie-break plus a rule for which contacts reset it.
+	V4WarnLevel int
+	V6WarnLevel int
 }
 
 // DeviceRepo provides persistence operations for Device records.
@@ -39,6 +61,12 @@ func nullIfZero(n int64) any {
 	return n
 }
 
+// placeholders returns a comma-separated "?" placeholder list of length n, for
+// building a dynamic IN (...) clause whose argument count varies per call.
+func placeholders(n int) string {
+	return strings.Join(slices.Repeat([]string{"?"}, n), ",")
+}
+
 // scanInt64 scans a possibly-NULL INTEGER column to a Go int64 (0 if NULL).
 func scanInt64(n sql.NullInt64) int64 {
 	if n.Valid {
@@ -49,7 +77,8 @@ func scanInt64(n sql.NullInt64) int64 {
 
 const deviceColumns = `id, user_id, label, secret_hash,
 	current_ipv4, current_ipv6, hostname, os, client_version,
-	last_seen_at, disabled, created_at, updated_at`
+	last_seen_at, disabled, created_at, updated_at,
+	v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level`
 
 func scanDevice(row interface {
 	Scan(dest ...any) error
@@ -58,6 +87,8 @@ func scanDevice(row interface {
 	var currentIPv4, currentIPv6, hostname, osCol, clientVersion sql.NullString
 	var lastSeenAt sql.NullInt64
 	var disabled int64
+	var v4Conf, v6Conf sql.NullInt64
+	var v4Level, v6Level int64
 
 	err := row.Scan(
 		&d.ID,
@@ -73,6 +104,10 @@ func scanDevice(row interface {
 		&disabled,
 		&d.CreatedAt,
 		&d.UpdatedAt,
+		&v4Conf,
+		&v6Conf,
+		&v4Level,
+		&v6Level,
 	)
 	if err != nil {
 		return Device{}, err
@@ -84,6 +119,10 @@ func scanDevice(row interface {
 	d.ClientVersion = scanString(clientVersion)
 	d.LastSeenAt = scanInt64(lastSeenAt)
 	d.Disabled = disabled != 0
+	d.V4ConfirmedAt = scanInt64(v4Conf)
+	d.V6ConfirmedAt = scanInt64(v6Conf)
+	d.V4WarnLevel = int(v4Level)
+	d.V6WarnLevel = int(v6Level)
 	return d, nil
 }
 
@@ -102,8 +141,9 @@ func (r *DeviceRepo) Create(ctx context.Context, d Device) (Device, error) {
 		`INSERT INTO devices
 		 (id, user_id, label, secret_hash,
 		  current_ipv4, current_ipv6, hostname, os, client_version,
-		  last_seen_at, disabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  last_seen_at, disabled, created_at, updated_at,
+		  v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ID,
 		d.UserID,
 		d.Label,
@@ -117,6 +157,10 @@ func (r *DeviceRepo) Create(ctx context.Context, d Device) (Device, error) {
 		boolToInt(d.Disabled),
 		d.CreatedAt,
 		d.UpdatedAt,
+		nullIfZero(d.V4ConfirmedAt),
+		nullIfZero(d.V6ConfirmedAt),
+		d.V4WarnLevel,
+		d.V6WarnLevel,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -139,6 +183,22 @@ func (r *DeviceRepo) GetByID(ctx context.Context, id string) (Device, error) {
 			return Device{}, fmt.Errorf("devices.GetByID: %w", ErrNotFound)
 		}
 		return Device{}, fmt.Errorf("devices.GetByID: %w", err)
+	}
+	return d, nil
+}
+
+// getDeviceTx reads one device row via ex. It exists to be called on an open
+// transaction: passing the pool (r.db) instead while that transaction is
+// still open is the deadlock it was written to prevent -- it would ask a
+// pool of one for a second connection and hang the server.
+func getDeviceTx(ctx context.Context, ex txer, id string) (Device, error) {
+	row := ex.QueryRowContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE id = ?`, id)
+	d, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Device{}, fmt.Errorf("devices.getDeviceTx: %w", ErrNotFound)
+		}
+		return Device{}, fmt.Errorf("devices.getDeviceTx: %w", err)
 	}
 	return d, nil
 }
@@ -211,26 +271,53 @@ func (r *DeviceRepo) ListAll(ctx context.Context) ([]Device, error) {
 
 // UpdateIP updates the IP address fields, metadata, and last_seen_at for a device.
 // Returns ErrNotFound if no row matched.
+//
+// A non-empty address counts as ASSERTED, so it advances that family's
+// confirmation instant and resets its warning level. For a device whose
+// instant was never set (the common case: this is often the first write for a
+// newly seeded or newly enrolled device), passing false instead would leave
+// it NULL, which scanInt64 maps to 0 and the sweep reads as "never
+// confirmed", expiring the device on the next tick.
 func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt int64) error {
-	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os, lastSeenAt, NowUnix())
+	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os,
+		ipv4 != "", ipv6 != "", lastSeenAt, NowUnix())
 }
 
-// updateDeviceIP carries the UPDATE itself, taking updatedAt explicitly so a
-// caller writing several rows for one event can stamp them all identically.
-// Runs on the pool for UpdateIP and on the transaction for RecordIPChange.
-func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt, updatedAt int64) error {
+// updateDeviceIP is the contact write for a check-in that CHANGED an address.
+//
+// Besides the addresses it advances the per-family confirmation instants for
+// the families this check-in asserted, and resets those families' warning
+// levels (#127 D12). The reset rides an UNCONDITIONAL write on purpose: revision 8
+// put it on a statement that only fired for an already-expired device, so a
+// device that went quiet, took rungs 1 and 2, and came back before its window
+// elapsed kept its stale level and would then fire nothing before removal.
+// Reproduced against SQLite: that statement changed 0 rows for exactly that
+// device.
+//
+// Takes updatedAt explicitly so a caller writing several rows for one event
+// can stamp them all identically. Runs on the pool for UpdateIP and on the
+// transaction for RecordIPChange.
+// Each CASE WHEN ? binds a plain bool, not a set — database/sql cannot bind a
+// set to one placeholder. A check-in asserting neither family is reachable
+// (api/checkin.go has no "at least one family" validation); every CASE then
+// takes its ELSE and the four per-family columns are unchanged, which is
+// correct.
+func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersion, hostname, os string,
+	v4Asserted, v6Asserted bool, lastSeenAt, updatedAt int64) error {
 	res, err := ex.ExecContext(ctx,
 		`UPDATE devices
 		 SET current_ipv4 = ?, current_ipv6 = ?, client_version = ?,
-		     hostname = ?, os = ?, last_seen_at = ?, updated_at = ?
+		     hostname = ?, os = ?, last_seen_at = ?, updated_at = ?,
+		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
+		     v6_confirmed_at = CASE WHEN ? THEN ? ELSE v6_confirmed_at END,
+		     v4_warn_level   = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
+		     v6_warn_level   = CASE WHEN ? THEN 0 ELSE v6_warn_level END
 		 WHERE id = ?`,
-		nullIfEmpty(ipv4),
-		nullIfEmpty(ipv6),
-		nullIfEmpty(clientVersion),
-		nullIfEmpty(hostname),
-		nullIfEmpty(os),
-		nullIfZero(lastSeenAt),
-		updatedAt,
+		nullIfEmpty(ipv4), nullIfEmpty(ipv6), nullIfEmpty(clientVersion),
+		nullIfEmpty(hostname), nullIfEmpty(os), nullIfZero(lastSeenAt), updatedAt,
+		v4Asserted, lastSeenAt,
+		v6Asserted, lastSeenAt,
+		v4Asserted, v6Asserted,
 		id,
 	)
 	if err != nil {
@@ -246,13 +333,26 @@ func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersio
 	return nil
 }
 
-// Touch advances last_seen_at (and updated_at) for a device without changing
-// its IP addresses — the liveness signal for a routine, unchanged check-in.
+// Touch is the contact write for a check-in that changed NOTHING. It carries
+// the same instant advance and level reset as updateDeviceIP: the #127
+// headline case -- a device silent past its window that comes back -- arrives
+// on THIS branch whenever the device still holds its lease, which is the
+// common case.
 // Returns ErrNotFound if no row matched.
-func (r *DeviceRepo) Touch(ctx context.Context, id string, lastSeenAt int64) error {
+func (r *DeviceRepo) Touch(ctx context.Context, id string, v4Asserted, v6Asserted bool, lastSeenAt int64) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE devices SET last_seen_at = ?, updated_at = ? WHERE id = ?`,
-		nullIfZero(lastSeenAt), NowUnix(), id,
+		`UPDATE devices
+		 SET last_seen_at = ?, updated_at = ?,
+		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
+		     v6_confirmed_at = CASE WHEN ? THEN ? ELSE v6_confirmed_at END,
+		     v4_warn_level   = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
+		     v6_warn_level   = CASE WHEN ? THEN 0 ELSE v6_warn_level END
+		 WHERE id = ?`,
+		nullIfZero(lastSeenAt), NowUnix(),
+		v4Asserted, lastSeenAt,
+		v6Asserted, lastSeenAt,
+		v4Asserted, v6Asserted,
+		id,
 	)
 	if err != nil {
 		return fmt.Errorf("devices.Touch: %w", err)
@@ -350,6 +450,36 @@ func (r *DeviceRepo) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// AdvanceWarnLevel records one family's new ladder level, pinned on both
+// confirmation instants exactly as ExpireFamilies is (D8) and on the level the
+// sweep read, so two overlapping ticks cannot double-advance it.
+//
+// The pin on fromLevel is not in the design: it is the same idempotence
+// argument D8 makes for the instants, applied to the level, and it costs one
+// clause.
+func (r *DeviceRepo) AdvanceWarnLevel(ctx context.Context, id string, family, level, fromLevel int,
+	pinV4, pinV6, now int64) (bool, error) {
+	// The column is chosen from a closed set, never from input.
+	col := "v4_warn_level"
+	if family == 6 {
+		col = "v6_warn_level"
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET `+col+` = ?, updated_at = ?
+		  WHERE id = ? AND `+col+` = ?
+		    AND COALESCE(v4_confirmed_at, 0) = ?
+		    AND COALESCE(v6_confirmed_at, 0) = ?`,
+		level, now, id, fromLevel, pinV4, pinV6)
+	if err != nil {
+		return false, fmt.Errorf("devices.AdvanceWarnLevel: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("devices.AdvanceWarnLevel: RowsAffected: %w", err)
+	}
+	return n == 1, nil
+}
+
 // FeedDevice is one row of the gateway feed (design #106 §4.2): a member
 // device's id, label, current addresses and last-seen time. It carries no
 // user id (D21) and none of the device's other columns.
@@ -398,4 +528,90 @@ func (r *DeviceRepo) ListFeed(ctx context.Context) ([]FeedDevice, error) {
 		return nil, fmt.Errorf("devices.ListFeed: rows: %w", err)
 	}
 	return out, nil
+}
+
+// ExpireFamilies clears the due families' addresses, resets those families'
+// warning levels, and appends one ip_history row recording the result -- all
+// in ONE transaction. It reports whether it changed a row.
+//
+// It does NOT reuse updateDeviceIP, and must not: that helper advances
+// last_seen_at, which would show a device that has been silent for a month
+// as having just been seen.
+//
+// The write is pinned on the confirmation instants the sweep read (D8), so it
+// fails outright if the device confirmed anything in between -- a device that
+// came back during the tick is never expired. RowsAffected == 1 is what gates
+// the caller's event.
+// It returns the appended history row's id, which the caller uses as the
+// event's id -- a second read to fetch it would be another connection
+// acquisition for a value this write already knows.
+func (r *DeviceRepo) ExpireFamilies(ctx context.Context, id string, v4Due, v6Due bool,
+	pinV4, pinV6, now int64) (historyID int64, changed bool, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE devices
+		    SET current_ipv4  = CASE WHEN ? THEN NULL ELSE current_ipv4 END,
+		        current_ipv6  = CASE WHEN ? THEN NULL ELSE current_ipv6 END,
+		        v4_warn_level = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
+		        v6_warn_level = CASE WHEN ? THEN 0 ELSE v6_warn_level END,
+		        updated_at    = ?
+		  WHERE id = ?
+		    AND COALESCE(v4_confirmed_at, 0) = ?
+		    AND COALESCE(v6_confirmed_at, 0) = ?
+		    -- At least one due family must actually still HOLD an address.
+		    -- SQLite counts a no-op UPDATE as one affected row, so without this
+		    -- clause calling the method twice with the same pin would report
+		    -- success and append a second history row for a device already
+		    -- cleared. The sweep cannot reach that (candidateQuery's IS NOT
+		    -- NULL guards), but this method is exported and must not depend on
+		    -- its caller for correctness.
+		    AND (   (? AND current_ipv4 IS NOT NULL)
+		         OR (? AND current_ipv6 IS NOT NULL))`,
+		v4Due, v6Due, v4Due, v6Due, now, id, pinV4, pinV6, v4Due, v6Due)
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		// Three causes produce this, indistinguishable from RowsAffected alone:
+		// the pin no longer matches (the expected, contended case); no due
+		// family still holds an address -- either none was flagged due, or a
+		// due family's address was already NULL, which is the repeat-call
+		// case the guard above exists to make a no-op; or id matches no row.
+		// Unlike every other method in this file, a no-match id is
+		// deliberately NOT mapped to ErrNotFound here: the sweep passes ids
+		// it has just read, so that case cannot occur in practice, and
+		// telling it apart from a failed pin would cost a second statement
+		// inside the transaction for a distinction this caller has no use
+		// for.
+		return 0, false, nil
+	}
+
+	// Read the post-write addresses ON tx -- never through r.db, which would
+	// ask a pool of one for a second connection and hang the server.
+	after, err := getDeviceTx(ctx, tx, id)
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: %w", err)
+	}
+	row, err := appendIPHistory(ctx, tx, IPHistory{
+		DeviceID:   id,
+		IPv4:       after.CurrentIPv4,
+		IPv6:       after.CurrentIPv6,
+		ObservedAt: now,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("devices.ExpireFamilies: commit: %w", err)
+	}
+	return row.ID, true, nil
 }

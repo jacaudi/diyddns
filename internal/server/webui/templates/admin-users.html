@@ -1,5 +1,5 @@
 {{define "content"}}
-<div class="grid cols-3" style="margin-bottom:var(--space-5)">
+<div class="grid cols-3 stats">
   <div class="card stat"><div class="label">Users</div><div class="value">{{.UserCount}}</div></div>
   <div class="card stat"><div class="label">Devices</div><div class="value">{{.DeviceCount}}</div></div>
   <div class="card stat"><div class="label">Disabled</div><div class="value">{{.DisabledCount}}</div></div>
@@ -25,7 +25,7 @@
           <td data-label="State">{{if .Disabled}}<span class="tag danger">Disabled</span>{{else}}<span class="tag ok">Active</span>{{end}}</td>
           <td data-label="Auth"><span class="muted">{{.Auth}}</span></td>
           <td class="actions">
-            <form method="post" action="/admin/users/{{.ID}}/enabled" style="display:inline">
+            <form method="post" action="/admin/users/{{.ID}}/enabled">
               <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
               <input type="hidden" name="disabled" value="{{if .Disabled}}false{{else}}true{{end}}">
               <button class="btn sm" type="submit"

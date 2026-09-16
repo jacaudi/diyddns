@@ -75,7 +75,7 @@ func (h *handler) renderAdminUsers(w http.ResponseWriter, r *http.Request, usr s
 	enabledAdmins := 0
 	var lastAdminID string
 	for _, u := range users {
-		if u.Role == "admin" && !u.Disabled {
+		if u.IsEnabledAdmin() {
 			enabledAdmins++
 			lastAdminID = u.ID
 		}

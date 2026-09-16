@@ -77,7 +77,7 @@ func TestCheckin_IdenticalReport_TouchesLastSeenButNoHistory(t *testing.T) {
 	}
 	// Rewind last_seen_at to a known-old value so the liveness advance is
 	// observable despite NowUnix() second-granularity.
-	if err := st.Devices().Touch(t.Context(), dev.ID, 1000); err != nil {
+	if err := st.Devices().Touch(t.Context(), dev.ID, true, true, 1000); err != nil {
 		t.Fatalf("rewind Touch: %v", err)
 	}
 

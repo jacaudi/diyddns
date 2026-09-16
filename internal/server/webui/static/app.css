@@ -3,7 +3,58 @@
    of this repository. The auth-shell rules
    (.wrap/.card/.field/.input/.btn/.status/.passkey-list/.small) serve
    /login and /register; the app-shell component set below that serves
-   every screen behind a session (topbar, tables, tags, admin chrome). */
+   every screen behind a session (topbar, tables, tags, admin chrome).
+
+   ---------- Component inventory: look here before writing a rule ----------
+   Nearly every fix in this file's history has one shape: a rule existed, it
+   covered one spelling of a pattern, and the other spelling silently missed
+   out. The list below IS the set of spellings. If what you need is here, use
+   it as written. If it is not, add it here first, then build it -- the next
+   author looks things up here instead of inventing a second version.
+
+   .kv            A labelled value list (device details, server info, current
+                  addresses): <dl class="kv"><dt>label</dt><dd>value</dd>.
+                  Two cards side by side must BOTH be .kv -- two layouts for
+                  one shape is the first thing a reader notices.
+   .modal         A destructive action that needs typed confirmation:
+                  <details class="modal"><summary class="btn danger">…</summary>
+                  <div class="modal-panel"><div class="card modal-card">form.
+                  The panel renders as an overlay, works with JS blocked, and
+                  `open` on the <details> shows it on load. NOT an always-open
+                  confirm field beside the button -- that was the second,
+                  uninvited implementation.
+   .copy          A copyable value: {{template "copyValue" .}} in a template.
+                  Inside .kv, .field, .callout or .disclosure it is full width
+                  with Copy pinned to the trailing edge -- every pill on a
+                  screen the same object. In a table cell it stays an inline
+                  pill. Never size one by hand.
+   .btn-row       A form's actions, directly after the last .field; it takes
+                  24px from that field (.field + .btn-row). A lone .btn after
+                  a .field takes 16px. Never pad the field to make the gap.
+   .empty         Nothing to list yet: icon / h3 / p inside a .card. If the
+                  page's create form belongs there too, put it INSIDE .empty
+                  -- :has(form) tightens the block padding for it.
+   .btn.ghost     The quiet action beside a primary (Cancel). Quiet, but it
+                  has an edge; not a bare link, not a borderless button.
+   .filterbar     A list's filters: one .field per control, the submit
+                  button in the LAST .field. That field grows to absorb the
+                  bar's leftover width so the button centres on every bar,
+                  whether or not another field carries .grow.
+   .measure-N     A card narrower than the page: .card.measure-1 (560, a
+                  form) or .card.measure-2 (680, a reading card). From the
+                  --measure-N scale; never style="max-width".
+   .grid.stats    A strip of .card.stat tiles above the rest of a page; .stats
+                  carries the 24px below the strip.
+   td.actions     A <form> around one button in a table's action cell needs
+                  no styling -- it is inline by rule, beside its siblings.
+   .stack-lg      A .card-body holding several independent blocks: 24px
+                  between blocks, so the 16px inside a block still reads as
+                  "same group".
+
+   The rules that keep this honest run in CI: `task repo:html` fails on any
+   style= attribute in a template, and `task repo:css` fails on a px value in
+   a margin, padding, gap or font-size declaration that is not one of the
+   scale tokens declared in :root below. */
 
 :root {
   --bg: #f6f7f9;
@@ -68,6 +119,28 @@
   --type-5: 19px;
   --type-6: 22px;
   --type-7: 26px;
+
+  /* Content-width scale: the only source of max-width for a block of page
+     content in this file, applied through the .measure-N classes in the
+     utilities section -- never inline. Same shape as the two scales above:
+     numeric steps, no semantic alias layer.
+
+     Before this existed the templates carried max-width:560px, 640px and
+     680px in style attributes, which no rule in this file could see, so
+     three pages chose three widths for what is two kinds of card. Two steps,
+     not three: 560 is a FORM -- one column of inputs and a button row, where
+     a wider box only stretches the inputs past a comfortable length. 680 is
+     a READING card -- prose, callouts and copy pills, which want the room so
+     a docker command sits on fewer lines. 640 (the enrollment-code page) and
+     680 (the invite-link and recovery-link pages) were the same kind of card
+     at two widths that only a ruler tells apart, so 640 lands on 680.
+
+     The shell widths stay where they are declared: .wrap (420, the auth
+     card), .modal-card (440, the overlay) and .main (1080, the app shell)
+     size a shell around content rather than the content itself, and none of
+     them is a choice a template makes. */
+  --measure-1: 560px;
+  --measure-2: 680px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -155,14 +228,27 @@ a:hover { text-decoration: underline; }
   margin-bottom: var(--space-4);
 }
 .card-head { margin-bottom: var(--space-3); }
-.card h1 { font-size: var(--type-5); margin: 0 0 var(--space-2); }
-.card h2 { font-size: var(--type-4); margin: 0 0 var(--space-3); }
+/* Heading size and the gap under it move together: a bigger heading needs more
+   room beneath it, not less. These were inverted -- h1 (19px) took 8px while
+   the smaller h2 (16px) took 12px -- which is why /login's "Sign in" sat almost
+   on top of its own button. */
+.card h1 { font-size: var(--type-5); margin: 0 0 var(--space-4); }
+/* --type-5. A card's h2 is the title of a whole section -- "Passkeys",
+   "Current addresses", "Danger zone" -- and at 16px it was the same size as
+   the body text beneath it, distinguished only by weight. It takes 16px
+   beneath it to match, per the size/gap pairing on .card h1 above. No template
+   has a .card h1 and a .card h2 as siblings (the auth shell uses h1, the app
+   shell uses h2), so the two do not collide at the same size. */
+.card h2 { font-size: var(--type-5); margin: 0 0 var(--space-4); }
 
 .muted { color: var(--text-muted); font-size: var(--type-2); }
 .center { text-align: center; }
 
 .field { margin-bottom: var(--space-4); }
-.field label { display: block; font-size: var(--type-2); font-weight: 600; margin-bottom: var(--space-2); }
+/* --type-3, with .hint and .callout. A field label names the thing you are
+   about to type into; at 13px it was smaller than the value it labels. The
+   filter bar keeps its own 12px uppercase label treatment below. */
+.field label { display: block; font-size: var(--type-3); font-weight: 600; margin-bottom: var(--space-2); }
 /* A field's own margin-bottom above (--space-4, the normal field-to-field
    gap) is the wrong gap above a submit button — it makes a primary action
    read as just another field (Task 5 review round 3; the maintainer
@@ -201,6 +287,13 @@ a:hover { text-decoration: underline; }
    a WebAuthn-capable browser. */
 .field:has(+ .btn) { margin-bottom: 0; }
 .field + .btn { margin-top: var(--space-4); }
+/* The same relationship when the actions are a .btn-row rather than a lone
+   .btn -- 14 call sites across 8 templates, which the rule above never covered,
+   so whether a form's actions got deliberate spacing depended on which markup
+   the template happened to use. 24px, matching .modal-card .btn-row: an action
+   bar is separated from the form, not spaced like one more field. */
+.field:has(+ .btn-row) { margin-bottom: 0; }
+.field + .btn-row { margin-top: var(--space-5); }
 
 .input {
   width: 100%;
@@ -246,16 +339,29 @@ a:hover { text-decoration: underline; }
 .status { font-size: var(--type-2); min-height: 1.2em; margin: var(--space-4) 0 0; }
 .status-error { color: var(--danger); }
 
-.passkey-list { list-style: none; margin: 0 0 var(--space-4); padding: 0; }
+/* The list is a set of existing things; adding one is a separate act and lives
+   in its own card on /account, so this list needs no trailing separator and no
+   bottom margin -- the card's own padding is the boundary. */
+.passkey-list { list-style: none; margin: 0; padding: 0; }
+/* Each enrolled passkey is a RECORD, drawn on its own surface. Separated only
+   by a hairline rule on the card's own background it read as a line of text
+   that had sunk into the card -- and with a single passkey the :last-child rule
+   removed even that, leaving nothing to say an entry was there at all. Same
+   surface/border/radius treatment the copy pill uses, so a thing you own looks
+   like a thing you own throughout the UI. */
 .passkey-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
-.passkey-list li:last-child { border-bottom: none; }
+.passkey-list li + li { margin-top: var(--space-3); }
+/* The name, which passkey.js renders as the row's first span. */
+.passkey-list li > span:first-child { font-weight: 600; }
 .passkey-list .actions { display: flex; gap: var(--space-2); }
 /* The row's buttons carry .btn.sm — there is no ".passkey-list button" rule,
    deliberately. It used to hand-roll its own smaller font and padding, which
@@ -336,7 +442,11 @@ a:hover { text-decoration: underline; }
 /* ---------- Page header ---------- */
 
 .page-head {
-  display: flex; align-items: flex-start; justify-content: space-between;
+  /* center, not flex-start: the action on the right is a single button and the
+     block on the left is a heading plus its subtitle, so aligning their tops
+     hung the button off the heading's cap line with the subtitle unbalanced
+     beneath it. Centred, the button sits against the whole block. */
+  display: flex; align-items: center; justify-content: space-between;
   gap: var(--space-4); margin-bottom: var(--space-5); flex-wrap: wrap;
 }
 .page-head h1 { margin: 0 0 var(--space-1); font-size: var(--type-6); letter-spacing: -.2px; }
@@ -356,10 +466,21 @@ a:hover { text-decoration: underline; }
    shrink below the widest unbreakable thing in it. A card holding a nowrap
    .copy pill then pins its column open and the document scrolls sideways. */
 .grid { display: grid; gap: var(--space-4); }
+/* Default stretch is deliberate: a pair of cards side by side reads as one
+   unit, so they share a bottom edge. This was briefly align-items: start, back
+   when "Current addresses" was a hand-rolled list two short lines tall and the
+   empty two thirds looked like a fault; now that it is the same dl.kv as the
+   card beside it the heights are close, and matching edges beat ragged ones. */
 .grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
+/* A strip of stat tiles is a band of its own above the rest of the page, so
+   it keeps the same 24px below it that .page-head keeps. This used to be an
+   inline margin-bottom on the two grids that carry tiles (/admin/users and
+   /admin/server); the third grid in the app (device-detail's two .kv cards)
+   is not a strip and gets nothing extra. */
+.grid.stats { margin-bottom: var(--space-5); }
 .stat { padding: var(--space-4); }
 .stat .label { color: var(--text-muted); font-size: var(--type-2); text-transform: uppercase; letter-spacing: .4px; }
 .stat .value { font-size: var(--type-7); font-weight: 700; margin-top: var(--space-1); letter-spacing: -.5px; }
@@ -381,6 +502,12 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 .grid-table .primary-cell { font-weight: 600; color: var(--text); }
 .grid-table .muted { color: var(--text-muted); }
 .grid-table td.actions { text-align: right; white-space: nowrap; }
+/* A POST needs a <form>, and a form is a block by default -- so a Disable
+   button wrapped in one dropped onto its own line beneath the Edit link next
+   to it. Two templates fixed that with style="display:inline" on the form and
+   a third did not, which is exactly one rule covering some spellings of a
+   pattern and not others. Inline here, for every form in an action cell. */
+.grid-table td.actions form { display: inline; }
 
 /* ---------- Tags / badges ---------- */
 
@@ -403,8 +530,14 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 .btn.danger { background: var(--surface); border-color: var(--danger); color: var(--danger); }
 .btn.danger:hover { background: var(--danger-soft); }
 .btn.solid-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
-.btn.ghost:hover { background: var(--neutral-soft); }
+/* A ghost button is the QUIET option, not an invisible one. With a transparent
+   border AND a transparent background it had no boundary at all at rest, so
+   "Cancel" beside a solid primary read as a stray line of text rather than the
+   other half of a pair of actions. It keeps the muted label and flat
+   background -- the hierarchy against .primary is intact -- but it now has an
+   edge, so it is identifiable as a control before you hover it. */
+.btn.ghost { border-color: var(--border); background: transparent; color: var(--text-muted); }
+.btn.ghost:hover { background: var(--neutral-soft); border-color: var(--border-strong); color: var(--text); }
 /* A compact button is still a touch target. The floor is a min-height rather
    than more padding because the same padding produces two different heights
    depending on the element: measured at 390px, .btn.sm was 24px as a <button>
@@ -421,11 +554,27 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 /* ---------- Forms: filter bar, field hint ----------
    The base .field/.input rules stay as they are above. */
 
+/* --type-3, not --type-2. These hints are not incidental captions: on the
+   enrollment page they carry the Docker Desktop vs Linux --add-host
+   instruction and the :latest pinning caveat, which are prose an operator has
+   to read and act on. At 13px, muted, they sat below the commands they
+   explain and read as fine print to skip. 14px is the body size the rest of
+   the app uses for running text. */
 .field .hint,
-.disclosure .hint { color: var(--text-muted); font-size: var(--type-2); margin-top: var(--space-2); }
+.disclosure .hint { color: var(--text-muted); font-size: var(--type-3); margin-top: var(--space-2); }
 /* Two captions in a row means a new group started; give it the same 16px the
    page uses between blocks, so the steps read as separate. */
 .field .hint + .hint { margin-top: var(--space-4); }
+/* A step heading is a BOUNDARY, not one more remark. Left to the rule above it
+   inherits the 16px that separates any two consecutive hints, so "Step 2." sat
+   exactly as far from the line above it as that line sat from its own
+   predecessor, and a multi-step instruction read as one flat column of grey
+   text. 24px above it, and full-strength colour rather than muted, so the eye
+   finds the steps before it reads the prose between them. */
+.field .hint.step { margin-top: var(--space-5); color: var(--text); }
+/* The first step needs no boundary above it -- the field's own label is the
+   boundary, and a 24px gap there would just detach the label from its group. */
+.field > .hint.step:first-of-type { margin-top: var(--space-3); }
 
 .filterbar {
   display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end;
@@ -433,11 +582,45 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 }
 .filterbar .field { margin: 0; min-width: 150px; }
 .filterbar .field label { font-size: var(--type-1); text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
+/* Exactly one field per filter bar carries .grow: it absorbs the bar's
+   leftover width so the submit field lands against the trailing edge. A bar
+   with no .grow field leaves that slack after the button instead. */
 .filterbar .grow { flex: 1; }
+/* The submit control is a button wrapped in a .field, so it inherits the 150px
+   minimum that exists to stop a <select> collapsing. The button is about 66px
+   wide, so it sat hard against the left of an oversized box and the remainder
+   read as a ragged gap before the bar's right edge. Centre it in the space its
+   field reserves rather than special-casing the width. */
+/* Every control in the bar is one box height. A <select class="input"> and an
+   <input class="input"> do NOT agree on height by themselves: with identical
+   padding, border and font-size the select measured 36px against the input's
+   34px, because a select sizes from its own internal button box -- setting
+   line-height does not touch it (measured: no change). With the bar aligned to
+   flex-end the extra 2px pushed the select's midpoint 1px above the Apply
+   button beside it. The height below is the scale arithmetic the input already
+   resolves to -- 8px padding twice, a 16px line, and the 1px border twice,
+   which the spacing scale's own comment exempts as a border width. */
+.filterbar .input { height: calc(var(--space-2) * 2 + var(--type-4) + 2px); }
+/* Pin the submit field to the bar's trailing edge; the button centres inside
+   it. This depends on EVERY filter bar having exactly one .grow field to
+   absorb the leftover width -- see .filterbar .grow above. /admin/audit had
+   none, which stranded its button 137px from the last input and 55px from the
+   bar's edge; the fix was to give that bar a .grow field, not to grow this one.
+   Growing THIS field instead makes it compete with .grow for the slack, which
+   collapses the search/owner box to half its width. */
+.filterbar .field:last-child { display: flex; flex-direction: column; margin-left: auto; }
+.filterbar .field:last-child .btn { margin: 0 auto; }
 
 /* ---------- Descriptions (key/value) ---------- */
 
-.kv { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); }
+/* column-gap is load-bearing, not decoration. The label track is max-content,
+   so it sizes to the LONGEST label in the list and every shorter label gets
+   slack inside its own track -- which makes the list look correctly spaced
+   right up until one label is the longest, at which point it butts straight
+   against its value with zero separation ("Device staleness threshold15m0s"
+   on /admin/server). The gap is what guarantees separation for the one row
+   that gets no slack. */
+.kv { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); column-gap: var(--space-5); }
 .kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: var(--type-2); }
 /* Values here are operator-configured — a database path, a listen address, a
    base URL, a build string — so they are unbounded in length and often carry
@@ -478,13 +661,44 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    has the same footprint and overflows the same way. One definition for both
    contexts. The inline-flex base above still applies where a pill sits inside
    running content (a <dd>, a table cell), which full width would break. */
+/* .kv IS in this list. It was briefly removed: a full-width pill in a .kv value
+   looked wrong, but the cause was the Copy button sitting wherever the text
+   happened to end -- marooned mid-box on a short value -- not the width. With
+   the button pinned to the trailing edge below, a full-width pill is what makes
+   every copy control in the app the same object: same height, same padding,
+   same button position, filling whatever column it is given. Content-sizing
+   them instead makes two pills on one screen different widths, which is what a
+   reader notices. */
 .kv .copy,
 .field .copy,
 .callout .copy,
-.disclosure .copy { display: flex; width: 100%; }
+.disclosure .copy {
+  display: flex; width: 100%;
+  /* Roomier than the inline pill. These carry multi-line docker commands that
+     a reader has to parse character by character; the base 4px/8px left the
+     text almost touching the border. The extra left padding keeps the command
+     clear of the border while the button sits against the right edge. */
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  gap: var(--space-4);
+}
+/* Copy pins to the trailing edge. Without this the button simply follows the
+   end of the command, so a SHORT command parks it mid-box and a LONG one
+   pushes it to the right edge -- the same control landing in two different
+   places on one page, which is what made the callout's pills and the field's
+   pills look like different components. */
+.kv .copy button,
+.field .copy button,
+.callout .copy button,
+.disclosure .copy button { margin-left: auto; }
+/* 12px, not 8px. A command block is a distinct object from the sentence that
+   introduces it and from the command stacked above it; at 8px the pills ran
+   together with their captions into one dense column. */
 .callout .copy,
 .disclosure .copy,
-.field .hint + .copy { margin-top: var(--space-2); }
+.field .hint + .copy { margin-top: var(--space-3); }
+/* And below it, so a caption explaining a command is not glued to the box. */
+.field .copy + .hint,
+.callout .copy + p { margin-top: var(--space-3); }
 
 /* ---------- Disclosure ---------- */
 
@@ -492,10 +706,13 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    <details>, so it needs no JavaScript and stays copyable and greppable while
    collapsed. */
 .disclosure { margin-bottom: var(--space-4); }
-/* Shared by every <details>-based control. The marker is suppressed because
-   these summaries are styled as buttons or quiet headings, where a stray
-   triangle reads as a rendering fault; user-select stops a click from
-   highlighting the label. */
+/* Shared by every <details>-based control. The NATIVE marker is suppressed
+   because it cannot be positioned or animated consistently across engines;
+   user-select stops a click from highlighting the label. .modal's summary
+   carries .btn and stays bare -- a triangle on a button reads as a rendering
+   fault -- but .disclosure draws its own marker below, because suppressing
+   the native one and replacing it with nothing left the summary looking like
+   inert text with no sign it opens. */
 .disclosure > summary,
 .modal > summary { cursor: pointer; user-select: none; list-style: none; }
 .disclosure > summary::-webkit-details-marker,
@@ -508,12 +725,29 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   color: var(--text-muted); padding: var(--space-1) 0;
 }
 .disclosure > summary:hover { color: var(--accent); }
+/* The affordance. inline-block so the glyph can rotate; the open state turns
+   it a quarter turn, which is the convention readers already know from every
+   other disclosure. flex would collapse the summary's inline layout, so this
+   stays an inline marker. */
+.disclosure > summary::before {
+  content: "\25B8"; display: inline-block; width: 1em;
+  color: var(--text-muted); transition: transform 120ms ease;
+}
+.disclosure[open] > summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .disclosure > summary::before { transition: none; }
+}
 
 /* ---------- Callouts / banners ---------- */
 
 .callout {
   border: 1px solid var(--border); border-left-width: 3px;
-  border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); font-size: var(--type-2);
+  /* --type-3, matching .hint and .danger-item's description. A callout is the
+     box the UI uses when it has something the reader must not miss -- the
+     one-time code warning, the enroll-failure recovery steps, the next step to
+     take -- so it is the last place that should render a size smaller than the
+     app's running text. */
+  border-radius: var(--radius-sm); padding: var(--space-4); font-size: var(--type-3);
   background: var(--surface-2);
   /* Same rhythm as .field, so a callout between two blocks is separated from
      both. Without this a callout carries no vertical margin at all and the
@@ -541,13 +775,25 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    row's description happened to be, so two rows carrying the identical confirm
    field landed at different widths and no two buttons shared an edge. */
 .danger-item {
-  display: grid; grid-template-columns: minmax(0, 1fr) 200px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 240px;
   align-items: start; column-gap: var(--space-5);
-  padding: var(--space-4); border-bottom: 1px solid var(--border);
+  padding: var(--space-5); border-bottom: 1px solid var(--border);
+  row-gap: var(--space-3);
 }
 .danger-item:last-child { border-bottom: none; }
-.danger-item .meta strong { display: block; }
-.danger-item .meta span { color: var(--text-muted); font-size: var(--type-2); }
+/* DIRECT child only. As a descendant selector this also caught the <strong>
+   that emphasises the first clause of the description -- "This revokes every
+   passkey on the account immediately" -- turning an inline emphasis into a
+   block and stranding the rest of its own sentence on the next line, starting
+   with a bare comma. The title is the only strong that is a block. */
+.danger-item .meta > strong { display: block; }
+/* --type-3: this is the text that explains an irreversible action. It was a
+   13px muted caption under a bold heading, which is the styling the eye skips.
+   14px is the app's running-text size. */
+.danger-item .meta span { color: var(--text-muted); font-size: var(--type-3); }
+/* Room for the confirm label and the "you cannot do this" notices to sit on
+   one line at the common widths; the fixed column is what keeps the buttons
+   edge-aligned, so it widens rather than becoming content-sized. */
 /* Every action fills the column, so the buttons align regardless of label.
    Scoped to the column itself — inside a modal card the buttons sit on one
    row at their natural width. */
@@ -576,11 +822,24 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   width: min(440px, 100%); max-height: calc(100vh - var(--space-7));
   overflow: auto; margin-bottom: 0; text-align: left;
 }
-.modal-card p { margin: 0 0 var(--space-4); }
+/* One rhythm for every modal, so they stop each inheriting a different mix of
+   .card h2, .modal-card p and .field defaults. A modal is always the same three
+   parts: a title and its explanation (a PAIR, so 8px), the form (a new section,
+   so 24px), and the actions (24px). Previously the title sat 12px from its own
+   description but the description sat 16px from the form, which bound the
+   heading loosely to its explanation and read as three detached fragments. */
+.modal-card h2 { margin: 0 0 var(--space-2); }
+.modal-card p { margin: 0 0 var(--space-5); }
+.modal-card form .field { margin-bottom: 0; }
+.modal-card .btn-row { margin-top: var(--space-5); }
 
 /* ---------- Empty state ---------- */
 
 .empty { text-align: center; padding: var(--space-7) var(--space-5); }
+/* An empty state that carries a FORM is not mostly whitespace -- it is a page
+   with work to do on it. 48px above and below framed the icon-and-sentence
+   version well and left the form marooned in a tall box. */
+.empty:has(form) { padding-block: var(--space-5); }
 .empty .icon { font-size: 40px; opacity: .5; }
 /* Every <h3> in the UI is an empty state's heading. Without a size here it
    took the UA's 1.17em against a 14px parent and rendered at 16.38px — a
@@ -592,7 +851,10 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    labels and hints centre over left-aligned inputs and a left-flushed
    button. Only the form's own text goes back to normal reading order; the
    icon/heading/lead stay centred. */
-.empty form { text-align: left; }
+/* An empty state's form is a separate act from the copy that introduces it --
+   the copy is centred and the form is not -- so it needs more than the 16px
+   that follows the description paragraph. */
+.empty form { text-align: left; margin-top: var(--space-5); }
 
 /* ---------- Pagination ---------- */
 
@@ -605,7 +867,31 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 /* ---------- Utilities ---------- */
 
 .stack-sm > * + * { margin-top: var(--space-3); }
+/* The per-family countdown under an address in a .kv value. Its own line, and
+   clear of the copy pill above it. */
+.kv .expiry { margin-top: var(--space-2); font-size: var(--type-2); }
+/* For a card that stacks several INDEPENDENT blocks -- the enrollment page
+   carries a code field, two container steps, two callouts and a disclosure in
+   one body. Every one of those defaults to 16px below it, which is also what
+   separates the hints INSIDE a single step, so the hierarchy inverts: a step
+   boundary looks exactly like a line break and the page reads as one
+   undifferentiated run. 24px between blocks lets the unchanged 16px inside a
+   field mean "still the same group". Declared after .field and .callout so it
+   wins on source order at equal specificity; direct children only, so nothing
+   nested is touched. */
+.stack-lg > * { margin-bottom: var(--space-5); }
+.stack-lg > *:last-child { margin-bottom: 0; }
+/* A live region that has nothing to say yet still occupied its own line plus
+   margins, which left a band of dead space at the foot of /account's card. It
+   stays in the DOM -- aria-live needs the node present before the text
+   arrives -- it just takes no room until it has content. */
+.status:empty { display: none; }
 .nowrap { white-space: nowrap; }
+/* The content-width scale's classes -- see --measure-N in :root for which
+   step is which. Numeric like .cols-N, so a template reads
+   <div class="card measure-1"> and the meaning lives in one place. */
+.measure-1 { max-width: var(--measure-1); }
+.measure-2 { max-width: var(--measure-2); }
 
 /* ---------- Responsive ---------- */
 
@@ -625,8 +911,21 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   .page-head { flex-direction: column; }
   /* Collapse wide tables into stacked cards */
   .grid-table.responsive thead { display: none; }
+  /* #127 UI review finding F: tr used to be in the width: 100% group below,
+     which — combined with the * { box-sizing: border-box } at the top of this
+     file and the tr's own four-sided margin in the tr rule below — resolved
+     the row to exactly the container's width and then offset it outward by
+     the margin, pushing the right border past the container's edge so the
+     card read as unclosed. display: block still applies to tr (its default
+     is table-row); only width: 100% does not — a display: block element with
+     no declared width is auto, which fills the container MINUS its margins,
+     which is what an inset bordered card needs. Pinned by a real browser
+     measurement in internal/smoke/browser/smoke.mjs (a CSS rule existing
+     proves nothing about whether the rendered box actually closes). */
   .grid-table.responsive, .grid-table.responsive tbody,
-  .grid-table.responsive tr, .grid-table.responsive td { display: block; width: 100%; }
+  .grid-table.responsive tr, .grid-table.responsive td { display: block; }
+  .grid-table.responsive, .grid-table.responsive tbody,
+  .grid-table.responsive td { width: 100%; }
   .grid-table.responsive tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: var(--space-3); }
   .grid-table.responsive td { border: none; padding: var(--space-2) var(--space-4); }
   .grid-table.responsive td::before {

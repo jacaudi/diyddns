@@ -42,6 +42,41 @@ func (s *DeviceService) List(ctx context.Context, userID string) ([]store.Device
 	return devices, nil
 }
 
+// ListWithExpiry returns the user's devices and, per device, the last
+// address each family was RECORDED with -- what the page shows once the
+// staleness sweep has cleared a current_* column.
+//
+// Two statements, the second issued only after the first's cursor is closed:
+// ListByUser's rows.Close() runs (deferred, before ListByUser returns), so
+// LatestAddressPerFamily opens its own cursor only after that one is gone --
+// which is what makes this safe on a pool of exactly one connection.
+func (s *DeviceService) ListWithExpiry(ctx context.Context, userID string) ([]store.Device, map[string]store.LatestAddress, error) {
+	devices, err := s.st.Devices().ListByUser(ctx, userID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.ListWithExpiry: %w", err)
+	}
+	latest, err := latestAddresses(ctx, s.st, devices)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service.ListWithExpiry: %w", err)
+	}
+	return devices, latest, nil
+}
+
+// LatestAddress returns the last-known address of each family for a single
+// owned device -- the fallback the detail page uses when none of its five
+// newest history rows carries a family's address. Returns store.ErrNotFound
+// for a foreign or missing device, exactly as Get does.
+func (s *DeviceService) LatestAddress(ctx context.Context, userID, id string) (store.LatestAddress, error) {
+	if _, err := s.ownedDevice(ctx, userID, id); err != nil {
+		return store.LatestAddress{}, fmt.Errorf("service.LatestAddress: %w", err)
+	}
+	latest, err := s.st.IPHistory().LatestAddressPerFamily(ctx, []string{id})
+	if err != nil {
+		return store.LatestAddress{}, fmt.Errorf("service.LatestAddress: %w", err)
+	}
+	return latest[id], nil
+}
+
 // Get returns the device identified by id, but only if it belongs to userID.
 func (s *DeviceService) Get(ctx context.Context, userID, id string) (store.Device, error) {
 	dev, err := s.ownedDevice(ctx, userID, id)
@@ -175,4 +210,16 @@ func (s *DeviceService) History(ctx context.Context, userID, id, cursor string, 
 		return store.HistoryPage{}, fmt.Errorf("service.History: %w", err)
 	}
 	return page, nil
+}
+
+// latestAddresses collects devices' ids and looks up their last-recorded
+// address per family in one statement. Shared by DeviceService.ListWithExpiry
+// and AdminService.ListAllDevicesWithExpiry so the two list surfaces cannot
+// diverge on how they read it back.
+func latestAddresses(ctx context.Context, st *store.Store, devices []store.Device) (map[string]store.LatestAddress, error) {
+	ids := make([]string, len(devices))
+	for i, d := range devices {
+		ids[i] = d.ID
+	}
+	return st.IPHistory().LatestAddressPerFamily(ctx, ids)
 }

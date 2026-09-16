@@ -41,6 +41,27 @@ func TestDeviceStatus(t *testing.T) {
 	}
 }
 
+// TestStatusTitle: #127 UI review finding D. Status.Title disambiguates the
+// "Stale" badge (staleAfter, a 15-minute liveness check) from the unrelated
+// address-expiry countdown (a 21-day window) without renaming StatusStale.
+// Every other status carries no title.
+func TestStatusTitle(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		status Status
+		want   string
+	}{
+		{StatusOnline, ""},
+		{StatusDisabled, ""},
+		{StatusNeverSeen, ""},
+		{StatusStale, "No check-in for over 15 minutes"},
+	} {
+		if got := tt.status.Title(); got != tt.want {
+			t.Errorf("Status(%q).Title() = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
 func TestRelTime(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 20, 14, 41, 0, 0, time.UTC)
@@ -70,6 +91,27 @@ func TestRelTime(t *testing.T) {
 				t.Errorf("relTime() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// B12: relTime prints a bare DATE past 48 hours (view.go:92-111), so "23 days
+// ago" needs its own formatter. relTime itself must not change -- it is on
+// every page.
+func TestRelDays(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(100*86400, 0)
+	for _, tc := range []struct {
+		unix int64
+		want string
+	}{
+		{0, "never"},
+		{100 * 86400, "today"},
+		{99 * 86400, "1 day ago"},
+		{77 * 86400, "23 days ago"},
+	} {
+		if got := relDays(tc.unix, now); got != tc.want {
+			t.Errorf("relDays(%d) = %q, want %q", tc.unix, got, tc.want)
+		}
 	}
 }
 

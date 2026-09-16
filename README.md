@@ -209,9 +209,14 @@ device, no addresses, `id` always `0`:
 
 `changed` names exactly which address families moved in this event — it is sent as-is, not left
 for you to derive from `current`/`previous`. A device that only ever reports IPv4 keeps carrying
-its last-known IPv6 address in both `current.ipv6` and `previous.ipv6`, unchanged, on every future
-event; the presence of a non-null `current.ipv6` does **not** mean IPv6 just changed. Trust
-`changed`, never field presence, for "what happened."
+its last-known IPv6 address in both `current.ipv6` and `previous.ipv6`, unchanged, **until it goes
+unconfirmed for `feed.expire_after_days`** (see [Feed expiry](#feed-expiry)), at which point IPv6
+is withdrawn: that expiry event carries `previous.ipv6` as the address that was just cleared and
+`current.ipv6` as `null`, with `device.ip_changed` naming `ipv6` in `changed` — the same
+"previous differs from current" shape every other change in this event uses. Only a *subsequent*
+event, after the withdrawal has already happened, carries both `current.ipv6` and `previous.ipv6`
+as `null`. Short of that expiry, the presence of a non-null `current.ipv6` does **not** mean IPv6
+just changed. Trust `changed`, never field presence, for "what happened."
 
 An address family that has never been reported is JSON **`null`**, never `""`. Do not treat the
 two as equivalent: `null` means "this device has no IPv6 (or IPv4) on record," while `""` would
@@ -440,6 +445,36 @@ curl -fsS -H "Authorization: Bearer $TOKEN" https://ddns.example.com/feed/v1/dev
   | jq '{spec:{authorization:{rules:[{action:"Allow",principal:{clientCIDRs:.cidrs}}]}}}' \
   | kubectl patch securitypolicy allow-home --type merge -p "$(cat)"
 ```
+
+### Feed expiry
+
+An address that stops confirming itself is a stale allow-list entry, not a device you meant to
+keep granting access. `feed.expire_after_days` clears an unconfirmed address from the device —
+and therefore from the feed — after it has gone that many days without a check-in asserting it.
+
+| Key | Env var | Notes |
+|---|---|---|
+| `feed.expire_after_days` | `DIYDDNS_FEED_EXPIRE_AFTER_DAYS` | `21` by default; `0` disables the policy; max `36500` |
+
+**`feed.expire_after_days: 0` is the opt-out.** Deliberately on by default (unlike every
+retention key below): a security fix nobody can discover is a fix nobody applies. Set it to `0`
+to keep every enrolled device's address indefinitely, the same posture DIYDDNS had before this
+policy existed.
+
+Each address family (IPv4, IPv6) is tracked on its own clock: a device that keeps reporting IPv4
+but stops asserting IPv6 loses only IPv6 on schedule and keeps IPv4 indefinitely. Before an
+address is cleared, its owner is warned by email at four points along the window (roughly the
+1/3, 2/3, 17/21 and 20/21 marks); every enabled admin receives a digest of each sweep's late-stage
+warnings (the last two rungs) and removals — there is no opt-in or opt-out for admins, and the
+first two rungs are owner-only. **Email notifications require [`email.enabled`](#email-optional-off-by-default)
+— with it off, owners receive no warning before removal,** though the server logs a startup
+warning saying so. A cleared address is not a ban: the device simply re-enters the feed on its
+next successful check-in, with no separate readmission step.
+
+**On first enabling this policy against an existing database, any device already silent longer
+than the window is expired on the very first sweep, with no warnings** — every rung is already in
+the past for it. A deployment carrying long-dead devices will see their addresses cleared and
+their owners emailed within the hour of the next hourly sweep.
 
 ### Retention (optional, off by default)
 

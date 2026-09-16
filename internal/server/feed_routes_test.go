@@ -14,7 +14,7 @@ import (
 func TestFeedRoutes_AbsentUnlessEnabled(t *testing.T) {
 	// Deliberately not t.Parallel(): see TestWebUIPatternsAreReachable.
 	off := routesTestConfig(t)
-	mux, _, _, _, _, _, err := buildMux(off, openTestStore(t), discardLog())
+	mux, _, _, _, _, _, _, err := buildMux(off, openTestStore(t), discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestFeedRoutes_AbsentUnlessEnabled(t *testing.T) {
 
 	on := routesTestConfig(t)
 	on.Feed.Enabled = true
-	mux, _, _, _, _, hub, err := buildMux(on, openTestStore(t), discardLog())
+	mux, _, _, _, _, hub, _, err := buildMux(on, openTestStore(t), discardLog())
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}

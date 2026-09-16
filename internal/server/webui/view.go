@@ -70,6 +70,19 @@ func (s Status) Label() string {
 	}
 }
 
+// Title returns the statusTag partial's tooltip text, or "" for no tooltip.
+// Only StatusStale carries one (#127 UI review finding D): "Stale" (staleAfter,
+// a 15-minute liveness check with no relation to address expiry) can sit right
+// next to the unrelated "expires in N days" countdown (a days-scale window),
+// and the two are easy to conflate at a glance. Derived from staleAfter itself
+// rather than a duplicated "15 minutes" literal, so the two cannot drift.
+func (s Status) Title() string {
+	if s != StatusStale {
+		return ""
+	}
+	return fmt.Sprintf("No check-in for over %d minutes", int(staleAfter.Minutes()))
+}
+
 // CSSClass returns the mock.css tag modifier for a status.
 func (s Status) CSSClass() string {
 	switch s {
@@ -107,6 +120,29 @@ func relTime(unix int64, now time.Time) string {
 		return "Yesterday"
 	default:
 		return time.Unix(unix, 0).UTC().Format("2006-01-02")
+	}
+}
+
+// secondsPerDay converts a day count to seconds for relDays' arithmetic.
+const secondsPerDay = 86400
+
+// relDays renders a coarse age for the staleness surfaces -- "23 days ago" --
+// where relTime would print a bare date, which reads as a fact rather than as
+// an age. Kept separate precisely so relTime's output does not move. A zero
+// timestamp means "never recorded"; today or a future timestamp (clock skew)
+// both read as "today" rather than a negative age.
+func relDays(unix int64, now time.Time) string {
+	if unix == 0 {
+		return "never"
+	}
+	days := int(now.Unix()-unix) / secondsPerDay
+	switch {
+	case days <= 0:
+		return "today"
+	case days == 1:
+		return "1 day ago"
+	default:
+		return fmt.Sprintf("%d days ago", days)
 	}
 }
 

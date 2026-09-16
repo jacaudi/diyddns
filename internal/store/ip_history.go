@@ -261,3 +261,82 @@ func (r *IPHistoryRepo) Prune(ctx context.Context, deviceID string, olderThan in
 	}
 	return int(n), nil
 }
+
+// LatestAddress is the most recent RECORDED value of each family for one
+// device, with the instant it was recorded.
+type LatestAddress struct {
+	IPv4   string
+	IPv4At int64
+	IPv6   string
+	IPv6At int64
+}
+
+// latestAddressPerFamilyQuery builds LatestAddressPerFamily's SQL text for n
+// device ids. Split out from the call site so the placeholder substitution
+// -- n copies of "?", never caller-supplied text -- isn't string
+// concatenation gosec has to reason about at the query call itself.
+func latestAddressPerFamilyQuery(n int) string {
+	ph := placeholders(n)
+	return `
+SELECT device_id, 4 AS family, ipv4 AS addr, observed_at FROM (
+    SELECT device_id, ipv4, observed_at,
+           ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY observed_at DESC, id DESC) AS rn
+      FROM ip_history WHERE ipv4 IS NOT NULL AND device_id IN (` + ph + `)
+) WHERE rn = 1
+UNION ALL
+SELECT device_id, 6 AS family, ipv6 AS addr, observed_at FROM (
+    SELECT device_id, ipv6, observed_at,
+           ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY observed_at DESC, id DESC) AS rn
+      FROM ip_history WHERE ipv6 IS NOT NULL AND device_id IN (` + ph + `)
+) WHERE rn = 1`
+}
+
+// LatestAddressPerFamily returns, for each listed device, the newest
+// ip_history row in which each family actually CARRIES an address.
+//
+// The IS NOT NULL filter is the whole point. The staleness sweep appends a row
+// recording the state AFTER clearing, so that row -- the newest one -- has the
+// expired family NULL. An unfiltered "latest row per device" query therefore
+// returns no address for exactly the devices that just expired, which is the
+// case this exists to serve.
+//
+// ONE statement for the whole page: a per-row read would be N+1 against a pool
+// of exactly one connection. The caller must have materialised its device slice
+// first -- this opens a cursor, and a cursor open across another read is the
+// deadlock this codebase guards against everywhere.
+func (r *IPHistoryRepo) LatestAddressPerFamily(ctx context.Context, deviceIDs []string) (map[string]LatestAddress, error) {
+	out := make(map[string]LatestAddress, len(deviceIDs))
+	if len(deviceIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(deviceIDs)*2)
+	for range 2 { // the query names the id list twice, once per family
+		for _, id := range deviceIDs {
+			args = append(args, id)
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, latestAddressPerFamilyQuery(len(deviceIDs)), args...)
+	if err != nil {
+		return nil, fmt.Errorf("ip_history.LatestAddressPerFamily: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, addr string
+		var family int
+		var at int64
+		if err := rows.Scan(&id, &family, &addr, &at); err != nil {
+			return nil, fmt.Errorf("ip_history.LatestAddressPerFamily: scan: %w", err)
+		}
+		e := out[id]
+		if family == 6 {
+			e.IPv6, e.IPv6At = addr, at
+		} else {
+			e.IPv4, e.IPv4At = addr, at
+		}
+		out[id] = e
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ip_history.LatestAddressPerFamily: %w", err)
+	}
+	return out, nil
+}

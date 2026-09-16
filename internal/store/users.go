@@ -19,6 +19,16 @@ type User struct {
 	UpdatedAt    int64
 }
 
+// IsEnabledAdmin reports whether u is an admin who can currently act as one --
+// role "admin" and not disabled. The single source of a predicate that used
+// to be copy-pasted at four production sites (buildSweeper's admin-digest
+// filter in internal/server/server.go, GrantService.
+// notifyAdminsOfSelfServiceRecovery, AdminService.enabledAdminCount, and the
+// admin users page's LastAdmin derivation in internal/server/webui): each one
+// independently re-typed `Role == "admin" && !Disabled`, and a fifth copy
+// would have been the wrong response to that.
+func (u User) IsEnabledAdmin() bool { return u.Role == "admin" && !u.Disabled }
+
 // UserRepo provides persistence operations for User records.
 type UserRepo struct{ db *sql.DB }
 

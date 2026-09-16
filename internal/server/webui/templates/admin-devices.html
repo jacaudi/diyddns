@@ -1,6 +1,6 @@
 {{define "content"}}
 <div class="page-head">
-  <div><h1>All devices</h1><p class="sub">{{.Summary}}</p></div>
+  <div><h1>All Devices</h1><p class="sub">{{.Summary}}</p></div>
 </div>
 
 {{if eq .Total 0}}
@@ -31,7 +31,7 @@
   <div class="table-wrap">
     <table class="grid-table responsive">
       <thead><tr>
-        <th>Device</th><th>Owner</th><th>Status</th><th>Current IPv4</th><th>Current IPv6</th><th>Last seen</th>
+        <th>Device</th><th>Owner</th><th>Status</th><th>IPv4</th><th>IPv6</th><th>Last seen</th>
       </tr></thead>
       <tbody>
         {{range .Devices}}
@@ -39,8 +39,8 @@
           <td data-label="Device">{{if .Owned}}<a class="primary-cell" href="/devices/{{.ID}}">{{.Label}}</a>{{else}}<span class="primary-cell">{{.Label}}</span>{{end}}</td>
           <td data-label="Owner"><a href="/admin/users/{{.OwnerID}}">{{.OwnerEmail}}</a></td>
           <td data-label="Status">{{template "statusTag" .Status}}</td>
-          <td data-label="IPv4">{{template "codeOrDash" .IPv4}}</td>
-          <td data-label="IPv6">{{template "mutedCodeOrDash" .IPv6}}</td>
+          <td data-label="IPv4">{{template "v4AddressCell" .}}</td>
+          <td data-label="IPv6">{{template "v6AddressCell" .}}</td>
           <td data-label="Last seen" class="muted nowrap" title="{{.LastSeenAbs}}">{{.LastSeenAt}}</td>
         </tr>
         {{end}}

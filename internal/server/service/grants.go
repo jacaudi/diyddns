@@ -437,7 +437,7 @@ func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u 
 	}
 	adminSubj, adminBody := email.AdminNotifyBody(u.Email)
 	for _, a := range admins {
-		if a.Role != "admin" || a.Disabled {
+		if !a.IsEnabledAdmin() {
 			continue
 		}
 		if err := s.mailer.Send(ctx, a.Email, adminSubj, adminBody); err != nil {

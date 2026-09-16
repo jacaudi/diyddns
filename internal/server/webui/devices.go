@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/stale"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
 )
@@ -27,13 +28,38 @@ type deviceRow struct {
 	IPv6        string
 	LastSeenAt  string // relative, e.g. "42s ago"
 	LastSeenAbs string // absolute UTC, for the title attribute
+
+	// IPv4Expired and IPv6Expired are true when the family's address above is
+	// a LAST-KNOWN value read back from ip_history, not the device's current
+	// one -- the sweep has cleared it (design #10: clearing an address must
+	// not erase where it can still be found). IPv4At/IPv6At carry that
+	// value's age and are set only alongside the matching Expired flag.
+	IPv4Expired bool
+	IPv6Expired bool
+	IPv4At      string
+	IPv6At      string
+
+	// ShowExpiry gates the countdown below. It is false whenever the
+	// staleness policy is opted out (config.FeedSection.ExpiryEnabled()) --
+	// at expire_after_days: 0, the default install, stale.Window is 0 and an
+	// ungated countdown would read "expires in 0 days" on every row that has
+	// ever been confirmed (a never-confirmed family renders "" instead --
+	// see expiresInText's confirmedAt == 0 guard; the remaining <= 0 clamp
+	// rules out a literal negative number for the rest). A countdown to zero
+	// on a policy that is supposedly off is still wrong -- the column must
+	// be absent.
+	ShowExpiry  bool
+	V4ExpiresIn string // e.g. "7 days"; empty when the family has never been confirmed
+	V6ExpiresIn string
 }
 
-// newDeviceRow derives the rendered form of a device: its status and the two
-// last-seen renderings. Shared by the user-scoped list and the admin list so the
-// derivation cannot drift between the two screens.
-func newDeviceRow(d store.Device, now time.Time) deviceRow {
-	return deviceRow{
+// newDeviceRow derives the rendered form of a device: its status, the two
+// last-seen renderings, the last-known address for a family the sweep has
+// cleared, and -- when the staleness policy is on -- each family's countdown.
+// Shared by the user-scoped list and the admin list so the derivation cannot
+// drift between the two screens.
+func newDeviceRow(d store.Device, latest store.LatestAddress, feed config.FeedSection, now time.Time) deviceRow {
+	row := deviceRow{
 		ID:          d.ID,
 		Label:       d.Label,
 		Status:      deviceStatus(d, now),
@@ -42,6 +68,80 @@ func newDeviceRow(d store.Device, now time.Time) deviceRow {
 		LastSeenAt:  relTime(d.LastSeenAt, now),
 		LastSeenAbs: absTime(d.LastSeenAt),
 	}
+	if row.IPv4 == "" && latest.IPv4 != "" {
+		row.IPv4, row.IPv4Expired, row.IPv4At = latest.IPv4, true, relDays(latest.IPv4At, now)
+	}
+	if row.IPv6 == "" && latest.IPv6 != "" {
+		row.IPv6, row.IPv6Expired, row.IPv6At = latest.IPv6, true, relDays(latest.IPv6At, now)
+	}
+	row.ShowExpiry, row.V4ExpiresIn, row.V6ExpiresIn = expiryFields(d, feed, now)
+	return row
+}
+
+// expiryFields computes ShowExpiry and each family's countdown text. Shared by
+// the list (newDeviceRow, both the user-scoped and admin screens) and the
+// detail page (newDetailData) so this gate cannot drift between the three --
+// it used to be copied onto the detail page separately, which is exactly the
+// kind of drift this project's fix rounds keep finding.
+//
+// A family whose address the sweep has already cleared must never show a
+// countdown beside its own expiry notice: ExpireFamilies deliberately leaves
+// *ConfirmedAt at its old instant (that column is the optimistic pin the
+// sweep writes against, not a liveness signal), so a countdown computed from
+// it would render "expires in 0 days" forever.
+//
+// Gated on the CURRENT column (d.CurrentIPv4/CurrentIPv6), not on a
+// caller-derived "last known address" flag. On the list, that flag
+// (deviceRow.IPv4Expired/IPv6Expired) is only set when history still has a
+// last-known value to fall back to; a swept family whose ip_history rows have
+// since been pruned (retention: ip_history_days / ip_history_per_device_max)
+// would leave that flag false and let the stale *ConfirmedAt through -- the
+// original defect again, keyed on history availability instead of on the
+// sweep. "Does this family still hold an address" is what the current column
+// means, and it is the one predicate that covers both the has-history and the
+// pruned-history case, on both screens. Resist "simplifying" this back to a
+// last-known-address flag.
+//
+// The two families are independent -- gating on each one's own current
+// column, not on the other's or on the row as a whole -- so a device with a
+// live IPv4 and a swept IPv6 still shows the IPv4 countdown.
+//
+// showExpiry is false, with both countdowns "", entirely when the staleness
+// policy is opted out (config.FeedSection.ExpiryEnabled()).
+func expiryFields(d store.Device, feed config.FeedSection, now time.Time) (showExpiry bool, v4ExpiresIn, v6ExpiresIn string) {
+	if !feed.ExpiryEnabled() {
+		return false, "", ""
+	}
+	window := stale.Window(feed)
+	if d.CurrentIPv4 != "" {
+		v4ExpiresIn = expiresInText(d.V4ConfirmedAt, window, now)
+	}
+	if d.CurrentIPv6 != "" {
+		v6ExpiresIn = expiresInText(d.V6ConfirmedAt, window, now)
+	}
+	return true, v4ExpiresIn, v6ExpiresIn
+}
+
+// expiresInText renders how long until a family's address is due for
+// clearing -- "7 days" -- from the same stale.Window/stale.ExpiresAt the
+// sweep itself uses (design §10 item 3), so the page and the sweep cannot
+// disagree. "" means the family has never been confirmed, so there is
+// nothing to expire.
+//
+// Rounding is stale.HumanDays, the SAME function the owner email renders
+// with -- not a second copy of the day math. The two used to round in
+// opposite directions (this used to ceil; HumanDays floors), so a rung
+// crossed partway through a day told the owner one number by email and a
+// different one here (fix round, item 3).
+func expiresInText(confirmedAt, window int64, now time.Time) string {
+	if confirmedAt == 0 {
+		return ""
+	}
+	remaining := stale.ExpiresAt(confirmedAt, window) - now.Unix()
+	if remaining <= 0 {
+		return "0 days"
+	}
+	return stale.HumanDays(time.Duration(remaining) * time.Second)
 }
 
 // matchesStatus reports whether the row passes a ?status= filter; an empty
@@ -64,7 +164,7 @@ type devicesData struct {
 // store query: List returns all of one user's devices, and at this project's
 // scale (tens of devices) a query would be machinery for nothing.
 func (h *handler) handleDevices(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	devices, err := h.deps.Devices.List(r.Context(), usr.ID)
+	devices, latest, err := h.deps.Devices.ListWithExpiry(r.Context(), usr.ID)
 	if err != nil {
 		h.logAndFail(w, r, usr, "list devices", err)
 		return
@@ -77,7 +177,7 @@ func (h *handler) handleDevices(w http.ResponseWriter, r *http.Request, usr stor
 	rows := make([]deviceRow, 0, len(devices))
 	counts := map[Status]int{}
 	for _, d := range devices {
-		row := newDeviceRow(d, now)
+		row := newDeviceRow(d, latest[d.ID], h.deps.Cfg.Feed, now)
 		counts[row.Status]++
 		if !matchesQuery(d, q) || !row.matchesStatus(status) {
 			continue
@@ -367,6 +467,28 @@ type deviceDetailData struct {
 	Secret         string // base64, rotate reveal only
 	Credentials    string // the credentials.json body to paste
 	BaseURLWarning string // set when server.base_url is unset (see baseURLWarning)
+
+	// IPv4LastKnown/IPv6LastKnown carry a family's last-recorded address when
+	// the sweep has cleared Device.CurrentIPv4/CurrentIPv6 -- "" means the
+	// family is current (or has never reported at all), so the template
+	// falls back to showing the device's own current column. *At is that
+	// value's age, rendered with relDays, and is set only alongside the
+	// matching LastKnown field.
+	IPv4LastKnown   string
+	IPv4LastKnownAt string
+	IPv6LastKnown   string
+	IPv6LastKnownAt string
+
+	// ShowExpiry/V4ExpiresIn/V6ExpiresIn are the detail page's half of #127 UI
+	// review finding B: the list already showed a countdown for a family that
+	// still holds an address, but the detail page showed none at all. Same
+	// gate as newDeviceRow (ShowExpiry off entirely when the policy is opted
+	// out; per-family, keyed on the CURRENT column so a cleared family never
+	// shows a countdown beside its own expiry notice) and the same
+	// expiresInText/stale.HumanDays rounding, not a second copy of it.
+	ShowExpiry  bool
+	V4ExpiresIn string
+	V6ExpiresIn string
 }
 
 // ownedDevice loads a device for the signed-in user, rendering 404 when it does
@@ -394,7 +516,7 @@ func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Sess
 		return deviceDetailData{}, err
 	}
 	now := time.Now()
-	return deviceDetailData{
+	data := deviceDetailData{
 		appData:     h.newAppData(usr, sess, dev.Label, "devices"),
 		Device:      dev,
 		Status:      deviceStatus(dev, now),
@@ -403,7 +525,55 @@ func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Sess
 		CreatedAbs:  absTime(dev.CreatedAt),
 		Owner:       usr.Email,
 		History:     historyRows(page.Rows, now),
-	}, nil
+	}
+
+	needV4 := dev.CurrentIPv4 == ""
+	needV6 := dev.CurrentIPv6 == ""
+	if needV4 {
+		if addr, at, ok := lastKnownFamily(page.Rows, func(h store.IPHistory) string { return h.IPv4 }); ok {
+			data.IPv4LastKnown, data.IPv4LastKnownAt = addr, relDays(at, now)
+			needV4 = false
+		}
+	}
+	if needV6 {
+		if addr, at, ok := lastKnownFamily(page.Rows, func(h store.IPHistory) string { return h.IPv6 }); ok {
+			data.IPv6LastKnown, data.IPv6LastKnownAt = addr, relDays(at, now)
+			needV6 = false
+		}
+	}
+	// The five-row preview didn't carry it -- fall back to the same
+	// per-family read the list pages use, scoped to this one device.
+	if needV4 || needV6 {
+		latest, err := h.deps.Devices.LatestAddress(r.Context(), usr.ID, dev.ID)
+		if err != nil {
+			return deviceDetailData{}, err
+		}
+		if needV4 && latest.IPv4 != "" {
+			data.IPv4LastKnown, data.IPv4LastKnownAt = latest.IPv4, relDays(latest.IPv4At, now)
+		}
+		if needV6 && latest.IPv6 != "" {
+			data.IPv6LastKnown, data.IPv6LastKnownAt = latest.IPv6, relDays(latest.IPv6At, now)
+		}
+	}
+
+	// Gated exactly as the list is -- see expiryFields' doc comment (shared
+	// with newDeviceRow) for why the gate must be the CURRENT column, not
+	// history availability.
+	data.ShowExpiry, data.V4ExpiresIn, data.V6ExpiresIn = expiryFields(dev, h.deps.Cfg.Feed, now)
+	return data, nil
+}
+
+// lastKnownFamily scans rows -- already newest-first from Page/History -- for
+// the newest one whose family (selected by get) carries a value. ok is false
+// when none of the given rows carries one, which tells the caller to fall
+// back to LatestAddressPerFamily instead.
+func lastKnownFamily(rows []store.IPHistory, get func(store.IPHistory) string) (addr string, at int64, ok bool) {
+	for _, row := range rows {
+		if v := get(row); v != "" {
+			return v, row.ObservedAt, true
+		}
+	}
+	return "", 0, false
 }
 
 // handleDeviceDetail renders one device.

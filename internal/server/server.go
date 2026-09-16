@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
@@ -22,6 +23,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/server/middleware"
 	"github.com/jacaudi/diyddns/internal/server/notify"
 	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/server/stale"
 	"github.com/jacaudi/diyddns/internal/server/webui"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -118,6 +120,7 @@ type Server struct {
 	notifier   *notify.Worker // nil when notifications are disabled
 	hub        *feed.Hub      // always non-nil; closes live streams on shutdown
 	retention  config.RetentionSection
+	sweeper    *sweeper // nil unless the #127 policy is on (buildSweeper's gate); nil-guarded by runPruner
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -135,15 +138,19 @@ type Server struct {
 // site per service" comment below) — production callers (handler) discard
 // them.
 //
+// It also returns the #127 staleness sweeper, nil unless cfg.Feed.ExpiryEnabled()
+// (see buildSweeper's gate); handler threads it through to New, which hands it
+// to runPruner.
+//
 // FAILS CLOSED: cfg.Auth.HMAC.SecretKey must decode to a 32-byte AEAD key or
 // buildMux returns an error and builds nothing. A server that can enroll
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, *sweeper, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
-		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: %w", err)
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: %w", err)
 	}
 
 	// A warning, not a fail-closed: the operator may be terminating TLS in
@@ -168,10 +175,10 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// prefixes.
 	allowedPrivateCIDRs, err := notify.ParseAllowed(cfg.Notifications.AllowedPrivateCIDRs)
 	if err != nil {
-		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, err
+		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, err
 	}
 
-	hub, notifier, devNotifier := buildFanout(cfg, st, log)
+	hub, notifier, devNotifier, fan := buildFanout(cfg, st, log)
 
 	// Retention deletes user-visible history irreversibly and is opt-in, so say
 	// at boot that it is on and with what windows. This is the cheapest safety
@@ -200,7 +207,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		dctx, cancel := context.WithTimeout(context.Background(), oidcDiscoverTimeout)
 		defer cancel()
 		if err := oidcMgr.Discover(dctx); err != nil {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
 		}
 	}
 	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
@@ -221,16 +228,18 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	rpID, rpOrigin, rpErr := cfg.Auth.ResolveWebAuthn(cfg.Server.BaseURL)
 	if rpErr != nil {
 		if !cfg.Auth.HideLocalLoginUI {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: %w", rpErr)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: %w", rpErr)
 		}
 	} else {
 		passkeySvc, err = service.NewPasskeyService(st, sessions, key, cfg.Auth.WebAuthn, rpID, rpOrigin, audit, log)
 		if err != nil {
-			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, fmt.Errorf("server: %w", err)
+			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: %w", err)
 		}
 	}
 
 	mailer := email.New(cfg.Email, log)
+	sw := buildSweeper(cfg, st, fan, mailer, log)
+
 	grantSvc := service.NewGrantService(st, passkeySvc, mailer, cfg.Server.BaseURL, audit, log)
 
 	// One construction site per service. api.Build and webui.New receive the
@@ -293,30 +302,97 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 	registerFeed(mux, cfg, st, feedSvc, hub, log)
 
-	return mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, nil
+	return mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, sw, nil
 }
 
-// buildFanout constructs the stream hub and the two notifier seams buildMux
-// hands to the service layer. The hub is ALWAYS constructed (design §5.3):
-// with the feed off no route registers against it and Broadcast finds no
-// subscribers, so nothing downstream needs a nil check. The fan-out is wired
-// when EITHER transport is on; with both off the nop notifiers keep check-in
-// and the admin seams free of side effects.
-func buildFanout(cfg config.Server, st *store.Store, log *slog.Logger) (*feed.Hub, service.Notifier, service.DeviceNotifier) {
+// buildFanout constructs the stream hub and the notifier seams buildMux hands
+// to the service layer, plus the concrete fan-out the staleness sweeper calls
+// directly.
+//
+// The hub is ALWAYS constructed (design §5.3): with the feed off no route
+// registers against it and Broadcast finds no subscribers, so nothing
+// downstream needs a nil check. The fan-out is wired when EITHER transport is
+// on; with both off the nop notifiers keep check-in and the admin seams free
+// of side effects.
+//
+// The concrete value is returned alongside the interfaces because the sweeper
+// lives in this package and needs (*fanout).ExpireAddresses, which no service
+// interface declares -- and should not, since no service calls it. It is nil
+// when neither transport is on, which is also when the sweeper does not run.
+func buildFanout(cfg config.Server, st *store.Store, log *slog.Logger) (*feed.Hub, service.Notifier, service.DeviceNotifier, *fanout) {
 	hub := feed.New()
 	var (
 		notifier    service.Notifier       = service.NopNotifier{}
 		devNotifier service.DeviceNotifier = service.NopDeviceNotifier{}
+		fo          *fanout
 	)
 	if cfg.Notifications.Enabled || cfg.Feed.Enabled {
 		var enqueuer *notify.Enqueuer
 		if cfg.Notifications.Enabled {
 			enqueuer = notify.NewEnqueuer(st, log)
 		}
-		fo := newFanout(st, enqueuer, hub, log)
+		fo = newFanout(st, enqueuer, hub, log)
 		notifier, devNotifier = fo, fo
 	}
-	return hub, notifier, devNotifier
+	return hub, notifier, devNotifier, fo
+}
+
+// buildSweeper constructs the #127 staleness sweeper, gated, and logs its
+// startup posture. Extracted out of buildMux to keep buildMux's own
+// cyclomatic complexity under the gocyclo ceiling.
+//
+// The sweeper is built only when cfg.Feed.ExpiryEnabled() is true. A default
+// install has it false: feed.enabled defaults false, and ExpiryEnabled() is
+// Enabled && ExpireAfterDays > 0. This gate is load-bearing beyond
+// convenience -- stale.FirstRung and stale.DueRung are defined only for a
+// positive window (see newSweeper's own doc comment), so an ungated sweeper
+// would mass-expire every device with an address on its very first tick.
+//
+// The `fan != nil` conjunct is belt-and-braces, not a second independent
+// gate: ExpiryEnabled() implies cfg.Feed.Enabled, which is one of buildFanout's
+// two OR'd conditions for constructing a non-nil fan-out, so fan is already
+// guaranteed non-nil whenever the first conjunct holds. Kept anyway as a
+// defensive check on that invariant, per the plan.
+func buildSweeper(cfg config.Server, st *store.Store, fan *fanout, mailer email.Mailer, log *slog.Logger) *sweeper {
+	var sw *sweeper
+	if cfg.Feed.ExpiryEnabled() && fan != nil {
+		dispatcher := stale.NewDispatcher(
+			stale.NewSMTPChannel(mailer),
+			func(ctx context.Context) ([]store.User, error) {
+				// Same rule as the admin fan-out in
+				// GrantService.notifyAdminsOfSelfServiceRecovery
+				// (internal/server/service/grants.go): enabled admins only.
+				us, err := st.Users().List(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return slices.DeleteFunc(us, func(u store.User) bool {
+					return !u.IsEnabledAdmin()
+				}), nil
+			},
+			log,
+		)
+		sw = newSweeper(st, fan, cfg.Feed, dispatcher, log)
+	}
+
+	// Expiry deletes an address from the allow-list irreversibly on a
+	// schedule the operator may not have noticed is on by default. Say at
+	// boot that it is on and with what window, following the retention
+	// precedent in buildMux.
+	if cfg.Feed.ExpiryEnabled() {
+		log.LogAttrs(context.Background(), slog.LevelWarn,
+			"feed expiry enabled: unconfirmed addresses will be removed from the feed",
+			slog.Int("expire_after_days", cfg.Feed.ExpireAfterDays))
+		if !cfg.Email.Enabled {
+			// A real configuration that silently defeats the warning
+			// guarantee, because noopMailer.Send always returns nil. Warning
+			// and not fatal -- an operator may want expiry and rely on the
+			// device list -- following the InsecureCookieWarning precedent.
+			log.LogAttrs(context.Background(), slog.LevelWarn,
+				"feed expiry is enabled but email is disabled: owners will receive NO warning before removal")
+		}
+	}
+	return sw
 }
 
 // registerFeed mounts the feed route group. The group is absent, not guarded,
@@ -334,14 +410,16 @@ func registerFeed(mux *http.ServeMux, cfg config.Server, st *store.Store, feedAu
 // handler builds the fully-wrapped handler: buildMux's ServeMux inside the
 // RequestID → Trace → AccessLog → Recover middleware chain. It also returns
 // the OIDC manager buildMux constructs, so New/Run can launch its background
-// RetryLoop. inst supplies the tracer and histogram Trace records through --
-// telemetry.Providers is inert (a working no-op) when disabled, so callers
-// pass it unconditionally; NopInstruments{} is for tests and other callers
-// that hold no *telemetry.Providers at all.
-func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, error) {
-	mux, oidcMgr, _, _, allowedPrivateCIDRs, hub, err := buildMux(cfg, st, log)
+// RetryLoop, and the #127 staleness sweeper (nil unless the policy is on),
+// which New stores on Server and hands to runPruner. inst supplies the tracer
+// and histogram Trace records through -- telemetry.Providers is inert (a
+// working no-op) when disabled, so callers pass it unconditionally;
+// NopInstruments{} is for tests and other callers that hold no
+// *telemetry.Providers at all.
+func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, *sweeper, error) {
+	mux, oidcMgr, _, _, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	// This order is load-bearing, not stylistic. AccessLog reads r.Pattern
 	// AFTER next.ServeHTTP returns, and that works only because
@@ -370,15 +448,16 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 		middleware.Trace(inst.Tracer(), inst.RequestDuration()),
 		middleware.AccessLog(log),
 		middleware.Recover(log),
-	), oidcMgr, allowedPrivateCIDRs, hub, nil
+	), oidcMgr, allowedPrivateCIDRs, hub, sw, nil
 }
 
 // Handler builds the fully-wrapped http.Handler (see handler) and returns the
 // stream hub beside it. Exported for black-box testing via httptest: the hub
 // lets a test revoke a token's streams or drive Shutdown, which no HTTP
-// route can. The OIDC manager is only needed by New/Run, so this discards it.
+// route can. The OIDC manager and sweeper are only needed by New/Run, so this
+// discards them.
 func Handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *feed.Hub, error) {
-	h, _, _, hub, err := handler(cfg, st, log, inst)
+	h, _, _, hub, _, err := handler(cfg, st, log, inst)
 	return h, hub, err
 }
 
@@ -391,7 +470,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 	// here rather than re-parsed: commit 74930fa claimed this reuse without
 	// actually doing it (New called notify.ParseAllowed a second time on the
 	// same config value), so this is now the genuine single call.
-	h, mgr, allowedPrivateCIDRs, hub, err := handler(cfg, st, log, inst)
+	h, mgr, allowedPrivateCIDRs, hub, sw, err := handler(cfg, st, log, inst)
 	if err != nil {
 		return nil, err
 	}
@@ -423,6 +502,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 		notifier:  notifier,
 		hub:       hub,
 		retention: cfg.Retention,
+		sweeper:   sw,
 	}, nil
 }
 
@@ -436,7 +516,7 @@ func (s *Server) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-	go runPruner(ctx, s.st, s.retention, s.log)
+	go runPruner(ctx, s.st, s.retention, s.sweeper, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 	if s.notifier != nil {
 		go s.notifier.Run(ctx)

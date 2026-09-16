@@ -31,7 +31,11 @@ var pruneBatchSize = 5000
 // runPruner sweeps expired records every prunerInterval until ctx is
 // cancelled. Started as a goroutine by Server.Run; ctx cancellation is its
 // only shutdown path.
-func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection, log *slog.Logger) {
+//
+// sw is nil when the #127 staleness policy is off (feed disabled, or
+// expire_after_days 0), which is the default install. The nil check is here
+// rather than a no-op implementation because there is exactly one call site.
+func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection, sw *sweeper, log *slog.Logger) {
 	tick := time.Tick(prunerInterval)
 	for {
 		select {
@@ -39,6 +43,11 @@ func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection
 			return
 		case <-tick:
 			prune(ctx, st, ret, log)
+			if sw != nil {
+				if err := sw.Run(ctx, store.NowUnix()); err != nil {
+					log.LogAttrs(ctx, slog.LevelWarn, "staleness sweep failed", slog.Any("error", err))
+				}
+			}
 		}
 	}
 }
