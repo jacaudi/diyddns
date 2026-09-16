@@ -42,10 +42,10 @@
     <div class="card-body stack-sm">
       <div><div class="muted">IPv4</div>
         {{if .IPv4LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv4LastKnown}}, {{.IPv4LastKnownAt}})</span>
-        {{else}}{{template "copyOrDash" .Device.CurrentIPv4}}{{end}}</div>
+        {{else}}{{template "copyOrDash" .Device.CurrentIPv4}}{{if and .ShowExpiry .V4ExpiresIn}}<br><span class="muted">expires in {{.V4ExpiresIn}}</span>{{end}}{{end}}</div>
       <div><div class="muted">IPv6</div>
         {{if .IPv6LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv6LastKnown}}, {{.IPv6LastKnownAt}})</span>
-        {{else}}{{template "copyOrDash" .Device.CurrentIPv6}}{{end}}</div>
+        {{else}}{{template "copyOrDash" .Device.CurrentIPv6}}{{if and .ShowExpiry .V6ExpiresIn}}<br><span class="muted">expires in {{.V6ExpiresIn}}</span>{{end}}{{end}}</div>
     </div>
   </div>
 

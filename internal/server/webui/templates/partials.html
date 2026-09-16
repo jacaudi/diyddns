@@ -1,4 +1,7 @@
-{{define "statusTag"}}<span class="tag {{.CSSClass}}"><span class="dot"></span>{{.Label}}</span>{{end}}
+{{/* Title is "" for every status except Stale (#127 UI review finding D),
+     where it disambiguates the badge from the unrelated address-expiry
+     countdown that can sit right next to it on the same row. */}}
+{{define "statusTag"}}<span class="tag {{.CSSClass}}"{{if .Title}} title="{{.Title}}"{{end}}><span class="dot"></span>{{.Label}}</span>{{end}}
 
 {{define "copyValue"}}<span class="copy"><code>{{.}}</code>
   <button class="btn sm" type="button" data-copy="{{.}}">Copy</button></span>{{end}}

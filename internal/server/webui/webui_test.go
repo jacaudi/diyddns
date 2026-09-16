@@ -3566,6 +3566,110 @@ func TestAdminDevices_ListsEveryOwnersDevices(t *testing.T) {
 	}
 }
 
+// TestAdminDevices_HeaderMatchesTheCells mirrors
+// TestDevicesList_HeaderMatchesTheCells for the admin list: #127 UI review
+// finding A. Both lists share partials.html's v4AddressCell/v6AddressCell, but
+// each has its own <thead>, so each needs its own pin.
+func TestAdminDevices_HeaderMatchesTheCells(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	seedDevice(t, st, admin.ID, "admin-pi")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/devices", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "Current IPv4") || strings.Contains(body, "Current IPv6") {
+		t.Error(`the admin desktop header still says "Current", contradicting the historical address the cell can show`)
+	}
+	for _, want := range []string{"<th>IPv4</th>", "<th>IPv6</th>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+// TestNav_AdminDevicesLabelledDifferentlyFromUserDevices: #127 UI review
+// finding C. /devices and /admin/devices both rendered "Devices" in the nav
+// (app.html:17,21) -- indistinguishable in the collapsed mobile menu. The
+// admin-scoped entry now reads "All devices"; the user-scoped one is
+// untouched.
+func TestNav_AdminDevicesLabelledDifferentlyFromUserDevices(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/account", nil)
+	req.AddCookie(signIn(t, deps, admin))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="/devices">Devices<`) {
+		t.Error(`the user-scoped nav entry no longer reads "Devices"`)
+	}
+	if !strings.Contains(body, `href="/admin/devices">All devices<`) {
+		t.Error(`the admin-scoped nav entry does not read "All devices"`)
+	}
+	if strings.Contains(body, `href="/admin/devices">Devices<`) {
+		t.Error(`the admin nav still duplicates the user-scoped "Devices" label`)
+	}
+}
+
+// TestDevicesList_StaleBadgeDisambiguatesFromTheExpiryCountdown: #127 UI
+// review finding D. "Stale" (staleAfter, 15m of silence) and "expires in N
+// days" (the address-expiry window) measure unrelated things and can sit side
+// by side on one row. The badge now carries a title attribute explaining
+// itself on hover, without renaming StatusStale.
+func TestDevicesList_StaleBadgeDisambiguatesFromTheExpiryCountdown(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "jane@example.com", "user")
+	d := seedDevice(t, st, usr.ID, "silent-pi")
+	touchDevice(t, st, d.ID, store.NowUnix()-int64((20*time.Minute).Seconds()))
+
+	req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Stale") {
+		t.Fatal("the seeded device is not rendering as Stale")
+	}
+	if !strings.Contains(body, `title="No check-in for over 15 minutes"`) {
+		t.Errorf("the Stale badge is missing its disambiguating title:\n%s", body)
+	}
+}
+
+// TestFavicon_NoLongerMissing: #127 UI review finding E. Every page load fired
+// a console 404 for /favicon.ico because neither shell referenced an icon at
+// all. An inline SVG data URI needs no route and no binary asset, so both the
+// auth shell (layout.html) and the app shell (app.html) carry one.
+func TestFavicon_NoLongerMissing(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "jane@example.com", "user")
+
+	authReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	authRec := httptest.NewRecorder()
+	h.ServeHTTP(authRec, authReq)
+	if !strings.Contains(authRec.Body.String(), `<link rel="icon"`) {
+		t.Error("the auth shell (layout.html) has no favicon link")
+	}
+
+	appReq := httptest.NewRequest(http.MethodGet, "/account", nil)
+	appReq.AddCookie(signIn(t, deps, usr))
+	appRec := httptest.NewRecorder()
+	h.ServeHTTP(appRec, appReq)
+	if !strings.Contains(appRec.Body.String(), `<link rel="icon"`) {
+		t.Error("the app shell (app.html) has no favicon link")
+	}
+}
+
 func TestAdminDevices_FiltersByOwner(t *testing.T) {
 	deps, st := testDeps(t)
 	h, _ := New(deps)

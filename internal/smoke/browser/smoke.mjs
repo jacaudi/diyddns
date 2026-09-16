@@ -279,6 +279,37 @@ try {
   step("nothing overflows and every compact control is reachable at 390px");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${BASE_URL}/devices`, { waitUntil: "domcontentloaded" });
+
+  // Regression guard for a real defect (#127 UI review finding F): tr used to
+  // sit in the same `width: 100%` rule as its table and cells. Combined with
+  // `* { box-sizing: border-box }` and the tr's own four-sided margin, the row
+  // resolved to exactly the container's width and the margin then pushed it
+  // outward, landing the right border past the container's edge — the card
+  // read as unclosed. A stylesheet-text assertion can prove the width: 100%
+  // rule no longer names tr; only a browser can prove the row's box actually
+  // stays inside its container and is bordered on all four sides.
+  step("a responsive table row's card is fully bordered and inset at 390px");
+  const rowGeometry = await page.evaluate(() => {
+    const wrap = document.querySelector(".table-wrap");
+    const row = wrap?.querySelector(".grid-table.responsive tbody tr");
+    if (!wrap || !row) return null;
+    const style = getComputedStyle(row);
+    return {
+      rowRight: row.getBoundingClientRect().right,
+      containerRight: wrap.getBoundingClientRect().right,
+      borders: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+    };
+  });
+  if (!rowGeometry) fail("could not find a responsive table row to measure at 390px");
+  console.log(`    row right=${rowGeometry.rowRight.toFixed(2)}px container right=${rowGeometry.containerRight.toFixed(2)}px borders=${rowGeometry.borders.join(",")}`);
+  if (rowGeometry.rowRight > rowGeometry.containerRight + 0.5) {
+    fail(`responsive row right edge (${rowGeometry.rowRight}px) sits outside its container's right edge ` +
+      `(${rowGeometry.containerRight}px) -- the card border does not close (see app.css .grid-table.responsive tr)`);
+  }
+  if (rowGeometry.borders.some((w) => parseFloat(w) <= 0)) {
+    fail(`responsive row is missing a border on one or more sides: ${JSON.stringify(rowGeometry.borders)}`);
+  }
+
   await page.click('a:has-text("browser-test-device")');
   const deviceURL = page.url();
   const MIN_TARGET = 32;

@@ -70,6 +70,19 @@ func (s Status) Label() string {
 	}
 }
 
+// Title returns the statusTag partial's tooltip text, or "" for no tooltip.
+// Only StatusStale carries one (#127 UI review finding D): "Stale" (staleAfter,
+// a 15-minute liveness check with no relation to address expiry) can sit right
+// next to the unrelated "expires in N days" countdown (a days-scale window),
+// and the two are easy to conflate at a glance. Derived from staleAfter itself
+// rather than a duplicated "15 minutes" literal, so the two cannot drift.
+func (s Status) Title() string {
+	if s != StatusStale {
+		return ""
+	}
+	return fmt.Sprintf("No check-in for over %d minutes", int(staleAfter.Minutes()))
+}
+
 // CSSClass returns the mock.css tag modifier for a status.
 func (s Status) CSSClass() string {
 	switch s {

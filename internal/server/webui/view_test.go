@@ -41,6 +41,27 @@ func TestDeviceStatus(t *testing.T) {
 	}
 }
 
+// TestStatusTitle: #127 UI review finding D. Status.Title disambiguates the
+// "Stale" badge (staleAfter, a 15-minute liveness check) from the unrelated
+// address-expiry countdown (a 21-day window) without renaming StatusStale.
+// Every other status carries no title.
+func TestStatusTitle(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		status Status
+		want   string
+	}{
+		{StatusOnline, ""},
+		{StatusDisabled, ""},
+		{StatusNeverSeen, ""},
+		{StatusStale, "No check-in for over 15 minutes"},
+	} {
+		if got := tt.status.Title(); got != tt.want {
+			t.Errorf("Status(%q).Title() = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
 func TestRelTime(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 20, 14, 41, 0, 0, time.UTC)

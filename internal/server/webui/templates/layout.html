@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DIYDDNS</title>
+{{/* #127 UI review finding E: an inline SVG data URI needs no route and no
+     binary asset in the repo, and stops every page load 404ing on
+     /favicon.ico. Mirrors the brand mark (.brand .logo in app.css): a rounded
+     square with a "D". */}}
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6feb'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-size='18' font-weight='700' fill='%23fff' text-anchor='middle'%3ED%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 {{if .CSRFToken}}<meta name="csrf" content="{{.CSRFToken}}">{{end}}
 <script src="/static/passkey.js" defer></script>

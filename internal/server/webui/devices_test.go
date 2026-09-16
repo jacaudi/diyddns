@@ -3,6 +3,7 @@ package webui
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -374,6 +375,104 @@ func TestNewDeviceRow_NoCountdownWhenExpiryDisabled(t *testing.T) {
 	}
 	if row.V4ExpiresIn != "" {
 		t.Errorf("V4ExpiresIn = %q, want empty when the policy is opted out", row.V4ExpiresIn)
+	}
+}
+
+// TestDevicesList_HeaderMatchesTheCells: #127 UI review finding A. The
+// desktop header read "Current IPv4"/"Current IPv6", but the cell beneath can
+// show a historical, last-known address once the sweep has cleared it --
+// which is explicitly not current. The header must read plain "IPv4"/"IPv6",
+// matching the mobile card's data-label (partials.html's v4AddressCell /
+// v6AddressCell) and the cell's own data-label attribute.
+func TestDevicesList_HeaderMatchesTheCells(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "jane@example.com", "user")
+	seedDevice(t, st, usr.ID, "laptop")
+
+	req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+	req.AddCookie(signIn(t, deps, usr))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "Current IPv4") || strings.Contains(body, "Current IPv6") {
+		t.Error(`the desktop header still says "Current", contradicting the historical address the cell can show`)
+	}
+	for _, want := range []string{"<th>IPv4</th>", "<th>IPv6</th>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+// TestDeviceDetail_ShowsCountdownForALiveFamily: #127 UI review finding B.
+// The detail page's "Current addresses" card rendered the expired case well
+// but never showed a countdown for a family that still holds an address -- a
+// user who saw "expires in 6 days" on the list got LESS detail after clicking
+// through. Reuses expiresInText/stale.HumanDays (the SAME rounding the email
+// and the list use); no second rounding is introduced here.
+func TestDeviceDetail_ShowsCountdownForALiveFamily(t *testing.T) {
+	h := newWebUIFixture(t)
+	h.setFeed(t, config.FeedSection{Enabled: true, ExpireAfterDays: 10})
+	id := h.seedConfirmedAt(t, h.now-4*86400) // 6 days left at W=10
+
+	body := h.get(t, "/devices/"+id)
+	if !strings.Contains(body, "expires in 6 days") {
+		t.Errorf("device detail page missing the countdown for a live family:\n%s", body)
+	}
+}
+
+// TestDeviceDetail_NoCountdownForAnExpiredFamily: a family the sweep has
+// already cleared shows its expiry NOTICE, never a countdown beside it --
+// the same gate the list uses (design #10, fix round 1 item 1).
+func TestDeviceDetail_NoCountdownForAnExpiredFamily(t *testing.T) {
+	h := newWebUIFixture(t)
+	id := h.seedExpired(t, "203.0.113.9", 23*86400)
+
+	if body := h.get(t, "/devices/"+id); strings.Contains(body, "expires in") {
+		t.Errorf("device detail page shows a countdown for an expired family:\n%s", body)
+	}
+}
+
+// TestDeviceDetail_NoCountdownWhenExpiryDisabled mirrors
+// TestDeviceList_NoCountdownWhenExpiryDisabled for the detail page: the
+// countdown must be absent, not "expires in 0 days", when the policy is
+// opted out.
+func TestDeviceDetail_NoCountdownWhenExpiryDisabled(t *testing.T) {
+	h := newWebUIFixture(t)
+	h.setFeed(t, config.FeedSection{Enabled: true, ExpireAfterDays: 0})
+	id := h.seedConfirmedAt(t, h.now-14*86400)
+
+	if body := h.get(t, "/devices/"+id); strings.Contains(body, "expires in") {
+		t.Errorf("countdown rendered on the detail page with the policy opted out:\n%s", body)
+	}
+}
+
+// TestDeviceDetail_NoCountdownWhenAddressPrunedFromHistory mirrors
+// TestNewDeviceRow_NoCountdownWhenAddressPrunedFromHistory for the detail
+// page: a family the sweep cleared, whose ip_history rows have since been
+// pruned (retention: ip_history_days / ip_history_per_device_max), has no
+// last-known value to show -- IPv4LastKnown stays "" -- and must fall to a
+// bare dash, NOT a countdown computed from the stale V4ConfirmedAt the sweep
+// deliberately never touches. Real Prune, not a fake LatestAddress{}: the
+// remaining row is the sweep's OWN clearing entry (ExpireFamilies always
+// appends one, carrying no address), which Prune's "never delete the newest
+// row" rule guarantees survives.
+func TestDeviceDetail_NoCountdownWhenAddressPrunedFromHistory(t *testing.T) {
+	h := newWebUIFixture(t)
+	id := h.seedExpired(t, "203.0.113.9", 23*86400)
+
+	if _, err := h.st.IPHistory().Prune(t.Context(), id, h.now+1, 0, 100); err != nil {
+		t.Fatalf("prune history: %v", err)
+	}
+
+	body := h.get(t, "/devices/"+id)
+	if strings.Contains(body, "203.0.113.9") {
+		t.Fatal("the pruned address is still present -- the fixture did not actually prune it")
+	}
+	if strings.Contains(body, "expires in") {
+		t.Errorf("device detail page shows a countdown for a pruned, cleared family:\n%s", body)
 	}
 }
 

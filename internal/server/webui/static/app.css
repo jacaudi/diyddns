@@ -625,8 +625,21 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   .page-head { flex-direction: column; }
   /* Collapse wide tables into stacked cards */
   .grid-table.responsive thead { display: none; }
+  /* #127 UI review finding F: tr used to be in the width: 100% group below,
+     which — combined with the * { box-sizing: border-box } at the top of this
+     file and the tr's own four-sided margin in the tr rule below — resolved
+     the row to exactly the container's width and then offset it outward by
+     the margin, pushing the right border past the container's edge so the
+     card read as unclosed. display: block still applies to tr (its default
+     is table-row); only width: 100% does not — a display: block element with
+     no declared width is auto, which fills the container MINUS its margins,
+     which is what an inset bordered card needs. Pinned by a real browser
+     measurement in internal/smoke/browser/smoke.mjs (a CSS rule existing
+     proves nothing about whether the rendered box actually closes). */
   .grid-table.responsive, .grid-table.responsive tbody,
-  .grid-table.responsive tr, .grid-table.responsive td { display: block; width: 100%; }
+  .grid-table.responsive tr, .grid-table.responsive td { display: block; }
+  .grid-table.responsive, .grid-table.responsive tbody,
+  .grid-table.responsive td { width: 100%; }
   .grid-table.responsive tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: var(--space-3); }
   .grid-table.responsive td { border: none; padding: var(--space-2) var(--space-4); }
   .grid-table.responsive td::before {

@@ -67,7 +67,6 @@ func newDeviceRow(d store.Device, latest store.LatestAddress, feed config.FeedSe
 		IPv6:        d.CurrentIPv6,
 		LastSeenAt:  relTime(d.LastSeenAt, now),
 		LastSeenAbs: absTime(d.LastSeenAt),
-		ShowExpiry:  feed.ExpiryEnabled(),
 	}
 	if row.IPv4 == "" && latest.IPv4 != "" {
 		row.IPv4, row.IPv4Expired, row.IPv4At = latest.IPv4, true, relDays(latest.IPv4At, now)
@@ -75,37 +74,52 @@ func newDeviceRow(d store.Device, latest store.LatestAddress, feed config.FeedSe
 	if row.IPv6 == "" && latest.IPv6 != "" {
 		row.IPv6, row.IPv6Expired, row.IPv6At = latest.IPv6, true, relDays(latest.IPv6At, now)
 	}
-	// A family whose address the sweep has already cleared must never show a
-	// countdown beside its own expiry notice: ExpireFamilies deliberately
-	// leaves *ConfirmedAt at its old instant (that column is the optimistic
-	// pin the sweep writes against, not a liveness signal), so a countdown
-	// computed from it would render "expires in 0 days" forever.
-	//
-	// Gated on the CURRENT column (d.CurrentIPv4/CurrentIPv6), not on
-	// IPv4Expired/IPv6Expired above. Those flags are only set when history
-	// still has a last-known value to fall back to (row.IPv4 == "" &&
-	// latest.IPv4 != ""); a swept family whose ip_history rows have since
-	// been pruned (retention: ip_history_days / ip_history_per_device_max)
-	// would leave *Expired false and let the stale *ConfirmedAt through --
-	// the original defect again, keyed on history availability instead of
-	// on the sweep. "Does this family still hold an address" is what the
-	// current column means, and it is the one predicate that covers both
-	// the has-history and the pruned-history case. Resist "simplifying"
-	// this back to the *Expired flags.
-	//
-	// The two families are independent -- gating on each one's own current
-	// column, not on the other's or on the row as a whole -- so a device
-	// with a live IPv4 and a swept IPv6 still shows the IPv4 countdown.
-	if row.ShowExpiry {
-		window := stale.Window(feed)
-		if d.CurrentIPv4 != "" {
-			row.V4ExpiresIn = expiresInText(d.V4ConfirmedAt, window, now)
-		}
-		if d.CurrentIPv6 != "" {
-			row.V6ExpiresIn = expiresInText(d.V6ConfirmedAt, window, now)
-		}
-	}
+	row.ShowExpiry, row.V4ExpiresIn, row.V6ExpiresIn = expiryFields(d, feed, now)
 	return row
+}
+
+// expiryFields computes ShowExpiry and each family's countdown text. Shared by
+// the list (newDeviceRow, both the user-scoped and admin screens) and the
+// detail page (newDetailData) so this gate cannot drift between the three --
+// it used to be copied onto the detail page separately, which is exactly the
+// kind of drift this project's fix rounds keep finding.
+//
+// A family whose address the sweep has already cleared must never show a
+// countdown beside its own expiry notice: ExpireFamilies deliberately leaves
+// *ConfirmedAt at its old instant (that column is the optimistic pin the
+// sweep writes against, not a liveness signal), so a countdown computed from
+// it would render "expires in 0 days" forever.
+//
+// Gated on the CURRENT column (d.CurrentIPv4/CurrentIPv6), not on a
+// caller-derived "last known address" flag. On the list, that flag
+// (deviceRow.IPv4Expired/IPv6Expired) is only set when history still has a
+// last-known value to fall back to; a swept family whose ip_history rows have
+// since been pruned (retention: ip_history_days / ip_history_per_device_max)
+// would leave that flag false and let the stale *ConfirmedAt through -- the
+// original defect again, keyed on history availability instead of on the
+// sweep. "Does this family still hold an address" is what the current column
+// means, and it is the one predicate that covers both the has-history and the
+// pruned-history case, on both screens. Resist "simplifying" this back to a
+// last-known-address flag.
+//
+// The two families are independent -- gating on each one's own current
+// column, not on the other's or on the row as a whole -- so a device with a
+// live IPv4 and a swept IPv6 still shows the IPv4 countdown.
+//
+// showExpiry is false, with both countdowns "", entirely when the staleness
+// policy is opted out (config.FeedSection.ExpiryEnabled()).
+func expiryFields(d store.Device, feed config.FeedSection, now time.Time) (showExpiry bool, v4ExpiresIn, v6ExpiresIn string) {
+	if !feed.ExpiryEnabled() {
+		return false, "", ""
+	}
+	window := stale.Window(feed)
+	if d.CurrentIPv4 != "" {
+		v4ExpiresIn = expiresInText(d.V4ConfirmedAt, window, now)
+	}
+	if d.CurrentIPv6 != "" {
+		v6ExpiresIn = expiresInText(d.V6ConfirmedAt, window, now)
+	}
+	return true, v4ExpiresIn, v6ExpiresIn
 }
 
 // expiresInText renders how long until a family's address is due for
@@ -464,6 +478,17 @@ type deviceDetailData struct {
 	IPv4LastKnownAt string
 	IPv6LastKnown   string
 	IPv6LastKnownAt string
+
+	// ShowExpiry/V4ExpiresIn/V6ExpiresIn are the detail page's half of #127 UI
+	// review finding B: the list already showed a countdown for a family that
+	// still holds an address, but the detail page showed none at all. Same
+	// gate as newDeviceRow (ShowExpiry off entirely when the policy is opted
+	// out; per-family, keyed on the CURRENT column so a cleared family never
+	// shows a countdown beside its own expiry notice) and the same
+	// expiresInText/stale.HumanDays rounding, not a second copy of it.
+	ShowExpiry  bool
+	V4ExpiresIn string
+	V6ExpiresIn string
 }
 
 // ownedDevice loads a device for the signed-in user, rendering 404 when it does
@@ -530,6 +555,11 @@ func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Sess
 			data.IPv6LastKnown, data.IPv6LastKnownAt = latest.IPv6, relDays(latest.IPv6At, now)
 		}
 	}
+
+	// Gated exactly as the list is -- see expiryFields' doc comment (shared
+	// with newDeviceRow) for why the gate must be the CURRENT column, not
+	// history availability.
+	data.ShowExpiry, data.V4ExpiresIn, data.V6ExpiresIn = expiryFields(dev, h.deps.Cfg.Feed, now)
 	return data, nil
 }
 

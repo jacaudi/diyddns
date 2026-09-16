@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} · DIYDDNS</title>
+{{/* #127 UI review finding E -- see layout.html's matching comment. */}}
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6feb'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-size='18' font-weight='700' fill='%23fff' text-anchor='middle'%3ED%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 {{if .CSRFToken}}<meta name="csrf" content="{{.CSRFToken}}">{{end}}
 <script src="/static/ui.js" defer></script>
@@ -18,7 +20,7 @@
       <a class="{{if eq .Nav "account"}}active{{end}}" href="/account">Account</a>
       {{if .IsAdmin}}
       <a class="admin {{if eq .Nav "admin-users"}}active{{end}}" href="/admin/users">Users</a>
-      <a class="admin {{if eq .Nav "admin-devices"}}active{{end}}" href="/admin/devices">Devices</a>
+      <a class="admin {{if eq .Nav "admin-devices"}}active{{end}}" href="/admin/devices">All devices</a>
       {{if .NotificationsEnabled}}<a class="admin {{if eq .Nav "admin-endpoints"}}active{{end}}" href="/admin/endpoints">Endpoints</a>{{end}}
       {{if .FeedEnabled}}<a class="admin {{if eq .Nav "admin-feed"}}active{{end}}" href="/admin/feed">Feed</a>{{end}}
       <a class="admin {{if eq .Nav "admin-audit"}}active{{end}}" href="/admin/audit">Audit</a>
