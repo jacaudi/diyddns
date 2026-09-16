@@ -58,15 +58,33 @@
         one-time registration link that expires in one hour. The user cannot sign in until they
         redeem it.</span>
     </div>
-    <form method="post" action="/admin/users/{{.Target.ID}}/recovery"
-          data-confirm="Revoke every passkey on {{.Target.Email}} and issue a recovery link? They cannot sign in until they redeem it.">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="recovery-confirm">Type <code>{{.Target.Email}}</code> to confirm</label>
-        <input class="input" id="recovery-confirm" name="confirm_email" autocomplete="off" required>
+    {{/* The .modal pattern, as on the device page's rotate/delete actions. The
+         typed confirmation belongs BEHIND the button: sitting always-open it
+         asked for an irreversible account's address before the reader had said
+         they wanted to do anything, and it made two destructive actions on one
+         card compete for attention with two identical-looking text boxes. */}}
+    <details class="modal">
+      <summary class="btn danger">Revoke passkeys &amp; issue link…</summary>
+      <div class="modal-panel">
+        <div class="card modal-card">
+          <h2>Issue a passkey recovery link</h2>
+          <p class="muted">This revokes every passkey on <code>{{.Target.Email}}</code>
+            immediately, then issues a one-time registration link that expires in one hour.
+            They cannot sign in until they redeem it.</p>
+          <form method="post" action="/admin/users/{{.Target.ID}}/recovery">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="recovery-confirm">Type <code>{{.Target.Email}}</code> to confirm</label>
+              <input class="input" id="recovery-confirm" name="confirm_email" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn danger" type="submit">Revoke passkeys &amp; issue link</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
+        </div>
       </div>
-      <button class="btn danger" type="submit">Revoke passkeys &amp; issue link</button>
-    </form>
+    </details>
   </div>
 
   <div class="danger-item">
@@ -78,15 +96,27 @@
     {{if .IsSelf}}
     <p class="muted">You cannot delete your own account.</p>
     {{else}}
-    <form method="post" action="/admin/users/{{.Target.ID}}/delete"
-          data-confirm="Delete {{.Target.Email}} and everything they own? This cannot be undone.">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <div class="field">
-        <label for="delete-confirm">Type <code>{{.Target.Email}}</code> to confirm</label>
-        <input class="input" id="delete-confirm" name="confirm_email" autocomplete="off" required>
+    <details class="modal">
+      <summary class="btn solid-danger">Delete account…</summary>
+      <div class="modal-panel">
+        <div class="card modal-card">
+          <h2>Delete account</h2>
+          <p class="muted">Permanently removes <code>{{.Target.Email}}</code>, their sessions,
+            devices, and enrollment codes. This cannot be undone.</p>
+          <form method="post" action="/admin/users/{{.Target.ID}}/delete">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <div class="field">
+              <label for="delete-confirm">Type <code>{{.Target.Email}}</code> to confirm</label>
+              <input class="input" id="delete-confirm" name="confirm_email" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn solid-danger" type="submit">Delete account</button>
+              <button class="btn ghost" type="button" data-modal-close>Cancel</button>
+            </div>
+          </form>
+        </div>
       </div>
-      <button class="btn solid-danger" type="submit">Delete account</button>
-    </form>
+    </details>
     {{end}}
   </div>
 </div>
