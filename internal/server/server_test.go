@@ -635,9 +635,44 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	// Read the ALREADY-COLLECTED spans; do not re-drive the requests. The rows
 	// above are the only ones whose ids were captured, so a second pass would
 	// produce spans no row can be correlated to.
+	//
+	// BUT FIRST, A BARRIER -- and the record wait above is not one. Chain
+	// applies its middlewares in reverse (middleware.go:383), so server.go's
+	// RequestID, Trace, AccessLog, Recover list puts Trace OUTSIDE AccessLog,
+	// and span.End() is Trace's outermost defer. Every span therefore ends
+	// AFTER the record the loop above waited for was written, across the
+	// SetName/SetAttributes/dur.Record gap. The row at risk is whichever one's
+	// record lands LAST: the loop breaks the moment that record appears, while
+	// that row's span is still in flight. Only a row that flushes its response
+	// before its handler returns can be that row -- a small body is buffered
+	// until ServeHTTP returns, so client.Do already implies the span ended --
+	// which is why the 30 KB static row is the exposure and why CI has never
+	// lost this one. It is racy all the same.
+	//
+	// srv.Close is a happens-before edge rather than another timing guess, so
+	// there is no deadline here to tune and none to wait out. It blocks on the
+	// waitgroup httptest decrements when a connection reaches StateClosed or
+	// StateHijacked, and net/http reaches either only after
+	// serverHandler.ServeHTTP has returned -- hence after every deferred
+	// span.End(). SimpleSpanProcessor exports inline from OnEnd, so a span
+	// that has ended is a span this exporter already holds. The t.Cleanup
+	// Close is then a no-op: Close guards its shutdown on s.closed and
+	// re-waits an already-drained waitgroup.
+	//
+	// Reproduced deterministically (10/10 under -race) by padding the embedded
+	// app.css to 1.3 MiB, moving the static row LAST, and wrapping this test's
+	// histogram in one that sleeps 200ms inside Record -- the last statement
+	// before span.End(). Without the Close every run reported 6 spans of 7.
+	srv.Close()
+
 	spans := inst.spans.GetSpans()
-	if len(spans) != len(tests) {
-		t.Fatalf("got %d spans, want %d (one per row)", len(spans), len(tests))
+	switch {
+	case len(spans) == 0:
+		// The mutation this block exists for. Fails on the first read, with no
+		// wait at all: Close already drained every handler goroutine.
+		t.Fatalf("no spans at all, want %d (one per row): is middleware.Trace still in handler()'s Chain call?", len(tests))
+	case len(spans) != len(tests):
+		t.Fatalf("got %d spans, want %d (one per row); srv.Close above drained every handler, so a span is genuinely missing or surplus, not one still in flight", len(spans), len(tests))
 	}
 	// ORDER IS DELIBERATELY NOT ASSERTED -- matching spans[i] to tests[i] was a
 	// real flake that CI caught and 60 local runs did not. span.End() is the
