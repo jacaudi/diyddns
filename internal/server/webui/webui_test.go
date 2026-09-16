@@ -3595,7 +3595,7 @@ func TestAdminDevices_HeaderMatchesTheCells(t *testing.T) {
 // TestNav_AdminDevicesLabelledDifferentlyFromUserDevices: #127 UI review
 // finding C. /devices and /admin/devices both rendered "Devices" in the nav
 // (app.html:17,21) -- indistinguishable in the collapsed mobile menu. The
-// admin-scoped entry now reads "All devices"; the user-scoped one is
+// admin-scoped entry now reads "All Devices"; the user-scoped one is
 // untouched.
 func TestNav_AdminDevicesLabelledDifferentlyFromUserDevices(t *testing.T) {
 	deps, st := testDeps(t)
@@ -3611,8 +3611,8 @@ func TestNav_AdminDevicesLabelledDifferentlyFromUserDevices(t *testing.T) {
 	if !strings.Contains(body, `href="/devices">Devices<`) {
 		t.Error(`the user-scoped nav entry no longer reads "Devices"`)
 	}
-	if !strings.Contains(body, `href="/admin/devices">All devices<`) {
-		t.Error(`the admin-scoped nav entry does not read "All devices"`)
+	if !strings.Contains(body, `href="/admin/devices">All Devices<`) {
+		t.Error(`the admin-scoped nav entry does not read "All Devices"`)
 	}
 	if strings.Contains(body, `href="/admin/devices">Devices<`) {
 		t.Error(`the admin nav still duplicates the user-scoped "Devices" label`)

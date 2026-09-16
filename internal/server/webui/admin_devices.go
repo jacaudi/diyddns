@@ -72,7 +72,7 @@ func (h *handler) handleAdminDevices(w http.ResponseWriter, r *http.Request, usr
 	}
 
 	h.render(w, r, "admin-devices", adminDevicesData{
-		appData: h.newAppData(usr, sess, "All devices", "admin-devices"),
+		appData: h.newAppData(usr, sess, "All Devices", "admin-devices"),
 		Devices: rows,
 		Owners:  ownerOptions(users),
 		Owner:   owner,
