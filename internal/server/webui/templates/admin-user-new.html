@@ -3,7 +3,7 @@
 
 {{if .Link}}
 <div class="page-head"><div><h1>Invite created for {{.InvitedUser}}</h1></div></div>
-<div class="card" style="max-width:680px">
+<div class="card measure-2">
   <div class="card-body">
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
@@ -26,7 +26,7 @@
 </div>
 {{else}}
 <div class="page-head"><div><h1>Invite a user</h1></div></div>
-<div class="card" style="max-width:560px">
+<div class="card measure-1">
   <div class="card-body">
     {{template "errorBanner" .Error}}
     <form method="post" action="/admin/users/new">

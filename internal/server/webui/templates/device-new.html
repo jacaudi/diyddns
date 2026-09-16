@@ -3,7 +3,7 @@
 
 {{if .Code}}
 <div class="page-head"><div><h1>Enrollment code created</h1></div></div>
-<div class="card" style="max-width:640px">
+<div class="card measure-2">
   <div class="card-body stack-lg">
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
@@ -65,7 +65,7 @@
 </div>
 {{else}}
 <div class="page-head"><div><h1>Create a device</h1></div></div>
-<div class="card" style="max-width:560px">
+<div class="card measure-1">
   <div class="card-body">
     {{template "errorBanner" .FieldErr}}
     <form method="post" action="/devices/new">

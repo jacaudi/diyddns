@@ -9,6 +9,8 @@ tasks:
       - task: yaml
       - task: docker
       - task: helm
+      - task: html
+      - task: css
 
   actions:
     desc: Lint GitHub Actions workflows (only when they changed)
@@ -81,6 +83,56 @@ tasks:
         command -v hadolint >/dev/null \
           || { echo "hadolint not installed: brew install hadolint" >&2; exit 1; }
         echo "${files}" | xargs hadolint
+
+  html:
+    desc: "No inline style= attribute in an HTML template"
+    cmds:
+      # Every width, margin and display the UI uses lives in app.css, where one
+      # rule can cover every spelling of a pattern at once. An inline style is
+      # invisible to that file: the templates carried max-width:560/640/680px
+      # and margin-bottom:var(--space-5) in style attributes, so three pages
+      # picked three widths for two kinds of card and no rule could see it.
+      # The stylesheet's scales are enforced by comment alone; this is the one
+      # place a bypass fails the build.
+      - |
+        set -eu
+        files=$(find . -name '*.html' -not -path './.git/*' -not -path './.claude/*' -not -path '*/node_modules/*' -not -path '*/vendor/*')
+        [ -n "${files}" ] || { echo "no HTML templates — skipping"; exit 0; }
+        # shellcheck disable=SC2086  # deliberate word split over the file list
+        hits=$(grep -nE '(^|[[:space:]])style=' ${files} || true)
+        if [ -n "${hits}" ]; then
+          echo "${hits}"
+          echo "::error::inline style= in a template — add a class to internal/server/webui/static/app.css instead (component inventory at the top of that file)"
+          exit 1
+        fi
+        echo "html: no inline styles"
+
+  css:
+    desc: "No off-scale px in a stylesheet's spacing or font-size declarations"
+    cmds:
+      # app.css declares --space-N as the only source of margin/padding/gap and
+      # --type-N as the only source of font-size; both were enforced by comment
+      # alone. Comments are stripped first — replaced by the same number of
+      # newlines, so the reported line is the real one — because the file's
+      # comments quote pixel values constantly. Scope is exactly the two scales'
+      # own domains: widths, radii, borders, shadows, heights and media queries
+      # are on no scale and are not checked, since a rule that flags them is one
+      # people learn to ignore. The one exemption is the one the type-scale
+      # comment names: .empty .icon sizes a decorative emoji, not text.
+      - |
+        set -eu
+        files=$(find . -name '*.css' -not -path './.git/*' -not -path './.claude/*' -not -path '*/node_modules/*' -not -path '*/vendor/*')
+        [ -n "${files}" ] || { echo "no stylesheets — skipping"; exit 0; }
+        command -v perl >/dev/null || { echo "perl not installed" >&2; exit 1; }
+        fail=0
+        for f in ${files}; do
+          hits=$(perl -0pe 's{/\*(.*?)\*/}{"\n" x ($1 =~ tr/\n//)}gse' "${f}" \
+            | grep -nE '(margin|padding|gap|font-size)[a-z-]*[[:space:]]*:[^;{}]*[0-9.]+px' \
+            | grep -v '^[0-9]*:\.empty \.icon ' || true)
+          [ -z "${hits}" ] || { echo "${hits}" | sed "s|^|${f}:|"; fail=1; }
+        done
+        [ "${fail}" = "0" ] || { echo "::error::a spacing or font-size value is off the scale — use var(--space-N) / var(--type-N), or add a step and document it"; exit 1; }
+        echo "css: spacing and type on scale"
 
   chart:deps:
     desc: Register classic dependency repos and build chart dependencies

@@ -3,7 +3,58 @@
    of this repository. The auth-shell rules
    (.wrap/.card/.field/.input/.btn/.status/.passkey-list/.small) serve
    /login and /register; the app-shell component set below that serves
-   every screen behind a session (topbar, tables, tags, admin chrome). */
+   every screen behind a session (topbar, tables, tags, admin chrome).
+
+   ---------- Component inventory: look here before writing a rule ----------
+   Nearly every fix in this file's history has one shape: a rule existed, it
+   covered one spelling of a pattern, and the other spelling silently missed
+   out. The list below IS the set of spellings. If what you need is here, use
+   it as written. If it is not, add it here first, then build it -- the next
+   author looks things up here instead of inventing a second version.
+
+   .kv            A labelled value list (device details, server info, current
+                  addresses): <dl class="kv"><dt>label</dt><dd>value</dd>.
+                  Two cards side by side must BOTH be .kv -- two layouts for
+                  one shape is the first thing a reader notices.
+   .modal         A destructive action that needs typed confirmation:
+                  <details class="modal"><summary class="btn danger">…</summary>
+                  <div class="modal-panel"><div class="card modal-card">form.
+                  The panel renders as an overlay, works with JS blocked, and
+                  `open` on the <details> shows it on load. NOT an always-open
+                  confirm field beside the button -- that was the second,
+                  uninvited implementation.
+   .copy          A copyable value: {{template "copyValue" .}} in a template.
+                  Inside .kv, .field, .callout or .disclosure it is full width
+                  with Copy pinned to the trailing edge -- every pill on a
+                  screen the same object. In a table cell it stays an inline
+                  pill. Never size one by hand.
+   .btn-row       A form's actions, directly after the last .field; it takes
+                  24px from that field (.field + .btn-row). A lone .btn after
+                  a .field takes 16px. Never pad the field to make the gap.
+   .empty         Nothing to list yet: icon / h3 / p inside a .card. If the
+                  page's create form belongs there too, put it INSIDE .empty
+                  -- :has(form) tightens the block padding for it.
+   .btn.ghost     The quiet action beside a primary (Cancel). Quiet, but it
+                  has an edge; not a bare link, not a borderless button.
+   .filterbar     A list's filters: one .field per control, the submit
+                  button in the LAST .field. That field grows to absorb the
+                  bar's leftover width so the button centres on every bar,
+                  whether or not another field carries .grow.
+   .measure-N     A card narrower than the page: .card.measure-1 (560, a
+                  form) or .card.measure-2 (680, a reading card). From the
+                  --measure-N scale; never style="max-width".
+   .grid.stats    A strip of .card.stat tiles above the rest of a page; .stats
+                  carries the 24px below the strip.
+   td.actions     A <form> around one button in a table's action cell needs
+                  no styling -- it is inline by rule, beside its siblings.
+   .stack-lg      A .card-body holding several independent blocks: 24px
+                  between blocks, so the 16px inside a block still reads as
+                  "same group".
+
+   The rules that keep this honest run in CI: `task repo:html` fails on any
+   style= attribute in a template, and `task repo:css` fails on a px value in
+   a margin, padding, gap or font-size declaration that is not one of the
+   scale tokens declared in :root below. */
 
 :root {
   --bg: #f6f7f9;
@@ -68,6 +119,28 @@
   --type-5: 19px;
   --type-6: 22px;
   --type-7: 26px;
+
+  /* Content-width scale: the only source of max-width for a block of page
+     content in this file, applied through the .measure-N classes in the
+     utilities section -- never inline. Same shape as the two scales above:
+     numeric steps, no semantic alias layer.
+
+     Before this existed the templates carried max-width:560px, 640px and
+     680px in style attributes, which no rule in this file could see, so
+     three pages chose three widths for what is two kinds of card. Two steps,
+     not three: 560 is a FORM -- one column of inputs and a button row, where
+     a wider box only stretches the inputs past a comfortable length. 680 is
+     a READING card -- prose, callouts and copy pills, which want the room so
+     a docker command sits on fewer lines. 640 (the enrollment-code page) and
+     680 (the invite-link and recovery-link pages) were the same kind of card
+     at two widths that only a ruler tells apart, so 640 lands on 680.
+
+     The shell widths stay where they are declared: .wrap (420, the auth
+     card), .modal-card (440, the overlay) and .main (1080, the app shell)
+     size a shell around content rather than the content itself, and none of
+     them is a choice a template makes. */
+  --measure-1: 560px;
+  --measure-2: 680px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -402,6 +475,12 @@ a:hover { text-decoration: underline; }
 .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
+/* A strip of stat tiles is a band of its own above the rest of the page, so
+   it keeps the same 24px below it that .page-head keeps. This used to be an
+   inline margin-bottom on the two grids that carry tiles (/admin/users and
+   /admin/server); the third grid in the app (device-detail's two .kv cards)
+   is not a strip and gets nothing extra. */
+.grid.stats { margin-bottom: var(--space-5); }
 .stat { padding: var(--space-4); }
 .stat .label { color: var(--text-muted); font-size: var(--type-2); text-transform: uppercase; letter-spacing: .4px; }
 .stat .value { font-size: var(--type-7); font-weight: 700; margin-top: var(--space-1); letter-spacing: -.5px; }
@@ -423,6 +502,12 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 .grid-table .primary-cell { font-weight: 600; color: var(--text); }
 .grid-table .muted { color: var(--text-muted); }
 .grid-table td.actions { text-align: right; white-space: nowrap; }
+/* A POST needs a <form>, and a form is a block by default -- so a Disable
+   button wrapped in one dropped onto its own line beneath the Edit link next
+   to it. Two templates fixed that with style="display:inline" on the form and
+   a third did not, which is exactly one rule covering some spellings of a
+   pattern and not others. Inline here, for every form in an action cell. */
+.grid-table td.actions form { display: inline; }
 
 /* ---------- Tags / badges ---------- */
 
@@ -802,6 +887,11 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    arrives -- it just takes no room until it has content. */
 .status:empty { display: none; }
 .nowrap { white-space: nowrap; }
+/* The content-width scale's classes -- see --measure-N in :root for which
+   step is which. Numeric like .cols-N, so a template reads
+   <div class="card measure-1"> and the meaning lives in one place. */
+.measure-1 { max-width: var(--measure-1); }
+.measure-2 { max-width: var(--measure-2); }
 
 /* ---------- Responsive ---------- */
 

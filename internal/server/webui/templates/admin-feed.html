@@ -62,7 +62,7 @@
           <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
           <td data-label="Last used" class="muted nowrap">{{template "textOrDash" .LastUsedAbs}}</td>
           <td class="actions">
-            <form method="post" action="/admin/feed/tokens/{{.ID}}/revoke" style="display:inline">
+            <form method="post" action="/admin/feed/tokens/{{.ID}}/revoke">
               <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
               <button class="btn sm danger" type="submit">Revoke</button>
             </form>
