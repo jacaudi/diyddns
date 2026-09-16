@@ -4,7 +4,7 @@
 {{if .Code}}
 <div class="page-head"><div><h1>Enrollment code created</h1></div></div>
 <div class="card" style="max-width:640px">
-  <div class="card-body">
+  <div class="card-body stack-lg">
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
       Copy it now — it can't be shown again. Reloading this page mints another code.
@@ -21,12 +21,12 @@
     <div class="field">
       <label>Run the client on the device — container (recommended)</label>
 
-      <div class="hint"><b>Step 1.</b> Enroll once. This exchanges the code and exits.</div>
+      <div class="hint step"><b>Step 1.</b> Enroll once. This exchanges the code and exits.</div>
       {{template "copyValue" .ContainerEnroll}}
       <div class="hint">The code appears in your shell history when you run this.</div>
       {{if .ContainerHostNote}}<div class="hint">{{.ContainerHostNote}}</div>{{end}}
 
-      <div class="hint"><b>Step 2.</b> Start the agent. This one keeps running and reports the IP.</div>
+      <div class="hint step"><b>Step 2.</b> Start the agent. This one keeps running and reports the IP.</div>
       {{template "copyValue" .ContainerRun}}
       {{if .DevImageNote}}<div class="hint">{{.DevImageNote}}</div>{{end}}
     </div>

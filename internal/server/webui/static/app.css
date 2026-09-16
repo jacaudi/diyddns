@@ -155,7 +155,11 @@ a:hover { text-decoration: underline; }
   margin-bottom: var(--space-4);
 }
 .card-head { margin-bottom: var(--space-3); }
-.card h1 { font-size: var(--type-5); margin: 0 0 var(--space-2); }
+/* Heading size and the gap under it move together: a bigger heading needs more
+   room beneath it, not less. These were inverted -- h1 (19px) took 8px while
+   the smaller h2 (16px) took 12px -- which is why /login's "Sign in" sat almost
+   on top of its own button. */
+.card h1 { font-size: var(--type-5); margin: 0 0 var(--space-4); }
 .card h2 { font-size: var(--type-4); margin: 0 0 var(--space-3); }
 
 .muted { color: var(--text-muted); font-size: var(--type-2); }
@@ -356,6 +360,11 @@ a:hover { text-decoration: underline; }
    shrink below the widest unbreakable thing in it. A card holding a nowrap
    .copy pill then pins its column open and the document scrolls sideways. */
 .grid { display: grid; gap: var(--space-4); }
+/* Default stretch is deliberate: a pair of cards side by side reads as one
+   unit, so they share a bottom edge. This was briefly align-items: start, back
+   when "Current addresses" was a hand-rolled list two short lines tall and the
+   empty two thirds looked like a fault; now that it is the same dl.kv as the
+   card beside it the heights are close, and matching edges beat ragged ones. */
 .grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -421,11 +430,27 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 /* ---------- Forms: filter bar, field hint ----------
    The base .field/.input rules stay as they are above. */
 
+/* --type-3, not --type-2. These hints are not incidental captions: on the
+   enrollment page they carry the Docker Desktop vs Linux --add-host
+   instruction and the :latest pinning caveat, which are prose an operator has
+   to read and act on. At 13px, muted, they sat below the commands they
+   explain and read as fine print to skip. 14px is the body size the rest of
+   the app uses for running text. */
 .field .hint,
-.disclosure .hint { color: var(--text-muted); font-size: var(--type-2); margin-top: var(--space-2); }
+.disclosure .hint { color: var(--text-muted); font-size: var(--type-3); margin-top: var(--space-2); }
 /* Two captions in a row means a new group started; give it the same 16px the
    page uses between blocks, so the steps read as separate. */
 .field .hint + .hint { margin-top: var(--space-4); }
+/* A step heading is a BOUNDARY, not one more remark. Left to the rule above it
+   inherits the 16px that separates any two consecutive hints, so "Step 2." sat
+   exactly as far from the line above it as that line sat from its own
+   predecessor, and a multi-step instruction read as one flat column of grey
+   text. 24px above it, and full-strength colour rather than muted, so the eye
+   finds the steps before it reads the prose between them. */
+.field .hint.step { margin-top: var(--space-5); color: var(--text); }
+/* The first step needs no boundary above it -- the field's own label is the
+   boundary, and a 24px gap there would just detach the label from its group. */
+.field > .hint.step:first-of-type { margin-top: var(--space-3); }
 
 .filterbar {
   display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end;
@@ -434,10 +459,24 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 .filterbar .field { margin: 0; min-width: 150px; }
 .filterbar .field label { font-size: var(--type-1); text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
 .filterbar .grow { flex: 1; }
+/* The submit control is a button wrapped in a .field, so it inherits the 150px
+   minimum that exists to stop a <select> collapsing. The button is about 66px
+   wide, so it sat hard against the left of an oversized box and the remainder
+   read as a ragged gap before the bar's right edge. Centre it in the space its
+   field reserves rather than special-casing the width. */
+.filterbar .field:last-child { display: flex; flex-direction: column; }
+.filterbar .field:last-child .btn { margin: 0 auto; }
 
 /* ---------- Descriptions (key/value) ---------- */
 
-.kv { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); }
+/* column-gap is load-bearing, not decoration. The label track is max-content,
+   so it sizes to the LONGEST label in the list and every shorter label gets
+   slack inside its own track -- which makes the list look correctly spaced
+   right up until one label is the longest, at which point it butts straight
+   against its value with zero separation ("Device staleness threshold15m0s"
+   on /admin/server). The gap is what guarantees separation for the one row
+   that gets no slack. */
+.kv { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); column-gap: var(--space-5); }
 .kv > dt { color: var(--text-muted); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); font-size: var(--type-2); }
 /* Values here are operator-configured — a database path, a listen address, a
    base URL, a build string — so they are unbounded in length and often carry
@@ -478,13 +517,44 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    has the same footprint and overflows the same way. One definition for both
    contexts. The inline-flex base above still applies where a pill sits inside
    running content (a <dd>, a table cell), which full width would break. */
+/* .kv IS in this list. It was briefly removed: a full-width pill in a .kv value
+   looked wrong, but the cause was the Copy button sitting wherever the text
+   happened to end -- marooned mid-box on a short value -- not the width. With
+   the button pinned to the trailing edge below, a full-width pill is what makes
+   every copy control in the app the same object: same height, same padding,
+   same button position, filling whatever column it is given. Content-sizing
+   them instead makes two pills on one screen different widths, which is what a
+   reader notices. */
 .kv .copy,
 .field .copy,
 .callout .copy,
-.disclosure .copy { display: flex; width: 100%; }
+.disclosure .copy {
+  display: flex; width: 100%;
+  /* Roomier than the inline pill. These carry multi-line docker commands that
+     a reader has to parse character by character; the base 4px/8px left the
+     text almost touching the border. The extra left padding keeps the command
+     clear of the border while the button sits against the right edge. */
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  gap: var(--space-4);
+}
+/* Copy pins to the trailing edge. Without this the button simply follows the
+   end of the command, so a SHORT command parks it mid-box and a LONG one
+   pushes it to the right edge -- the same control landing in two different
+   places on one page, which is what made the callout's pills and the field's
+   pills look like different components. */
+.kv .copy button,
+.field .copy button,
+.callout .copy button,
+.disclosure .copy button { margin-left: auto; }
+/* 12px, not 8px. A command block is a distinct object from the sentence that
+   introduces it and from the command stacked above it; at 8px the pills ran
+   together with their captions into one dense column. */
 .callout .copy,
 .disclosure .copy,
-.field .hint + .copy { margin-top: var(--space-2); }
+.field .hint + .copy { margin-top: var(--space-3); }
+/* And below it, so a caption explaining a command is not glued to the box. */
+.field .copy + .hint,
+.callout .copy + p { margin-top: var(--space-3); }
 
 /* ---------- Disclosure ---------- */
 
@@ -492,10 +562,13 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    <details>, so it needs no JavaScript and stays copyable and greppable while
    collapsed. */
 .disclosure { margin-bottom: var(--space-4); }
-/* Shared by every <details>-based control. The marker is suppressed because
-   these summaries are styled as buttons or quiet headings, where a stray
-   triangle reads as a rendering fault; user-select stops a click from
-   highlighting the label. */
+/* Shared by every <details>-based control. The NATIVE marker is suppressed
+   because it cannot be positioned or animated consistently across engines;
+   user-select stops a click from highlighting the label. .modal's summary
+   carries .btn and stays bare -- a triangle on a button reads as a rendering
+   fault -- but .disclosure draws its own marker below, because suppressing
+   the native one and replacing it with nothing left the summary looking like
+   inert text with no sign it opens. */
 .disclosure > summary,
 .modal > summary { cursor: pointer; user-select: none; list-style: none; }
 .disclosure > summary::-webkit-details-marker,
@@ -508,12 +581,29 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   color: var(--text-muted); padding: var(--space-1) 0;
 }
 .disclosure > summary:hover { color: var(--accent); }
+/* The affordance. inline-block so the glyph can rotate; the open state turns
+   it a quarter turn, which is the convention readers already know from every
+   other disclosure. flex would collapse the summary's inline layout, so this
+   stays an inline marker. */
+.disclosure > summary::before {
+  content: "\25B8"; display: inline-block; width: 1em;
+  color: var(--text-muted); transition: transform 120ms ease;
+}
+.disclosure[open] > summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .disclosure > summary::before { transition: none; }
+}
 
 /* ---------- Callouts / banners ---------- */
 
 .callout {
   border: 1px solid var(--border); border-left-width: 3px;
-  border-radius: var(--radius-sm); padding: var(--space-3) var(--space-4); font-size: var(--type-2);
+  /* --type-3, matching .hint and .danger-item's description. A callout is the
+     box the UI uses when it has something the reader must not miss -- the
+     one-time code warning, the enroll-failure recovery steps, the next step to
+     take -- so it is the last place that should render a size smaller than the
+     app's running text. */
+  border-radius: var(--radius-sm); padding: var(--space-4); font-size: var(--type-3);
   background: var(--surface-2);
   /* Same rhythm as .field, so a callout between two blocks is separated from
      both. Without this a callout carries no vertical margin at all and the
@@ -541,13 +631,25 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    row's description happened to be, so two rows carrying the identical confirm
    field landed at different widths and no two buttons shared an edge. */
 .danger-item {
-  display: grid; grid-template-columns: minmax(0, 1fr) 200px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 240px;
   align-items: start; column-gap: var(--space-5);
-  padding: var(--space-4); border-bottom: 1px solid var(--border);
+  padding: var(--space-5); border-bottom: 1px solid var(--border);
+  row-gap: var(--space-3);
 }
 .danger-item:last-child { border-bottom: none; }
-.danger-item .meta strong { display: block; }
-.danger-item .meta span { color: var(--text-muted); font-size: var(--type-2); }
+/* DIRECT child only. As a descendant selector this also caught the <strong>
+   that emphasises the first clause of the description -- "This revokes every
+   passkey on the account immediately" -- turning an inline emphasis into a
+   block and stranding the rest of its own sentence on the next line, starting
+   with a bare comma. The title is the only strong that is a block. */
+.danger-item .meta > strong { display: block; }
+/* --type-3: this is the text that explains an irreversible action. It was a
+   13px muted caption under a bold heading, which is the styling the eye skips.
+   14px is the app's running-text size. */
+.danger-item .meta span { color: var(--text-muted); font-size: var(--type-3); }
+/* Room for the confirm label and the "you cannot do this" notices to sit on
+   one line at the common widths; the fixed column is what keeps the buttons
+   edge-aligned, so it widens rather than becoming content-sized. */
 /* Every action fills the column, so the buttons align regardless of label.
    Scoped to the column itself — inside a modal card the buttons sit on one
    row at their natural width. */
@@ -576,7 +678,16 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   width: min(440px, 100%); max-height: calc(100vh - var(--space-7));
   overflow: auto; margin-bottom: 0; text-align: left;
 }
-.modal-card p { margin: 0 0 var(--space-4); }
+/* One rhythm for every modal, so they stop each inheriting a different mix of
+   .card h2, .modal-card p and .field defaults. A modal is always the same three
+   parts: a title and its explanation (a PAIR, so 8px), the form (a new section,
+   so 24px), and the actions (24px). Previously the title sat 12px from its own
+   description but the description sat 16px from the form, which bound the
+   heading loosely to its explanation and read as three detached fragments. */
+.modal-card h2 { margin: 0 0 var(--space-2); }
+.modal-card p { margin: 0 0 var(--space-5); }
+.modal-card form .field { margin-bottom: 0; }
+.modal-card .btn-row { margin-top: var(--space-5); }
 
 /* ---------- Empty state ---------- */
 
@@ -605,6 +716,20 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 /* ---------- Utilities ---------- */
 
 .stack-sm > * + * { margin-top: var(--space-3); }
+/* The per-family countdown under an address in a .kv value. Its own line, and
+   clear of the copy pill above it. */
+.kv .expiry { margin-top: var(--space-2); font-size: var(--type-2); }
+/* For a card that stacks several INDEPENDENT blocks -- the enrollment page
+   carries a code field, two container steps, two callouts and a disclosure in
+   one body. Every one of those defaults to 16px below it, which is also what
+   separates the hints INSIDE a single step, so the hierarchy inverts: a step
+   boundary looks exactly like a line break and the page reads as one
+   undifferentiated run. 24px between blocks lets the unchanged 16px inside a
+   field mean "still the same group". Declared after .field and .callout so it
+   wins on source order at equal specificity; direct children only, so nothing
+   nested is touched. */
+.stack-lg > * { margin-bottom: var(--space-5); }
+.stack-lg > *:last-child { margin-bottom: 0; }
 .nowrap { white-space: nowrap; }
 
 /* ---------- Responsive ---------- */
