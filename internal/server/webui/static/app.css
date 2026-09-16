@@ -266,11 +266,9 @@ a:hover { text-decoration: underline; }
 .status { font-size: var(--type-2); min-height: 1.2em; margin: var(--space-4) 0 0; }
 .status-error { color: var(--danger); }
 
-/* The list is a set of existing things; the form below it creates a new one.
-   Those are different acts, and with a single passkey the :last-child rule
-   below strips the only border, so the entry ran straight into "Name this
-   passkey" with nothing between them. .section-split (utilities) draws that
-   boundary; this margin only has to clear it. */
+/* The list is a set of existing things; adding one is a separate act and lives
+   in its own card on /account, so this list needs no trailing separator and no
+   bottom margin -- the card's own padding is the boundary. */
 .passkey-list { list-style: none; margin: 0; padding: 0; }
 .passkey-list li {
   display: flex;
@@ -505,7 +503,14 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    resolves to -- 8px padding twice, a 16px line, and the 1px border twice,
    which the spacing scale's own comment exempts as a border width. */
 .filterbar .input { height: calc(var(--space-2) * 2 + var(--type-4) + 2px); }
-.filterbar .field:last-child { display: flex; flex-direction: column; }
+/* The submit field ABSORBS the bar's leftover width, and the button centres
+   inside it -- so the button is centred between the last input and the bar's
+   right edge on every filter bar, not only on the ones where some other field
+   happens to carry .grow. Pinning the field right instead (margin-left: auto)
+   still left it centred within its own 150px box: measured on /admin/audit,
+   137px of gap on one side of the button and 55px on the other. Growing the
+   field is what makes the two sides equal. */
+.filterbar .field:last-child { display: flex; flex-direction: column; flex: 1; }
 .filterbar .field:last-child .btn { margin: 0 auto; }
 
 /* ---------- Descriptions (key/value) ---------- */
@@ -778,9 +783,6 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    nested is touched. */
 .stack-lg > * { margin-bottom: var(--space-5); }
 .stack-lg > *:last-child { margin-bottom: 0; }
-/* A rule between two acts inside one card -- a list of what exists above, a
-   form that adds to it below. */
-.section-split { border-top: 1px solid var(--border); margin-top: var(--space-5); padding-top: var(--space-5); }
 .nowrap { white-space: nowrap; }
 
 /* ---------- Responsive ---------- */

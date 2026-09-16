@@ -1,22 +1,30 @@
 {{define "scripts"}}<script src="/static/passkey.js" defer></script>{{end}}
 {{define "content"}}
 <div class="page-head"><div><h1>Account</h1><p class="sub">{{.Email}}</p></div></div>
+{{/* Two cards, not one with a rule through it: the list is what exists and the
+     form creates something new. passkey.js finds every element by id and never
+     walks the DOM, so the split costs it nothing. */}}
 <div class="card">
   <div class="card-body">
     <h2>Passkeys</h2>
     <ul id="passkey-list" class="passkey-list"></ul>
-    <form id="add-passkey-form" class="section-split">
+  </div>
+</div>
+<div class="card">
+  <div class="card-body">
+    <h2>Add a passkey</h2>
+    <form id="add-passkey-form">
       <div class="field">
         <label for="add-passkey-name">Name this passkey</label>
         <input class="input" id="add-passkey-name" name="name" type="text" autocomplete="off" placeholder="e.g. MacBook Pro" required>
       </div>
-      <button class="btn primary" type="submit">Add a passkey</button>
+      <button class="btn primary" type="submit">Add Additional Passkey</button>
     </form>
     <p id="passkey-status" class="status" role="status" aria-live="polite"></p>
   </div>
 </div>
 <form id="logout-form" method="post" action="/api/v1/auth/logout">
   <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-  <button class="btn ghost" type="submit">Sign out</button>
+  <button class="btn" type="submit">Sign out</button>
 </form>
 {{end}}
