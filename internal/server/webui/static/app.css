@@ -160,13 +160,22 @@ a:hover { text-decoration: underline; }
    the smaller h2 (16px) took 12px -- which is why /login's "Sign in" sat almost
    on top of its own button. */
 .card h1 { font-size: var(--type-5); margin: 0 0 var(--space-4); }
-.card h2 { font-size: var(--type-4); margin: 0 0 var(--space-3); }
+/* --type-5. A card's h2 is the title of a whole section -- "Passkeys",
+   "Current addresses", "Danger zone" -- and at 16px it was the same size as
+   the body text beneath it, distinguished only by weight. It takes 16px
+   beneath it to match, per the size/gap pairing on .card h1 above. No template
+   has a .card h1 and a .card h2 as siblings (the auth shell uses h1, the app
+   shell uses h2), so the two do not collide at the same size. */
+.card h2 { font-size: var(--type-5); margin: 0 0 var(--space-4); }
 
 .muted { color: var(--text-muted); font-size: var(--type-2); }
 .center { text-align: center; }
 
 .field { margin-bottom: var(--space-4); }
-.field label { display: block; font-size: var(--type-2); font-weight: 600; margin-bottom: var(--space-2); }
+/* --type-3, with .hint and .callout. A field label names the thing you are
+   about to type into; at 13px it was smaller than the value it labels. The
+   filter bar keeps its own 12px uppercase label treatment below. */
+.field label { display: block; font-size: var(--type-3); font-weight: 600; margin-bottom: var(--space-2); }
 /* A field's own margin-bottom above (--space-4, the normal field-to-field
    gap) is the wrong gap above a submit button — it makes a primary action
    read as just another field (Task 5 review round 3; the maintainer
@@ -205,6 +214,13 @@ a:hover { text-decoration: underline; }
    a WebAuthn-capable browser. */
 .field:has(+ .btn) { margin-bottom: 0; }
 .field + .btn { margin-top: var(--space-4); }
+/* The same relationship when the actions are a .btn-row rather than a lone
+   .btn -- 14 call sites across 8 templates, which the rule above never covered,
+   so whether a form's actions got deliberate spacing depended on which markup
+   the template happened to use. 24px, matching .modal-card .btn-row: an action
+   bar is separated from the form, not spaced like one more field. */
+.field:has(+ .btn-row) { margin-bottom: 0; }
+.field + .btn-row { margin-top: var(--space-5); }
 
 .input {
   width: 100%;
@@ -250,7 +266,12 @@ a:hover { text-decoration: underline; }
 .status { font-size: var(--type-2); min-height: 1.2em; margin: var(--space-4) 0 0; }
 .status-error { color: var(--danger); }
 
-.passkey-list { list-style: none; margin: 0 0 var(--space-4); padding: 0; }
+/* The list is a set of existing things; the form below it creates a new one.
+   Those are different acts, and with a single passkey the :last-child rule
+   below strips the only border, so the entry ran straight into "Name this
+   passkey" with nothing between them. .section-split (utilities) draws that
+   boundary; this margin only has to clear it. */
+.passkey-list { list-style: none; margin: 0; padding: 0; }
 .passkey-list li {
   display: flex;
   align-items: center;
@@ -340,7 +361,11 @@ a:hover { text-decoration: underline; }
 /* ---------- Page header ---------- */
 
 .page-head {
-  display: flex; align-items: flex-start; justify-content: space-between;
+  /* center, not flex-start: the action on the right is a single button and the
+     block on the left is a heading plus its subtitle, so aligning their tops
+     hung the button off the heading's cap line with the subtitle unbalanced
+     beneath it. Centred, the button sits against the whole block. */
+  display: flex; align-items: center; justify-content: space-between;
   gap: var(--space-4); margin-bottom: var(--space-5); flex-wrap: wrap;
 }
 .page-head h1 { margin: 0 0 var(--space-1); font-size: var(--type-6); letter-spacing: -.2px; }
@@ -412,8 +437,14 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 .btn.danger { background: var(--surface); border-color: var(--danger); color: var(--danger); }
 .btn.danger:hover { background: var(--danger-soft); }
 .btn.solid-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
-.btn.ghost:hover { background: var(--neutral-soft); }
+/* A ghost button is the QUIET option, not an invisible one. With a transparent
+   border AND a transparent background it had no boundary at all at rest, so
+   "Cancel" beside a solid primary read as a stray line of text rather than the
+   other half of a pair of actions. It keeps the muted label and flat
+   background -- the hierarchy against .primary is intact -- but it now has an
+   edge, so it is identifiable as a control before you hover it. */
+.btn.ghost { border-color: var(--border); background: transparent; color: var(--text-muted); }
+.btn.ghost:hover { background: var(--neutral-soft); border-color: var(--border-strong); color: var(--text); }
 /* A compact button is still a touch target. The floor is a min-height rather
    than more padding because the same padding produces two different heights
    depending on the element: measured at 390px, .btn.sm was 24px as a <button>
@@ -464,6 +495,16 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    wide, so it sat hard against the left of an oversized box and the remainder
    read as a ragged gap before the bar's right edge. Centre it in the space its
    field reserves rather than special-casing the width. */
+/* Every control in the bar is one box height. A <select class="input"> and an
+   <input class="input"> do NOT agree on height by themselves: with identical
+   padding, border and font-size the select measured 36px against the input's
+   34px, because a select sizes from its own internal button box -- setting
+   line-height does not touch it (measured: no change). With the bar aligned to
+   flex-end the extra 2px pushed the select's midpoint 1px above the Apply
+   button beside it. The height below is the scale arithmetic the input already
+   resolves to -- 8px padding twice, a 16px line, and the 1px border twice,
+   which the spacing scale's own comment exempts as a border width. */
+.filterbar .input { height: calc(var(--space-2) * 2 + var(--type-4) + 2px); }
 .filterbar .field:last-child { display: flex; flex-direction: column; }
 .filterbar .field:last-child .btn { margin: 0 auto; }
 
@@ -692,6 +733,10 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 /* ---------- Empty state ---------- */
 
 .empty { text-align: center; padding: var(--space-7) var(--space-5); }
+/* An empty state that carries a FORM is not mostly whitespace -- it is a page
+   with work to do on it. 48px above and below framed the icon-and-sentence
+   version well and left the form marooned in a tall box. */
+.empty:has(form) { padding-block: var(--space-5); }
 .empty .icon { font-size: 40px; opacity: .5; }
 /* Every <h3> in the UI is an empty state's heading. Without a size here it
    took the UA's 1.17em against a 14px parent and rendered at 16.38px — a
@@ -703,7 +748,10 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    labels and hints centre over left-aligned inputs and a left-flushed
    button. Only the form's own text goes back to normal reading order; the
    icon/heading/lead stay centred. */
-.empty form { text-align: left; }
+/* An empty state's form is a separate act from the copy that introduces it --
+   the copy is centred and the form is not -- so it needs more than the 16px
+   that follows the description paragraph. */
+.empty form { text-align: left; margin-top: var(--space-5); }
 
 /* ---------- Pagination ---------- */
 
@@ -730,6 +778,9 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    nested is touched. */
 .stack-lg > * { margin-bottom: var(--space-5); }
 .stack-lg > *:last-child { margin-bottom: 0; }
+/* A rule between two acts inside one card -- a list of what exists above, a
+   form that adds to it below. */
+.section-split { border-top: 1px solid var(--border); margin-top: var(--space-5); padding-top: var(--space-5); }
 .nowrap { white-space: nowrap; }
 
 /* ---------- Responsive ---------- */

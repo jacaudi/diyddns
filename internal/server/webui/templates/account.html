@@ -5,7 +5,7 @@
   <div class="card-body">
     <h2>Passkeys</h2>
     <ul id="passkey-list" class="passkey-list"></ul>
-    <form id="add-passkey-form">
+    <form id="add-passkey-form" class="section-split">
       <div class="field">
         <label for="add-passkey-name">Name this passkey</label>
         <input class="input" id="add-passkey-name" name="name" type="text" autocomplete="off" placeholder="e.g. MacBook Pro" required>
@@ -17,6 +17,6 @@
 </div>
 <form id="logout-form" method="post" action="/api/v1/auth/logout">
   <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-  <button class="btn" type="submit">Sign out</button>
+  <button class="btn ghost" type="submit">Sign out</button>
 </form>
 {{end}}
