@@ -270,15 +270,25 @@ a:hover { text-decoration: underline; }
    in its own card on /account, so this list needs no trailing separator and no
    bottom margin -- the card's own padding is the boundary. */
 .passkey-list { list-style: none; margin: 0; padding: 0; }
+/* Each enrolled passkey is a RECORD, drawn on its own surface. Separated only
+   by a hairline rule on the card's own background it read as a line of text
+   that had sunk into the card -- and with a single passkey the :last-child rule
+   removed even that, leaving nothing to say an entry was there at all. Same
+   surface/border/radius treatment the copy pill uses, so a thing you own looks
+   like a thing you own throughout the UI. */
 .passkey-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
-.passkey-list li:last-child { border-bottom: none; }
+.passkey-list li + li { margin-top: var(--space-3); }
+/* The name, which passkey.js renders as the row's first span. */
+.passkey-list li > span:first-child { font-weight: 600; }
 .passkey-list .actions { display: flex; gap: var(--space-2); }
 /* The row's buttons carry .btn.sm — there is no ".passkey-list button" rule,
    deliberately. It used to hand-roll its own smaller font and padding, which
@@ -487,6 +497,9 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 }
 .filterbar .field { margin: 0; min-width: 150px; }
 .filterbar .field label { font-size: var(--type-1); text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); }
+/* Exactly one field per filter bar carries .grow: it absorbs the bar's
+   leftover width so the submit field lands against the trailing edge. A bar
+   with no .grow field leaves that slack after the button instead. */
 .filterbar .grow { flex: 1; }
 /* The submit control is a button wrapped in a .field, so it inherits the 150px
    minimum that exists to stop a <select> collapsing. The button is about 66px
@@ -503,14 +516,14 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    resolves to -- 8px padding twice, a 16px line, and the 1px border twice,
    which the spacing scale's own comment exempts as a border width. */
 .filterbar .input { height: calc(var(--space-2) * 2 + var(--type-4) + 2px); }
-/* The submit field ABSORBS the bar's leftover width, and the button centres
-   inside it -- so the button is centred between the last input and the bar's
-   right edge on every filter bar, not only on the ones where some other field
-   happens to carry .grow. Pinning the field right instead (margin-left: auto)
-   still left it centred within its own 150px box: measured on /admin/audit,
-   137px of gap on one side of the button and 55px on the other. Growing the
-   field is what makes the two sides equal. */
-.filterbar .field:last-child { display: flex; flex-direction: column; flex: 1; }
+/* Pin the submit field to the bar's trailing edge; the button centres inside
+   it. This depends on EVERY filter bar having exactly one .grow field to
+   absorb the leftover width -- see .filterbar .grow above. /admin/audit had
+   none, which stranded its button 137px from the last input and 55px from the
+   bar's edge; the fix was to give that bar a .grow field, not to grow this one.
+   Growing THIS field instead makes it compete with .grow for the slack, which
+   collapses the search/owner box to half its width. */
+.filterbar .field:last-child { display: flex; flex-direction: column; margin-left: auto; }
 .filterbar .field:last-child .btn { margin: 0 auto; }
 
 /* ---------- Descriptions (key/value) ---------- */
@@ -783,6 +796,11 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
    nested is touched. */
 .stack-lg > * { margin-bottom: var(--space-5); }
 .stack-lg > *:last-child { margin-bottom: 0; }
+/* A live region that has nothing to say yet still occupied its own line plus
+   margins, which left a band of dead space at the foot of /account's card. It
+   stays in the DOM -- aria-live needs the node present before the text
+   arrives -- it just takes no room until it has content. */
+.status:empty { display: none; }
 .nowrap { white-space: nowrap; }
 
 /* ---------- Responsive ---------- */
