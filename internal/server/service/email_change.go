@@ -181,7 +181,16 @@ func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail
 
 	subject, body := emailpkg.ChangeConfirmBody(s.baseURL + "/account/email/confirm?token=" + token)
 	if d := sendAdvisory(ctx, s.mail, u.ID, u.ID, normalized, subject, body); d.Err != nil {
-		if cerr := s.st.Users().ClearPendingEmail(ctx, u.ID); cerr != nil {
+		// context.WithoutCancel: sendAdvisory detaches the send from
+		// cancellation for exactly this reason -- a slow SMTP peer can outlive
+		// a client disconnect -- so a send that fails after the request
+		// context was canceled is the expected shape here, not an edge case.
+		// Reusing ctx for the rollback would hit the hazard recordSendFailure
+		// already dodges (grants.go:120-134): database/sql rejects an
+		// already-canceled context before the write reaches the driver,
+		// silently leaving the dangling pending change this rollback exists
+		// to remove.
+		if cerr := s.st.Users().ClearPendingEmail(context.WithoutCancel(ctx), u.ID); cerr != nil {
 			s.mail.log.ErrorContext(ctx, "email change: rollback of an unsent pending change failed; the pruner clears it within the hour",
 				"error", cerr, "user_id", u.ID)
 		}

@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -262,5 +264,46 @@ func TestEmailChange_Cancel(t *testing.T) {
 	rows := auditRows(t, st, "user.email_change_cancelled")
 	if len(rows) != 1 || rows[0].DetailsJSON != `{"new":"new@example.com","old":"old@example.com"}` {
 		t.Errorf("cancelled rows = %+v, want one with old/new details", rows)
+	}
+}
+
+// TestEmailChange_Request_RollbackSurvivesCanceledRequestContext pins the same
+// hazard grants.go's recordSendFailure and sendAdvisory already dodge
+// (grants.go:120-134): sendAdvisory detaches the SEND itself from
+// cancellation (context.WithoutCancel) specifically so a slow SMTP peer can
+// outlive a client disconnect, which means a send that FAILS can do so after
+// the caller's own request context is already canceled. If Request's rollback
+// (ClearPendingEmail) reused that same canceled context, database/sql would
+// reject the write before it reached the driver, leaving a dangling pending
+// change with a confirmation link nobody will ever get -- and the
+// no-resend short-circuit (D12) would then report success on retry while
+// sending nothing, for up to emailChangeTTL.
+//
+// sendDelay + a goroutine that cancels partway through it reproduces the
+// production shape: every write that precedes the send (List, SetPendingEmail,
+// the requested audit row) completes on a still-live context, and only the
+// send itself, and the rollback that follows its failure, run after cancel.
+func TestEmailChange_Request_RollbackSurvivesCanceledRequestContext(t *testing.T) {
+	mailer := &fakeMailer{enabled: true, sendErr: errors.New("smtp exploded"), sendDelay: 20 * time.Millisecond}
+	st, svc := newEmailChangeSvc(t, mailer)
+	u := seedUser(t, st, "old@example.com", "user")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		cancel() // stand in for the client disconnecting while the send stalls
+	}()
+
+	err := svc.Request(ctx, u, "new@example.com")
+	if !errors.Is(err, ErrConfirmationNotSent) {
+		t.Fatalf("err = %v, want ErrConfirmationNotSent", err)
+	}
+
+	got, getErr := st.Users().GetByID(t.Context(), u.ID)
+	if getErr != nil {
+		t.Fatalf("GetByID: %v", getErr)
+	}
+	if got.PendingEmail != "" || got.PendingEmailExpiresAt != 0 {
+		t.Errorf("pending not rolled back on a canceled request context: (%q, %d)", got.PendingEmail, got.PendingEmailExpiresAt)
 	}
 }
