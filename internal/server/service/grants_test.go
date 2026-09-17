@@ -1189,3 +1189,40 @@ func TestIssueInvite_NonASCIIBaseURLFailsTheSendLoudly(t *testing.T) {
 		t.Errorf("Delivery.Err = %v, want it to wrap ErrNotASCII", delivery.Err)
 	}
 }
+
+// TestSendAdvisory_MailsTheRecipientItIsGiven pins the one thing the #131
+// extraction adds over deliver: the recipient is a parameter, not u.Email.
+// An email change mails an address that is NOT (yet, or any more) on the row.
+func TestSendAdvisory_MailsTheRecipientItIsGiven(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true}
+	m := mailDeps{mailer: mailer, audit: NewAuditWriter(st), log: discardLogger(), timeout: time.Second}
+
+	d := sendAdvisory(t.Context(), m, "actor-1", "target-1", "elsewhere@example.com", "subj", "body")
+	if !d.Sent() || d.To != "elsewhere@example.com" {
+		t.Fatalf("Delivery = %+v, want Sent to elsewhere@example.com", d)
+	}
+	sent := mailer.Sent()
+	if len(sent) != 1 || sent[0].to != "elsewhere@example.com" {
+		t.Fatalf("sent = %+v, want exactly one mail to elsewhere@example.com", sent)
+	}
+
+	// Nil mailer is a supported state: nothing attempted, nothing audited.
+	if d := sendAdvisory(t.Context(), mailDeps{log: discardLogger(), timeout: time.Second}, "a", "t", "x@example.com", "s", "b"); d.Attempted {
+		t.Fatalf("nil mailer: Delivery = %+v, want Attempted false", d)
+	}
+
+	// A failed send audits email.send_failed against targetUserID.
+	failing := &fakeMailer{enabled: true, sendErr: errors.New("boom")}
+	m.mailer = failing
+	if d := sendAdvisory(t.Context(), m, "actor-1", "target-1", "x@example.com", "s", "b"); d.Err == nil {
+		t.Fatal("Delivery.Err = nil, want the send failure")
+	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: EventEmailSendFailed}, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].TargetID != "target-1" || page.Rows[0].ActorUserID != "actor-1" {
+		t.Fatalf("audit rows = %+v, want one email.send_failed for target-1 by actor-1", page.Rows)
+	}
+}
