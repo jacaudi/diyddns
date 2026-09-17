@@ -16,7 +16,7 @@
       <stop offset="0" stop-color="var(--client)"/>
       <stop offset="1" stop-color="var(--arrow)"/>
     </linearGradient>
-    <linearGradient id="flow-in" gradientUnits="userSpaceOnUse" x1="639" y1="310" x2="761" y2="259">
+    <linearGradient id="flow-in" gradientUnits="userSpaceOnUse" x1="639" y1="310" x2="763" y2="296">
       <stop offset="0" stop-color="var(--arrow)"/>
       <stop offset="1" stop-color="var(--server)"/>
     </linearGradient>
@@ -169,7 +169,7 @@
   <text class="b center" x="563" y="458">POST /agent/v1/checkin</text>
 
   <!-- Arrow: the internet box (right edge) -> someone's garage block -->
-  <path class="flow" stroke="url(#flow-in)" marker-end="url(#arrow-server)" d="M639,310 C 685,300 722,275 761,259"/>
+  <path class="flow" stroke="url(#flow-in)" marker-end="url(#arrow-server)" d="M639,310 C 700,355 725,310 763,296"/>
 
   <!-- ===================== RIGHT: SOMEONE'S GARAGE ===================== -->
   <rect class="zone" x="766" y="50" width="684" height="566" rx="18"/>
