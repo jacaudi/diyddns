@@ -114,7 +114,7 @@ instant, so that device may briefly regress until the newer delta lands — and 
 the one lost, until your next snapshot or poll. At most 32 streams are served at once; the 33rd
 handshake gets `503`.
 
-## Kubernetes glue
+## Kubernetes Glue
 
 ```sh
 curl -fsS -H "Authorization: Bearer $TOKEN" https://ddns.example.com/feed/v1/devices.json \
@@ -122,7 +122,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" https://ddns.example.com/feed/v1/dev
   | kubectl patch securitypolicy allow-home --type merge -p "$(cat)"
 ```
 
-## Feed expiry
+## Feed Expiry
 
 An address that stops confirming itself is a stale allow-list entry, not a device you meant to
 keep granting access. `feed.expire_after_days` clears an unconfirmed address from the device —

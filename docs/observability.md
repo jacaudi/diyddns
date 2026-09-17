@@ -25,7 +25,7 @@ credential (`Cookie`, `Authorization`, `X-CSRF-Token`, the agent's
 `request_id` on every record, so pointing it at `Cookie` would publish the
 session cookie to the log.
 
-## OpenTelemetry export (OTLP)
+## OpenTelemetry Export (OTLP)
 
 *Optional, off by default.*
 

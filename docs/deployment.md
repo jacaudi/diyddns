@@ -44,7 +44,7 @@ just named is listed the code was spent and you need a fresh one; if it is
 absent the code is still good, so fix what the message reports and run the
 same command again, without removing the volume.
 
-## Building from source (advanced)
+## Building From Source (Advanced)
 
 Skip this if you're using the containers above — it's for running the
 binaries directly, with no Docker.
@@ -80,7 +80,7 @@ schedule, no further setup. `task test:e2e` drives the whole server+client
 flow end to end, including the WebAuthn ceremony, with a virtual
 authenticator, so you can see the happy path run without a real browser.
 
-## Production deployment
+## Production Deployment
 
 The server holds a **single** SQLite connection and writes only to the database
 file — it must never run as more than one instance against the same file, and

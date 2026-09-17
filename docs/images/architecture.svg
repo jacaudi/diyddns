@@ -1,0 +1,220 @@
+<svg viewBox="0 0 1400 660" xmlns="http://www.w3.org/2000/svg" role="img"
+     aria-label="Architecture: a diyddns client on a Raspberry Pi 5 at a friend's house checks in over the public internet to a diyddns server running in a Kubernetes cluster in someone's garage. The server writes to a single SQLite file, which fans out to the Web UI, Webhooks, the Feed, and an hourly stale-address sweep.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
+    </marker>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="3" flood-color="#000000" flood-opacity="0.16"/>
+    </filter>
+    <style>
+      :root {
+        --text: #1f2328; --muted: #57606a; --faint: #8c959f; --bg: #ffffff;
+        --zone-fill: #f6f8fa; --zone-stroke: #b6bcc4;
+        --box-fill: #ffffff; --box-stroke: #d0d7de;
+        --client: #1a7f37; --client-fill: #e6f8ec;
+        --server: #0969da; --server-fill: #eaf5ff;
+        --db: #8250df; --db-fill: #f8f0ff;
+        --k8s-fill: #eef2ff; --k8s-stroke: #6376e0;
+        --arrow: #6e7781; --arrowhead: #6e7781;
+        --icon: #6e7781;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --text: #e6edf3; --muted: #9198a1; --faint: #6e7681; --bg: #0d1117;
+          --zone-fill: #161b22; --zone-stroke: #3d4450;
+          --box-fill: #161b22; --box-stroke: #30363d;
+          --client: #56d364; --client-fill: #10261a;
+          --server: #58a6ff; --server-fill: #0c1f33;
+          --db: #d2a8ff; --db-fill: #1e1329;
+          --k8s-fill: #131a2e; --k8s-stroke: #5468d4;
+          --arrow: #8b949e; --arrowhead: #8b949e;
+          --icon: #8b949e;
+        }
+      }
+      text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); }
+      .title { font-size: 19px; font-weight: 700; }
+      .sub { font-size: 12px; font-style: italic; fill: var(--muted); }
+      .h { font-size: 13.5px; font-weight: 700; }
+      .b { font-size: 10.5px; fill: var(--muted); }
+      .lbl { font-size: 10.5px; fill: var(--muted); }
+      .zone { fill: var(--zone-fill); stroke: var(--zone-stroke); stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .box { fill: var(--box-fill); stroke: var(--box-stroke); stroke-width: 1.5; }
+      .client-box { fill: var(--client-fill); stroke: var(--client); stroke-width: 1.75; }
+      .server-box { fill: var(--server-fill); stroke: var(--server); stroke-width: 1.75; }
+      .db-box { fill: var(--db-fill); stroke: var(--db); stroke-width: 1.5; }
+      .k8s-zone { fill: var(--k8s-fill); stroke: var(--k8s-stroke); stroke-width: 1.5; }
+      .bus { fill: var(--faint); }
+      .arrow { stroke: var(--arrow); stroke-width: 1.7; fill: none; marker-end: url(#arrow); stroke-linecap: round; }
+      .arrowhead { fill: var(--arrowhead); }
+      .icon { fill: none; stroke: var(--icon); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .icon-accent { fill: none; stroke-width: 2; stroke-linecap: round; }
+      .center { text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1400" height="660" fill="var(--bg)"/>
+
+  <!-- ===================== LEFT: A FRIEND'S HOUSE ===================== -->
+  <rect class="zone" x="30" y="150" width="330" height="370" rx="18"/>
+
+  <!-- house icon: clean line art -->
+  <g transform="translate(52,176)" class="icon" stroke="var(--client)">
+    <path d="M2,15 L16,3 L30,15"/>
+    <path d="M6,13 V29 H26 V13"/>
+    <path d="M13,29 V20 H19 V29"/>
+  </g>
+  <text class="title" x="92" y="196">A Friend's House</text>
+  <text class="sub" x="52" y="216">Somewhere on a residential ISP connection</text>
+
+  <!-- IP discovery quorum -->
+  <rect class="box" x="70" y="250" width="250" height="92" rx="10" filter="url(#shadow)"/>
+  <text class="h" x="90" y="278">IP Discovery Quorum</text>
+  <text class="b" x="90" y="296">Asks 3 independent lookup</text>
+  <text class="b" x="90" y="309">services, needs 2 of 3 to agree</text>
+  <rect x="90" y="318" width="66" height="18" rx="9" class="box"/>
+  <text class="b center" x="123" y="330">ident.me</text>
+  <rect x="163" y="318" width="60" height="18" rx="9" class="box"/>
+  <text class="b center" x="193" y="330">ipify</text>
+  <rect x="230" y="318" width="76" height="18" rx="9" class="box"/>
+  <text class="b center" x="268" y="330">icanhazip</text>
+
+  <line class="arrow" x1="195" y1="342" x2="195" y2="366"/>
+
+  <!-- Raspberry Pi board -->
+  <rect class="client-box" x="70" y="368" width="250" height="120" rx="14" filter="url(#shadow)"/>
+  <!-- corner mounting holes, a clean board motif -->
+  <circle cx="86" cy="384" r="4" fill="none" stroke="var(--client)" stroke-width="1.75"/>
+  <circle cx="304" cy="384" r="4" fill="none" stroke="var(--client)" stroke-width="1.75"/>
+  <!-- small chip glyph -->
+  <rect x="272" y="440" width="30" height="30" rx="3" fill="none" stroke="var(--client)" stroke-width="1.75"/>
+  <line x1="278" y1="440" x2="278" y2="436" stroke="var(--client)" stroke-width="1.75"/>
+  <line x1="288" y1="440" x2="288" y2="436" stroke="var(--client)" stroke-width="1.75"/>
+  <line x1="298" y1="440" x2="298" y2="436" stroke="var(--client)" stroke-width="1.75"/>
+  <line x1="278" y1="470" x2="278" y2="474" stroke="var(--client)" stroke-width="1.75"/>
+  <line x1="288" y1="470" x2="288" y2="474" stroke="var(--client)" stroke-width="1.75"/>
+  <line x1="298" y1="470" x2="298" y2="474" stroke="var(--client)" stroke-width="1.75"/>
+
+  <text class="h" x="90" y="404">diyddns-client</text>
+  <text class="b" x="90" y="420">on a Raspberry Pi 5</text>
+  <text class="b" x="90" y="440">HMAC-signed device secret</text>
+  <text class="b" x="90" y="454">— no other credentials</text>
+  <text class="lbl" x="90" y="474">checks in periodically, or on change</text>
+
+  <!-- Arrow client -> internet -->
+  <path class="arrow" d="M320,424 C 440,378 500,292 585,232"/>
+
+  <!-- ===================== CENTER: PUBLIC INTERNET (globe) ===================== -->
+  <g transform="translate(660,178)">
+    <circle r="46" class="box" filter="url(#shadow)"/>
+    <g class="icon">
+      <circle r="46"/>
+      <ellipse rx="18" ry="46"/>
+      <line x1="-46" y1="0" x2="46" y2="0"/>
+      <path d="M-40,-22 C -10,-10 10,-10 40,-22" fill="none"/>
+      <path d="M-40,22 C -10,10 10,10 40,22" fill="none"/>
+    </g>
+    <text class="h center" y="70">Public Internet</text>
+  </g>
+  <text class="lbl center" x="660" y="266">HMAC-signed checkin</text>
+  <text class="b center" x="660" y="280">POST /agent/v1/checkin</text>
+
+  <!-- Arrow internet -> server -->
+  <path class="arrow" d="M732,228 C 785,290 806,330 826,368"/>
+
+  <!-- ===================== RIGHT: SOMEONE'S GARAGE ===================== -->
+  <rect class="zone" x="800" y="60" width="570" height="540" rx="18"/>
+
+  <!-- garage icon: clean line art with a real paneled door -->
+  <g transform="translate(822,84)" class="icon" stroke="var(--server)">
+    <path d="M2,16 L20,3 L38,16"/>
+    <path d="M2,15 V34 H38 V15"/>
+    <line x1="8" y1="20" x2="32" y2="20"/>
+    <line x1="8" y1="25" x2="32" y2="25"/>
+    <line x1="8" y1="30" x2="32" y2="30"/>
+  </g>
+  <text class="title" x="872" y="102">Someone's Garage</text>
+  <text class="sub" x="822" y="132">A small Kubernetes cluster, one node</text>
+
+  <!-- k8s inner zone: visually distinct, not just a nested dashed twin -->
+  <rect class="k8s-zone" x="820" y="154" width="530" height="426" rx="14"/>
+  <g transform="translate(838,170)">
+    <polygon points="9,0 18,4.5 18,13.5 9,18 0,13.5 0,4.5" fill="none" stroke="var(--k8s-stroke)" stroke-width="1.75"/>
+    <circle cx="9" cy="9" r="2.6" fill="var(--k8s-stroke)"/>
+  </g>
+  <text class="h" x="864" y="183" fill="var(--k8s-stroke)">Kubernetes cluster</text>
+
+  <!-- server pod -->
+  <rect class="server-box" x="905" y="198" width="360" height="72" rx="10" filter="url(#shadow)"/>
+  <text class="h center" x="1085" y="222">diyddns-server</text>
+  <text class="b center" x="1085" y="238">Deployment · replicas: 1</text>
+  <text class="b center" x="1085" y="253">strategy: Recreate — single SQLite writer</text>
+
+  <line class="arrow" x1="1085" y1="270" x2="1085" y2="294"/>
+
+  <!-- SQLite cylinder -->
+  <g transform="translate(940,294)" filter="url(#shadow)">
+    <ellipse cx="145" cy="12" rx="145" ry="12" class="db-box"/>
+    <rect x="0" y="12" width="290" height="64" fill="var(--db-fill)" stroke="none"/>
+    <line x1="0" y1="12" x2="0" y2="76" stroke="var(--db)" stroke-width="1.5"/>
+    <line x1="290" y1="12" x2="290" y2="76" stroke="var(--db)" stroke-width="1.5"/>
+    <ellipse cx="145" cy="76" rx="145" ry="12" class="db-box"/>
+  </g>
+  <text class="h center" x="1085" y="338">SQLite — one file</text>
+  <text class="b center" x="1085" y="354">devices · ip_history · audit_log</text>
+
+  <!-- bus: db -> single row of four, each with its own glyph -->
+  <line class="arrow" x1="1085" y1="382" x2="1085" y2="404"/>
+  <rect class="bus" x="850" y="404" width="470" height="4" rx="2"/>
+  <line class="arrow" x1="915" y1="406" x2="915" y2="426"/>
+  <line class="arrow" x1="1035" y1="406" x2="1035" y2="426"/>
+  <line class="arrow" x1="1155" y1="406" x2="1155" y2="426"/>
+  <line class="arrow" x1="1275" y1="406" x2="1275" y2="426"/>
+
+  <!-- fan-out: one row of four, each with a small glyph -->
+  <rect class="box" x="850" y="428" width="115" height="98" rx="10" filter="url(#shadow)"/>
+  <g transform="translate(864,438)" class="icon" stroke="var(--server)">
+    <rect x="0" y="0" width="20" height="15" rx="2.5"/>
+    <line x1="0" y1="4.5" x2="20" y2="4.5"/>
+  </g>
+  <text class="h" x="864" y="470">Web UI</text>
+  <text class="b" x="864" y="486">passkey / OIDC</text>
+  <text class="b" x="864" y="499">sessions</text>
+  <text class="lbl" x="864" y="518">→ you, browser</text>
+
+  <rect class="box" x="972" y="428" width="115" height="98" rx="10" filter="url(#shadow)"/>
+  <g transform="translate(986,438)" class="icon" stroke="var(--server)">
+    <circle cx="4" cy="12" r="4"/>
+    <circle cx="16" cy="4" r="4"/>
+    <line x1="7" y1="10" x2="13" y2="6"/>
+  </g>
+  <text class="h" x="986" y="470">Webhooks</text>
+  <text class="b" x="986" y="486">signed HTTP,</text>
+  <text class="b" x="986" y="499">per event</text>
+  <text class="lbl" x="986" y="518">→ automation</text>
+
+  <rect class="box" x="1094" y="428" width="115" height="98" rx="10" filter="url(#shadow)"/>
+  <g transform="translate(1108,438)" class="icon" stroke="var(--server)">
+    <circle cx="3" cy="15" r="2.2" fill="var(--server)" stroke="none"/>
+    <path d="M-1,11 a 8,8 0 0 1 8,0" fill="none"/>
+    <path d="M-4,6 a 14,14 0 0 1 14,0" fill="none"/>
+  </g>
+  <text class="h" x="1108" y="470">Feed</text>
+  <text class="b" x="1108" y="486">REST poll +</text>
+  <text class="b" x="1108" y="499">WS stream</text>
+  <text class="lbl" x="1108" y="518">→ gateway</text>
+  <text class="lbl" x="1108" y="530">allow-list</text>
+
+  <rect class="box" x="1216" y="428" width="115" height="98" rx="10" filter="url(#shadow)"/>
+  <g transform="translate(1230,438)" class="icon" stroke="var(--server)">
+    <circle cx="8" cy="8" r="8"/>
+    <path d="M8,3 V8 L12,11"/>
+  </g>
+  <text class="h" x="1230" y="470">Stale Sweep</text>
+  <text class="b" x="1230" y="486">expires unconfirmed</text>
+  <text class="b" x="1230" y="499">addresses</text>
+  <text class="lbl" x="1230" y="518">→ owner email,</text>
+  <text class="lbl" x="1230" y="530">then removal</text>
+
+  <text class="sub center" x="700" y="638">One SQLite file is the whole source of truth — every feature above reads or writes it, nothing is cached elsewhere.</text>
+</svg>

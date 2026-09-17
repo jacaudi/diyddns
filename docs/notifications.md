@@ -28,7 +28,7 @@ An admin adds an endpoint from `/admin/endpoints`: a label and a target URL. The
 that endpoint's signing secret exactly once — copy it immediately, it cannot be shown again, and
 creating another endpoint will not show it again either.
 
-## The payload
+## The Payload
 
 Every delivery is one JSON object, one event. There are three device events and one rule for
 all of them: **the device's allowed set is now `current`** — an all-null `current` means delete
@@ -100,7 +100,7 @@ two as equivalent: `null` means "this device has no IPv6 (or IPv4) on record," w
 be indistinguishable from "the address was explicitly cleared." Collapsing them loses that
 distinction anywhere you store or diff the value.
 
-## Dedupe on `(type, id)`, not `id` alone
+## Dedupe on `(type, id)`, Not `id` Alone
 
 Delivery is **at-least-once**: if the server crashes after a successful POST but before it
 records the outcome, the same delivery — byte-identical payload — is retried after restart. A
@@ -119,7 +119,7 @@ between the ids your endpoint sees are the normal case, not a signal of anything
 `device.added` and `device.removed` the id is the feed sequence number rather than an
 `ip_history` id; it is unique per event and the same `(type, id)` rule applies.
 
-## Verifying a delivery
+## Verifying a Delivery
 
 Every delivery carries three headers alongside the JSON body:
 
@@ -159,7 +159,7 @@ Once verified, **branch on the body's `type`.** Known types today are `device.ip
 rather than erroring — a future version may add new event types, and treating an unknown type as
 an error breaks forward compatibility for every existing consumer.
 
-## `410 Gone` ends that delivery
+## `410 Gone` Ends That Delivery
 
 Respond `410 Gone` and that **one delivery** stops immediately — no further retries for it,
 regardless of attempts remaining. It does **not** disable the endpoint: the next event (a new IP
@@ -168,7 +168,7 @@ endpoint out of future deliveries in this version; only an admin can disable or 
 endpoint. Every other non-2xx response (or no response at all — timeout, connection refused, TLS
 failure) is retried with doubling backoff up to `notifications.max_attempts`.
 
-## Egress policy (operator-only)
+## Egress Policy (Operator-Only)
 
 A notification endpoint's destination is policed at the address DIYDDNS actually dials, every
 attempt — not just at the URL you typed when creating it. By default, no private or loopback
@@ -193,7 +193,7 @@ low 32 bits, so allowing the whole `/96` **also re-permits the cloud metadata ad
 narrowing the prefix to what you actually need over allowing the full `/96`. The server logs a
 startup warning when a configured prefix is this broad.
 
-## Trusting an internal CA
+## Trusting an Internal CA
 
 If a notification endpoint sits behind a certificate from an internal/private CA, set
 `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` in the server's environment so the outbound
@@ -201,13 +201,13 @@ HTTPS client trusts it. **This works on Linux — the shipped container image �
 macOS**: Go's certificate verifier on Darwin uses the OS's own Security framework instead of these
 variables, so a self-built macOS binary needs the CA installed in the system keychain instead.
 
-## What an admin sees on failure
+## What an Admin Sees on Failure
 
 A failed delivery's cause is reported on the endpoint's page as exactly one of six fixed classes:
 `blocked`, `unreachable`, `tls`, `rejected`, `gone` ("Target removed (410)"), `internal`. The
 resolved address and raw error go to the server log and, for a policy rejection, the audit log.
 
-## A webhook-only consumer cannot detect a lost event
+## A Webhook-Only Consumer Cannot Detect a Lost Event
 
 Delivery is retried until it succeeds or gives up, but the *enqueue* is best-effort: if the
 database write that queues an event fails, that event is never sent and there is no later
