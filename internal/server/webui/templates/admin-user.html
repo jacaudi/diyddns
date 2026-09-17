@@ -23,6 +23,7 @@
 </div></div>
 
 {{template "errorBanner" .Error}}
+{{template "noticeBanner" .Notice}}
 
 <div class="card">
   <div class="card-head"><h2>Role and access</h2></div>
@@ -45,6 +46,30 @@
       </div>
       <button class="btn primary" type="submit">Save</button>
     </form>
+  </div>
+</div>
+
+{{/* #131: an admin's change is immediate (D3) -- the support case is an
+     address the user cannot receive mail at, so a confirmation step would be
+     circular. The consequences are on the card, not behind a modal: the
+     change is reversible by the same form, unlike the danger zone below. */}}
+<div class="card">
+  <div class="card-head"><h2>Email address</h2></div>
+  <div class="card-body">
+    <form method="post" action="/admin/users/{{.Target.ID}}/email">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="email">Email address</label>
+        <input class="input" id="email" name="email" type="email" value="{{.Target.Email}}" autocomplete="off" required>
+      </div>
+      <button class="btn primary" type="submit">Save address</button>
+    </form>
+    <p class="muted">Takes effect immediately. The previous address is notified, and any outstanding
+      invite or recovery link for this account stops working.</p>
+    {{if .Target.OIDCSubject}}
+    <p class="muted">This account signs in through OIDC; the identity provider's address will replace
+      this at their next sign-in.</p>
+    {{end}}
   </div>
 </div>
 

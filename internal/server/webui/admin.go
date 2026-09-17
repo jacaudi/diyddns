@@ -213,9 +213,11 @@ type adminUserNewData struct {
 // populated only on the recovery reveal.
 type adminUserData struct {
 	appData
-	Target       store.User
-	IsSelf       bool
-	Error        string
+	Target store.User
+	IsSelf bool
+	Error  string
+	// Notice is the in-response success message after an admin email change (#131), rendered through noticeBanner.
+	Notice       string
 	Link         string
 	DeliveryNote string
 	LinkWarning  string
@@ -768,4 +770,56 @@ func oidcNote(cfg config.Server) string {
 	}
 	return fmt.Sprintf("issuer %s · client %s · scopes %s · required %t · auto-link %t · signup %t",
 		o.Issuer, o.ClientID, strings.Join(o.Scopes, " "), o.Required, o.AutoLinkByEmail, o.AllowOIDCSignup)
+}
+
+// noticeNote turns the Delivery of an admin email change's old-address notice
+// into the first sentence of the success message (design §7.2). Like
+// deliveryNote it renders a STRING, never the Delivery: Err can carry the SMTP
+// host:port. deliveryNote itself is not reused -- its copy is about a link the
+// admin must send manually, and there is no link here.
+//
+// The Suppressed case comes FIRST, for the reason deliveryNote gives: a
+// deliberate non-send must never render as "Email is not configured". Nothing
+// on the AdminSet path sets Suppressed today; the branch exists so a future
+// SuppressReason cannot fall through into a false statement.
+func noticeNote(d service.Delivery) string {
+	switch {
+	case !d.Attempted && d.Suppressed != service.SuppressNone:
+		return "Address changed. No notice was sent to the previous address."
+	case !d.Attempted:
+		return "Address changed. Email is not configured, so the previous address was not notified."
+	case d.Sent():
+		return "Address changed. The previous address was notified."
+	default:
+		return "Address changed, but the notice to the previous address could not be sent."
+	}
+}
+
+// handleAdminUserEmail sets the target's address directly (design §5.3, D3):
+// effective immediately, the previous address notified, outstanding invite
+// and recovery links deleted. It renders in-response rather than redirecting
+// so the delivery note can be shown; a browser refresh re-submits the new
+// address and gets the harmless "already the account's address" 422 (design
+// §7.2). An admin may set their own address here (D21).
+func (h *handler) handleAdminUserEmail(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	target, ok := h.adminUser(w, r, usr)
+	if !ok {
+		return
+	}
+	updated, delivery, err := h.deps.EmailChange.AdminSet(r.Context(), usr.ID, target, strings.TrimSpace(r.PostFormValue("email")))
+	if err != nil {
+		if msg, status, ok := adminGuardMessage(err); ok {
+			h.renderAdminUserError(w, r, usr, sess, target, status, msg)
+			return
+		}
+		h.logAndFail(w, r, usr, "set user email", err)
+		return
+	}
+	h.render(w, r, "admin-user", adminUserData{
+		appData: h.newAppData(usr, sess, updated.Email, "admin-users"),
+		Target:  updated,
+		IsSelf:  updated.ID == usr.ID,
+		Notice: noticeNote(delivery) +
+			" If this account has not registered a passkey yet, issue a recovery link below so the user can set one up at the new address.",
+	})
 }
