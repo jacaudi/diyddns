@@ -33,61 +33,103 @@ an optional, generic outbound webhook, not a DNS publisher.
 
 ## What it does
 
-- **Tracks public IPs across devices and users.** Each enrolled device
-  periodically reports its address; the server keeps full history per device,
-  browsable per user and, for admins, across everyone.
-- **Passkey-first auth.** Sign-in, invites, first-run bootstrap, and account
-  recovery are all WebAuthn passkey ceremonies — no passwords to leak or
-  reuse. OIDC login is also supported for deployments with an existing IdP.
-- **A server-rendered web UI.** Plain Go `html/template`, no Node, no
-  bundler, no client-side framework — devices, history, an admin console
-  (users, audit log, server info), and enrollment-code minting.
-- **A gateway feed** (optional) — the current address set as a pollable REST
-  document (plain text or JSON) or a live WebSocket stream, for firewalls,
-  WAFs, and Kubernetes gateways to consume as an allow-list.
-- **Outbound webhooks** (optional) — a signed, retried HTTP notification
-  whenever a device's address changes, joins, or leaves the feed. Generic —
-  not tied to any particular DNS or firewall vendor.
-- **Feed expiry** — an address that stops confirming itself ages out of the
-  feed on a configurable window, with owner warnings before it happens.
-- **OpenTelemetry export** (optional) — traces, metrics and logs over OTLP to
-  any collector that speaks the protocol.
+- **Tracks public IPs across devices and users.**
+
+  Each enrolled device periodically reports its address; the server keeps
+  full history per device, browsable per user and, for admins, across
+  everyone.
+
+- **Passkey-first auth.**
+
+  Sign-in, invites, first-run bootstrap, and account recovery are all
+  WebAuthn passkey ceremonies — no passwords to leak or reuse. OIDC login is
+  also supported for deployments with an existing IdP.
+
+- **A server-rendered web UI.**
+
+  Plain Go `html/template`, no Node, no bundler, no client-side framework —
+  devices, history, an admin console (users, audit log, server info), and
+  enrollment-code minting.
+
+- **A gateway feed** *(optional)*
+
+  The current address set as a pollable REST document (plain text or JSON)
+  or a live WebSocket stream, for firewalls, WAFs, and Kubernetes gateways
+  to consume as an allow-list.
+
+- **Outbound webhooks** *(optional)*
+
+  A signed, retried HTTP notification whenever a device's address changes,
+  joins, or leaves the feed. Generic — not tied to any particular DNS or
+  firewall vendor.
+
+- **Feed expiry.**
+
+  An address that stops confirming itself ages out of the feed on a
+  configurable window, with owner warnings before it happens.
+
+- **OpenTelemetry export** *(optional)*
+
+  Traces, metrics and logs over OTLP to any collector that speaks the
+  protocol.
 
 ## Quick start
 
 ### Server
 
-1. `task build`
-2. Copy `config.example.yaml` to `config.yaml` and generate an HMAC key:
-   `head -c 32 /dev/urandom | base64`. Also set `database.path` to a writable
-   local path such as `./diyddns.db` — the shipped example value is a
-   production default, and the server does not create its parent directory.
-3. `./bin/diyddns-server serve --config config.yaml`
-4. The startup log prints `BOOTSTRAP_TOKEN=…` once. Copy it.
-5. Open `/register`, enter the token **and an admin email** — the email is what
-   selects first-run setup over an invite redeem — then register a passkey.
-   This signs you in.
-6. Mint an enrollment code at `/devices/new`.
+```yaml
+# compose.yaml
+services:
+  diyddns:
+    image: ghcr.io/jacaudi/diyddns/server:v0.4.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - diyddns-data:/data
+    environment:
+      DIYDDNS_DATABASE_PATH: /data/diyddns.db
+      DIYDDNS_SERVER_BASE_URL: http://localhost:8080
+      DIYDDNS_AUTH_HMAC_SECRET_KEY: "changeme" # replace: head -c 32 /dev/urandom | base64
 
-Passkeys require a **secure context**: browse to `localhost`, or terminate TLS
-in front of the server. A plain-HTTP LAN address will not work, and neither
-will an IP address — `server.base_url` must be a hostname, because an IP is
-not a valid WebAuthn Relying Party ID and the server refuses to start with one.
+volumes:
+  diyddns-data:
+```
+
+1. `docker compose up -d`
+2. `docker compose logs diyddns | grep BOOTSTRAP_TOKEN` — the startup log
+   prints it once. Copy it.
+3. Open `http://localhost:8080/register`, enter the token **and an admin
+   email** — the email is what selects first-run setup over an invite
+   redeem — then register a passkey. This signs you in.
+4. Mint an enrollment code at `/devices/new`.
+
+Passkeys require a **secure context**: `localhost` qualifies as-is, which is
+why the compose file above needs no TLS to get you started. Anything else —
+a LAN hostname, an IP address — needs TLS in front of it; see
+[Deployment](docs/deployment.md) once you're past this step.
 
 ### Client
 
 ```sh
-./bin/diyddns-client enroll --code <code> --server <url>
+docker run --rm -v diyddns-client:/home/nonroot/.config \
+  ghcr.io/jacaudi/diyddns/client:v0.4.0 enroll --code <code> --server <url>
 ```
 
-That one command spends the enrollment code, stores credentials, and starts
-the client's check-in loop — it's now reporting its address on its own
-schedule, no further setup. `task test:e2e` drives the whole server+client
-flow end to end, including the WebAuthn ceremony, with a virtual
-authenticator, so you can see the happy path run without a real browser.
+That one command spends the enrollment code, stores credentials in the named
+volume, and starts the client's check-in loop — it's now reporting its
+address on its own schedule, no further setup. If `<url>` is the
+`http://localhost:8080` from the compose file above, note that inside the
+client's own container `localhost` means *that* container — see
+[Deployment](docs/deployment.md) for the one flag this needs on Docker
+Desktop vs. Linux, and for every enroll-error message explained.
 
-Running in containers, or want a hardened production deployment (Docker
-Compose with TLS, or Kubernetes)? See [Deployment](docs/deployment.md).
+`task test:e2e` drives the whole server+client flow end to end, including the
+WebAuthn ceremony, with a virtual authenticator, so you can see the happy
+path run without a real browser.
+
+Building and running the binaries directly instead of containers, or want a
+hardened production deployment (Docker Compose with TLS, or Kubernetes)? See
+[Deployment](docs/deployment.md).
 
 ## How it works
 

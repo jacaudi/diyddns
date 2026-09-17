@@ -44,6 +44,42 @@ just named is listed the code was spent and you need a fresh one; if it is
 absent the code is still good, so fix what the message reports and run the
 same command again, without removing the volume.
 
+## Building from source (advanced)
+
+Skip this if you're using the containers above — it's for running the
+binaries directly, with no Docker.
+
+### Server
+
+1. `task build`
+2. Copy `config.example.yaml` to `config.yaml` and generate an HMAC key:
+   `head -c 32 /dev/urandom | base64`. Also set `database.path` to a writable
+   local path such as `./diyddns.db` — the shipped example value is a
+   production default, and the server does not create its parent directory.
+3. `./bin/diyddns-server serve --config config.yaml`
+4. The startup log prints `BOOTSTRAP_TOKEN=…` once. Copy it.
+5. Open `/register`, enter the token **and an admin email** — the email is what
+   selects first-run setup over an invite redeem — then register a passkey.
+   This signs you in.
+6. Mint an enrollment code at `/devices/new`.
+
+Passkeys require a **secure context**: browse to `localhost`, or terminate TLS
+in front of the server. A plain-HTTP LAN address will not work, and neither
+will an IP address — `server.base_url` must be a hostname, because an IP is
+not a valid WebAuthn Relying Party ID and the server refuses to start with one.
+
+### Client
+
+```sh
+./bin/diyddns-client enroll --code <code> --server <url>
+```
+
+That one command spends the enrollment code, stores credentials, and starts
+the client's check-in loop — it's now reporting its address on its own
+schedule, no further setup. `task test:e2e` drives the whole server+client
+flow end to end, including the WebAuthn ceremony, with a virtual
+authenticator, so you can see the happy path run without a real browser.
+
 ## Production deployment
 
 The server holds a **single** SQLite connection and writes only to the database
