@@ -18,9 +18,6 @@ an optional, generic outbound webhook, not a DNS publisher.
 > project, but the authorship pattern is not a single human contributor —
 > keep that in mind when evaluating fit for your environment.
 
-**Status:** early development. Design specs and implementation plans are
-working documents kept in [`docs/`](docs/).
-
 ## Table of contents
 
 - [What it does](#what-it-does)
