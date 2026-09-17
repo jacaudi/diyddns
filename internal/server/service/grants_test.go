@@ -42,6 +42,14 @@ type fakeMailer struct {
 	// auditSendFailure site: an exhausted budget kills Users().List first.
 	// Zero and one both mean "every call", so existing literals are unaffected.
 	delayFromCall int
+	// sendErrFromCtx, when true, makes Send return ctx.Err() (nil when the
+	// context is still live) after sendDelay instead of the unconditional
+	// sendErr. sendErr alone cannot tell a send bound to a LIVE-READ timeout
+	// from one bound to a value snapshotted once at construction, because it
+	// fails every call regardless of the context's actual deadline; this field
+	// makes the failure depend on whether sendCtx genuinely expired during
+	// sendDelay, which only a live read of the timeout does.
+	sendErrFromCtx bool
 	// calls counts Send invocations, guarded by mu, for delayFromCall.
 	calls int
 	// sendCh, when non-nil, additionally receives every sentEmail so a test
@@ -74,6 +82,9 @@ func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
 	m.mu.Unlock()
 	if m.sendCh != nil {
 		m.sendCh <- e
+	}
+	if m.sendErrFromCtx {
+		return ctx.Err()
 	}
 	return m.sendErr
 }
@@ -806,6 +817,34 @@ func TestDeliver_AuditsEvenWhenTheSendContextExpires(t *testing.T) {
 	}
 	if len(page.Rows) != 1 {
 		t.Fatalf("email.send_failed entries = %d, want 1 — the audit write must not reuse the expired send context", len(page.Rows))
+	}
+}
+
+// TestDeliver_ReadsDeliveryTimeoutLiveNotAtConstruction pins the design's
+// pass-3 ruling: (*GrantService).mail() must build mailDeps by reading
+// s.deliveryTimeout AT CALL TIME — a method invoked per call, never a value
+// snapshotted once into a field at construction. Task 4 gives
+// EmailChangeService a cached `mail mailDeps` field by design, so a later
+// "tidy-up" that gives GrantService the same cached field for symmetry must
+// fail here, loudly, rather than pass silently.
+//
+// sendErrFromCtx (not the unconditional sendErr other tests use) is required
+// to make this provable: it fails Send only when sendCtx has genuinely
+// expired during sendDelay. grants.deliveryTimeout is shrunk to 1ms AFTER
+// construction (which set it to the 12s adminDeliveryTimeout) — a live read
+// sees the 1ms value and sendCtx expires mid-sendDelay; a value cached at
+// construction would still carry 12s and sendCtx would never expire, so Send
+// would return nil and this test would see Delivery.Err == nil instead.
+func TestDeliver_ReadsDeliveryTimeoutLiveNotAtConstruction(t *testing.T) {
+	st := openTestStore(t)
+	mailer := &fakeMailer{enabled: true, sendDelay: 20 * time.Millisecond, sendErrFromCtx: true}
+	grants := newTestGrantService(t, st, newTestPasskeyService(t, st, discardAudit{}), mailer, NewAuditWriter(st))
+	grants.deliveryTimeout = time.Millisecond // set AFTER construction; a cached mail() would miss this
+	u := seedUser(t, st, "invitee@x.com", "user")
+
+	d := grants.deliver(t.Context(), "admin-id", u, "subject", "body")
+	if d.Err == nil {
+		t.Fatal("Delivery.Err = nil, want a context-deadline failure — deliver must read s.deliveryTimeout live, not a value cached at construction")
 	}
 }
 
