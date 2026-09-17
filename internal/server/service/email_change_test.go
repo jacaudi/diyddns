@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -553,12 +555,53 @@ func TestEmailChange_SyncFromIDP(t *testing.T) {
 		noWrite(t, st, u)
 	})
 	t.Run("a changed claim overwrites, deletes grants, audits and notifies off-path", func(t *testing.T) {
-		mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 1)}
+		// release gates fakeMailer.Send via onSend, which fires as Send's FIRST
+		// statement (grants_test.go:79); reachedSend closes at that same
+		// instant. Racing resultCh against reachedSend -- never against a
+		// wall-clock timer -- is what makes this deterministic: the race only
+		// starts once SyncFromIDP reaches its `go sendAdvisory` statement, so
+		// the DB writes that precede it (List, SetEmail, DeleteUnusedByUser,
+		// the audit Log) can take however long they take under load without
+		// ever entering the race. (An earlier version of this test raced
+		// resultCh against time.After(100ms) instead; under this host's
+		// current load that flaked -- FAIL 1 run in 5 -- because a slow DB
+		// write alone could exceed 100ms even on the correct async path. That
+		// is exactly the Task-4-history failure mode this fix is required to
+		// avoid, so it was replaced rather than given a bigger margin.) A
+		// synchronous sendAdvisory call cannot close reachedSend without also
+		// blocking SyncFromIDP's own return on release, so the two channels
+		// are mutually exclusive by construction, not by speed.
+		// selfServiceRecoveryWaitTimeout below is a backstop against an actual
+		// hang (neither channel ever firing), not a margin either real branch
+		// is expected to graze.
+		release := make(chan struct{})
+		closeRelease := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(closeRelease)
+		reachedSend := make(chan struct{})
+		mailer := &fakeMailer{
+			enabled: true,
+			sendCh:  make(chan sentEmail, 1),
+			onSend:  func() { close(reachedSend); <-release },
+		}
 		st, svc := newEmailChangeSvc(t, mailer)
 		u := linked(t, st, "a@example.com")
 		seedUnusedGrant(t, st, "grant-a", u.ID)
 
-		got := svc.SyncFromIDP(t.Context(), u, "b@example.com")
+		resultCh := make(chan store.User, 1)
+		go func() { resultCh <- svc.SyncFromIDP(t.Context(), u, "b@example.com") }()
+
+		var got store.User
+		select {
+		case got = <-resultCh:
+			// Returned while the notice's Send is still parked on release:
+			// the send cannot have been on this call's path.
+		case <-reachedSend:
+			t.Fatal("SyncFromIDP blocked on its notice send before returning -- the notice is on the caller's path (design §5.6/B5 regression)")
+		case <-time.After(selfServiceRecoveryWaitTimeout):
+			t.Fatal("neither SyncFromIDP nor its notice send progressed -- test hung")
+		}
+		closeRelease()
+
 		if got.Email != "b@example.com" || got.ID != u.ID {
 			t.Fatalf("returned %+v, want the row with b@example.com", got)
 		}
