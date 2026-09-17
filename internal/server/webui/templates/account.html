@@ -1,6 +1,7 @@
 {{define "scripts"}}<script src="/static/passkey.js" defer></script>{{end}}
 {{define "content"}}
 <div class="page-head"><div><h1>Account</h1><p class="sub">{{.Email}}</p></div></div>
+{{template "errorBanner" .Error}}
 {{/* Two cards, not one with a rule through it: the list is what exists and the
      form creates something new. passkey.js finds every element by id and never
      walks the DOM, so the split costs it nothing. */}}
@@ -21,6 +22,36 @@
       <button class="btn primary" type="submit">Add Additional Passkey</button>
     </form>
     <p id="passkey-status" class="status" role="status" aria-live="polite"></p>
+  </div>
+</div>
+{{/* #131: exactly one of four states. The address is load-bearing identity --
+     it is where passkey-recovery links go -- so a self-service change is
+     pending until the NEW address confirms, and needs this session to do it. */}}
+<div class="card">
+  <div class="card-body">
+    <h2>Email address</h2>
+    <p class="muted">Sign-in and passkey recovery mail go to <code>{{.Email}}</code>.</p>
+    {{if .OIDCLinked}}
+    <p class="muted">Your email address is managed by your identity provider and updates when you sign in with it.</p>
+    {{else if not .EmailEnabled}}
+    <p class="muted">Changing your address needs email delivery, which this server does not have configured. Ask an administrator to change it.</p>
+    {{else if .PendingEmail}}
+    {{template "noticeBanner" .PendingNotice}}
+    <form method="post" action="/account/email/cancel">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <button class="btn ghost" type="submit">Cancel pending change</button>
+    </form>
+    {{else}}
+    <form method="post" action="/account/email">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="new-email">New email address</label>
+        <input class="input" id="new-email" name="email" type="email" autocomplete="email" required>
+      </div>
+      <button class="btn primary" type="submit">Send confirmation link</button>
+    </form>
+    <p class="muted">A confirmation link is sent to the new address. Nothing changes until you open it while signed in here; this address keeps working until then.</p>
+    {{end}}
   </div>
 </div>
 <form id="logout-form" method="post" action="/api/v1/auth/logout">

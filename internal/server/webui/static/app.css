@@ -50,6 +50,10 @@
    .stack-lg      A .card-body holding several independent blocks: 24px
                   between blocks, so the 16px inside a block still reads as
                   "same group".
+   .callout.warn  An error or warning banner: {{template "errorBanner" .}} in
+                  a template. Only ever built through the partial.
+   .callout.info  A status or success notice: {{template "noticeBanner" .}}.
+                  Same rule: the partial, never a hand-written div.
 
    The rules that keep this honest run in CI: `task repo:html` fails on any
    style= attribute in a template, and `task repo:css` fails on a px value in

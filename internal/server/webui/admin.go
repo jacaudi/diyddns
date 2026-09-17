@@ -158,6 +158,9 @@ func (h *handler) handleAdminUserSetEnabled(w http.ResponseWriter, r *http.Reque
 // unconfigured WebAuthn RP is 503 — that last one is a server-capability
 // problem, not something the admin typed wrong, and the design mandates 503 for
 // it specifically.
+//
+// It also serves the account page's email-change forms (#131): the guards are
+// shared, so the copy is.
 func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	switch {
 	case errors.Is(err, service.ErrLastAdmin):
@@ -168,6 +171,18 @@ func adminGuardMessage(err error) (msg string, status int, ok bool) {
 		return "Role must be either admin or user.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrInvalidEmail):
 		return "Email addresses must be plain 7-bit ASCII in user@host form, with no display name and no surrounding whitespace.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrEmailUnchanged):
+		return "That is already the account's email address.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrEmailManagedByOIDC):
+		return "This account's email address is managed by its identity provider.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrEmailChangeInvalid):
+		return "This confirmation link is invalid or has expired. Request the change again from your account page.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrMailerUnavailable):
+		// A server-capability problem, like an unconfigured WebAuthn RP: 503.
+		return "Email is not configured on this server, so an address change cannot be confirmed. Ask an administrator to change it.", http.StatusServiceUnavailable, true
+	case errors.Is(err, service.ErrConfirmationNotSent):
+		// The last sentence describes the state AFTER a retry (design §7.3).
+		return "The confirmation email could not be sent. Try again in a moment. If the account page then shows the change as already pending, cancel it and request it again.", http.StatusServiceUnavailable, true
 	case errors.Is(err, store.ErrConflict):
 		return "A user with that email address already exists.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
@@ -450,7 +465,10 @@ var knownEventTypes = []string{
 	"passkey.registered", "passkey.removed", "passkey.renamed", "passkey.signcount_anomaly",
 	"retention.prune",
 	"session.revoked",
-	"user.created", "user.deleted", "user.disabled", "user.enabled",
+	"user.created", "user.deleted", "user.disabled",
+	"user.email_change_cancelled", "user.email_change_requested",
+	"user.email_changed", "user.email_changed_by_admin", "user.email_changed_by_oidc",
+	"user.enabled",
 	"user.login.oidc", "user.login.passkey", "user.logout",
 	"user.oidc.linked", "user.role_change",
 }
