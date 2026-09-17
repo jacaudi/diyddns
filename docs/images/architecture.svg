@@ -169,7 +169,7 @@
   <text class="b center" x="563" y="458">POST /agent/v1/checkin</text>
 
   <!-- Arrow: the internet box (right edge) -> someone's garage block -->
-  <path class="flow" stroke="url(#flow-in)" marker-end="url(#arrow-server)" d="M639,310 C 700,355 725,310 763,296"/>
+  <path class="flow" stroke="url(#flow-in)" marker-end="url(#arrow-server)" d="M639,310 C 700,252 725,273 763,296"/>
 
   <!-- ===================== RIGHT: SOMEONE'S GARAGE ===================== -->
   <rect class="zone" x="766" y="50" width="684" height="566" rx="18"/>
