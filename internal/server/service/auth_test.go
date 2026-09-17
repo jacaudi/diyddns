@@ -26,7 +26,7 @@ func TestAuthService_Logout_DestroysSessionAndAudits(t *testing.T) {
 		t.Fatalf("sessions.Create: %v", err)
 	}
 
-	if err := svc.Logout(t.Context(), sess.ID); err != nil {
+	if err := svc.Logout(t.Context(), sess); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 
@@ -41,13 +41,20 @@ func TestAuthService_Logout_DestroysSessionAndAudits(t *testing.T) {
 	if len(page.Rows) != 1 {
 		t.Fatalf("user.logout entries = %d, want 1", len(page.Rows))
 	}
+	row := page.Rows[0]
+	if row.ActorUserID != usr.ID {
+		t.Errorf("user.logout ActorUserID = %q, want %q", row.ActorUserID, usr.ID)
+	}
+	if row.IP != "1.2.3.4" {
+		t.Errorf("user.logout IP = %q, want %q", row.IP, "1.2.3.4")
+	}
 }
 
 func TestAuthService_Logout_MissingSessionIsNotAnError(t *testing.T) {
 	st := openTestStore(t)
 	svc := NewAuthService(newTestSessionManager(st), discardAudit{})
 
-	if err := svc.Logout(t.Context(), "no-such-session"); err != nil {
+	if err := svc.Logout(t.Context(), store.Session{ID: "no-such-session"}); err != nil {
 		t.Fatalf("Logout (missing session) = %v, want nil", err)
 	}
 }

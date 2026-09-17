@@ -110,7 +110,7 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 		Middlewares:   huma.Middlewares{sessionMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*sessionCookieOutput, error) {
 		sess := SessionFrom(ctx)
-		if err := deps.Auth.Logout(ctx, sess.ID); err != nil {
+		if err := deps.Auth.Logout(ctx, sess); err != nil {
 			deps.Log.LogAttrs(ctx, slog.LevelError, "logout failed", slog.Any("error", err))
 			return nil, huma.Error500InternalServerError("logout failed")
 		}

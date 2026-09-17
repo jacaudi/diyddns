@@ -22,12 +22,13 @@ func NewAuthService(sessions *auth.SessionManager, audit AuditSink) *AuthService
 	return &AuthService{sessions: sessions, audit: audit}
 }
 
-// Logout destroys the browser session identified by sessionID. A missing
-// session is not an error (see auth.SessionManager.Destroy).
-func (s *AuthService) Logout(ctx context.Context, sessionID string) error {
-	if err := s.sessions.Destroy(ctx, sessionID); err != nil {
+// Logout destroys sess. A missing session is not an error (see
+// auth.SessionManager.Destroy). sess carries the actor and source IP so the
+// audit row records who signed out and from where, matching both login paths.
+func (s *AuthService) Logout(ctx context.Context, sess store.Session) error {
+	if err := s.sessions.Destroy(ctx, sess.ID); err != nil {
 		return fmt.Errorf("service.Logout: %w", err)
 	}
-	s.audit.Log(ctx, store.AuditEntry{EventType: "user.logout"})
+	s.audit.Log(ctx, store.AuditEntry{ActorUserID: sess.UserID, EventType: "user.logout", IP: sess.IP})
 	return nil
 }
