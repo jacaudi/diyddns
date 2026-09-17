@@ -5,12 +5,14 @@ import (
 	"text/template"
 )
 
-// recoveryTmpl, adminNotifyTmpl, inviteTmpl and adminRecoveryTmpl are fixed,
-// package-level templates validated at init time via template.Must. Their data
-// is always a single plain-string field (no user-supplied templates, no
-// functions that could error), so renderTemplate's error path below is
-// unreachable in practice — it exists only as a safe fallback, not a
-// documented failure mode.
+// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl,
+// emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl and
+// adminEmailChangedTmpl (#131, via ChangeConfirmBody, ChangeNoticeBody,
+// ChangedBody and AdminChangedBody) are fixed, package-level templates
+// validated at init time via template.Must. Their data is always a single
+// plain-string field (no user-supplied templates, no functions that could
+// error), so renderTemplate's error path below is unreachable in practice —
+// it exists only as a safe fallback, not a documented failure mode.
 //
 // recoveryTmpl is the SELF-SERVICE recovery body: the user asked for the link
 // themselves and their passkeys still work, so it is safe to ignore. When an

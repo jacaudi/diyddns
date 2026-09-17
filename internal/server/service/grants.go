@@ -36,8 +36,11 @@ var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, 
 const adminDeliveryTimeout = 12 * time.Second
 
 // auditWriteTimeout bounds an EventEmailSendFailed audit write. It is separate
-// and deliberately short: see auditSendFailure for why such a write must never
-// reuse the context the failed send ran on.
+// and deliberately short: see recordSendFailure for why such a write must
+// never reuse the context the failed send ran on. It also bounds a second,
+// unrelated detached write for the same reason: the ClearPendingEmail
+// rollback in EmailChangeService.Request's failure path
+// (email_change.go:200).
 const auditWriteTimeout = 5 * time.Second
 
 // EventEmailSendFailed is the audit event code recorded when a grant or

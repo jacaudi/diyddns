@@ -145,22 +145,24 @@ func (h *handler) handleAdminUserSetEnabled(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
-// adminGuardMessage maps an AdminService error to user-facing copy AND the
-// status that error deserves. It reports false for anything unrecognized, so
-// unexpected errors still take the 500 path with their detail going to the log
-// rather than the page.
+// adminGuardMessage maps an AdminService or EmailChangeService error to
+// user-facing copy AND the status that error deserves. It reports false for
+// anything unrecognized, so unexpected errors still take the 500 path with
+// their detail going to the log rather than the page.
 //
-// The guards themselves live in AdminService (last-admin, self-lockout, role and
-// email validation) and are NOT re-implemented here: this only renders them.
+// The guards themselves live in the two services, not here: AdminService owns
+// the admin-user guards (last-admin, self-lockout, role and email validation),
+// EmailChangeService owns the email-change guards (#131: unchanged address,
+// OIDC-managed address, invalid confirmation). This function only renders
+// them, for both the admin-user pages and the account page's email-change
+// forms, which is why the copy is shared.
 //
 // The status varies, which is why it is returned rather than assumed by the
-// caller: a guard rejection is 422, a vanished target is 404, and an
-// unconfigured WebAuthn RP is 503 — that last one is a server-capability
-// problem, not something the admin typed wrong, and the design mandates 503 for
-// it specifically.
-//
-// It also serves the account page's email-change forms (#131): the guards are
-// shared, so the copy is.
+// caller: a guard rejection is 422, a vanished target is 404, and three cases
+// are 503 as server-capability problems rather than something the user typed
+// wrong: no mailer configured (ErrMailerUnavailable), a confirmation mail that
+// could not be sent (ErrConfirmationNotSent), and an unconfigured WebAuthn RP
+// (ErrWebAuthnUnavailable). The design mandates 503 for each specifically.
 func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	switch {
 	case errors.Is(err, service.ErrLastAdmin):

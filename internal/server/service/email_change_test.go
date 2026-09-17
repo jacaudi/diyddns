@@ -554,6 +554,31 @@ func TestEmailChange_SyncFromIDP(t *testing.T) {
 		}
 		noWrite(t, st, u)
 	})
+	t.Run("own stale pending change to the claimed address does not block the sync", func(t *testing.T) {
+		// Pins exceptID actually being threaded through to addressHeld on this
+		// path: if SyncFromIDP passed "" instead of u.ID, addressHeld would see
+		// THIS row's own stale self-service pending change -- staged, say, by
+		// starting a self-service change and then signing in via OIDC before
+		// confirming it -- as another account already holding the address, and
+		// permanently refuse to sync (and thus log in) a user whose IdP claim
+		// matches their own stale pending address.
+		mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 1)}
+		st, svc := newEmailChangeSvc(t, mailer)
+		u := linked(t, st, "a@example.com")
+		if err := st.Users().SetPendingEmail(t.Context(), u.ID, "b@example.com", "hash", store.NowUnix()+3600); err != nil {
+			t.Fatal(err)
+		}
+		got := svc.SyncFromIDP(t.Context(), u, "b@example.com")
+		if got.Email != "b@example.com" || got.ID != u.ID {
+			t.Fatalf("returned %+v, want the row synced to b@example.com", got)
+		}
+		persisted, _ := st.Users().GetByID(t.Context(), u.ID)
+		if persisted.Email != "b@example.com" {
+			t.Errorf("persisted Email = %q, want b@example.com", persisted.Email)
+		}
+		// Drain the detached off-path notice so it cannot outlive the test.
+		waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+	})
 	t.Run("a changed claim overwrites, deletes grants, audits and notifies off-path", func(t *testing.T) {
 		// release gates fakeMailer.Send via onSend, which fires as Send's FIRST
 		// statement (grants_test.go:79); reachedSend closes at that same
