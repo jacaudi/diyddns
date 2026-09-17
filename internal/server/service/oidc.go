@@ -22,18 +22,23 @@ var ErrOIDCRejected = errors.New("service: oidc login rejected")
 
 // OIDCService owns the OIDC link/signup policy: it resolves an authenticated
 // OIDC identity to a local user (matching by subject, then verified email, then
-// signup) and, for the browser flow, mints a session.
+// signup) and, for the browser flow, mints a session. For an already-linked
+// user it also keeps the stored address in step with the IdP's claim (#131 D9).
 type OIDCService struct {
 	st       *store.Store
 	sessions *auth.SessionManager
 	cfg      config.OIDCCfg
 	audit    AuditSink
 	log      *slog.Logger
+	emails   *EmailChangeService
 }
 
-// NewOIDCService constructs an OIDCService.
-func NewOIDCService(st *store.Store, sessions *auth.SessionManager, cfg config.OIDCCfg, audit AuditSink, log *slog.Logger) *OIDCService {
-	return &OIDCService{st: st, sessions: sessions, cfg: cfg, audit: audit, log: log}
+// NewOIDCService constructs an OIDCService. emails must not be nil: it is
+// called on every linked sign-in (LoginOrLink path 1). Tests that need no mail
+// build NewEmailChangeService(st, nil, …); a nil mailer is the supported way to
+// say "no mail", a nil service is not.
+func NewOIDCService(st *store.Store, sessions *auth.SessionManager, cfg config.OIDCCfg, audit AuditSink, log *slog.Logger, emails *EmailChangeService) *OIDCService {
+	return &OIDCService{st: st, sessions: sessions, cfg: cfg, audit: audit, log: log, emails: emails}
 }
 
 // reject logs the specific policy-rejection reason server-side (so operators can
@@ -44,7 +49,8 @@ func (s *OIDCService) reject(ctx context.Context, reason string) error {
 }
 
 // LoginOrLink resolves an authenticated OIDC identity to a local user. Order:
-//  1. (issuer, subject) match → that user (rejected if disabled)
+//  1. (issuer, subject) match → that user (rejected if disabled), with the
+//     stored address synced to the claim (#131 D9)
 //  2. a local row already holds the claim's address → link it if the claim is
 //     verified, auto-link is on and the row is a non-admin, not-already-linked
 //     user; otherwise ErrOIDCRejected
@@ -64,7 +70,11 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 		if u.Disabled {
 			return store.User{}, s.reject(ctx, "linked user disabled")
 		}
-		return u, nil
+		// The IdP's address is authoritative for a linked account (#131 D9).
+		// SyncFromIDP receives the RAW claim (normalizeClaim runs below, for
+		// paths 2-3 only) and never returns an error: no claim shape and no
+		// collision can reject an already-linked user.
+		return s.emails.SyncFromIDP(ctx, u, email), nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return store.User{}, fmt.Errorf("service.LoginOrLink: %w", err)

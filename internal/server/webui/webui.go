@@ -38,8 +38,12 @@ type Deps struct {
 	Enroll  *service.EnrollmentService
 	Admin   *service.AdminService
 	Grants  *service.GrantService
-	Notify  *service.NotificationService
-	Feed    *service.FeedService
+	// EmailChange owns every path that changes an account's address (#131):
+	// the account page's request/cancel/confirm flow and the admin page's
+	// direct set.
+	EmailChange *service.EmailChangeService
+	Notify      *service.NotificationService
+	Feed        *service.FeedService
 
 	Info      version.Info
 	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it

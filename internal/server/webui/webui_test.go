@@ -76,18 +76,24 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	notify := service.NewNotificationService(st, key, nil, audit)
 	feedSvc := service.NewFeedService(st, feed.New(), audit)
 
+	// stubMailer is defined further down this file. Enabled so the account
+	// page's request path can be exercised; cfg.Email.Enabled stays false here
+	// (as today), and the tests that need the form set it per test.
+	emailChange := service.NewEmailChangeService(st, stubMailer{enabled: true}, cfg.Server.BaseURL, audit, log)
+
 	return Deps{
-		Sessions:  sessions,
-		Cfg:       cfg,
-		Log:       log,
-		Devices:   service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
-		Enroll:    service.NewEnrollmentService(st, key, 15*time.Minute, audit),
-		Admin:     service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}),
-		Grants:    grants,
-		Notify:    notify,
-		Feed:      feedSvc,
-		Info:      version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
-		StartedAt: time.Now().Add(-2 * time.Hour),
+		Sessions:    sessions,
+		Cfg:         cfg,
+		Log:         log,
+		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
+		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit),
+		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}),
+		Grants:      grants,
+		EmailChange: emailChange,
+		Notify:      notify,
+		Feed:        feedSvc,
+		Info:        version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
+		StartedAt:   time.Now().Add(-2 * time.Hour),
 	}, st
 }
 

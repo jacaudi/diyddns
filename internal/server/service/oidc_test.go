@@ -14,7 +14,8 @@ func TestOIDCLoginOrLink(t *testing.T) {
 	newSvc := func(t *testing.T, st *store.Store, cfg config.OIDCCfg) *OIDCService {
 		t.Helper()
 		sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-		return NewOIDCService(st, sm, cfg, NewAuditWriter(st), discardLogger())
+		return NewOIDCService(st, sm, cfg, NewAuditWriter(st), discardLogger(),
+			NewEmailChangeService(st, nil, "https://ddns.example.com", NewAuditWriter(st), discardLogger()))
 	}
 	baseCfg := config.OIDCCfg{AutoLinkByEmail: true, AllowOIDCSignup: true}
 	const iss = "https://idp.example.com"
@@ -294,9 +295,41 @@ func TestOIDCLoginOrLink(t *testing.T) {
 func TestOIDCBrowserLogin_CreatesSession(t *testing.T) {
 	st := openTestStore(t)
 	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
-	svc := NewOIDCService(st, sm, config.OIDCCfg{AutoLinkByEmail: true, AllowOIDCSignup: true}, NewAuditWriter(st), discardLogger())
+	svc := NewOIDCService(st, sm, config.OIDCCfg{AutoLinkByEmail: true, AllowOIDCSignup: true}, NewAuditWriter(st), discardLogger(),
+		NewEmailChangeService(st, nil, "https://ddns.example.com", NewAuditWriter(st), discardLogger()))
 	sess, err := svc.BrowserLogin(t.Context(), "https://idp.example.com", "s9", "e@x.com", true, "1.2.3.4", "ua")
 	if err != nil || sess.ID == "" || sess.CSRFToken == "" {
 		t.Fatalf("BrowserLogin: sess=%+v err=%v", sess, err)
+	}
+}
+
+// TestOIDCLoginOrLink_SyncsEmailFromIdP pins design D9: on a path-1 login the
+// stored address follows the IdP's claim, and an unusable claim never rejects.
+func TestOIDCLoginOrLink_SyncsEmailFromIdP(t *testing.T) {
+	const iss = "https://idp.example.com"
+	st := openTestStore(t)
+	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
+	emails := NewEmailChangeService(st, nil, "https://ddns.example.com", NewAuditWriter(st), discardLogger())
+	svc := NewOIDCService(st, sm, config.OIDCCfg{}, NewAuditWriter(st), discardLogger(), emails)
+	u, err := st.Users().Create(t.Context(), store.User{Email: "a@x.com", Role: "user", OIDCProvider: iss, OIDCSubject: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.LoginOrLink(t.Context(), iss, "s1", "b@x.com", true)
+	if err != nil {
+		t.Fatalf("LoginOrLink: %v", err)
+	}
+	if got.ID != u.ID || got.Email != "b@x.com" {
+		t.Errorf("returned %+v, want %s with b@x.com", got, u.ID)
+	}
+	if persisted, _ := st.Users().GetByID(t.Context(), u.ID); persisted.Email != "b@x.com" {
+		t.Errorf("persisted Email = %q, want b@x.com", persisted.Email)
+	}
+
+	// A non-ASCII claim on a linked user must NOT lock them out (#87 lesson).
+	got, err = svc.LoginOrLink(t.Context(), iss, "s1", "josé@x.com", true)
+	if err != nil || got.Email != "b@x.com" {
+		t.Errorf("unusable claim: got %+v err=%v, want login with the stored address kept", got, err)
 	}
 }
