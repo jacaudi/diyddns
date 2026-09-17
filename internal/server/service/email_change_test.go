@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/store"
@@ -279,20 +278,20 @@ func TestEmailChange_Cancel(t *testing.T) {
 // no-resend short-circuit (D12) would then report success on retry while
 // sending nothing, for up to emailChangeTTL.
 //
-// sendDelay + a goroutine that cancels partway through it reproduces the
-// production shape: every write that precedes the send (List, SetPendingEmail,
-// the requested audit row) completes on a still-live context, and only the
-// send itself, and the rollback that follows its failure, run after cancel.
+// onSend, not a fixed sleep racing sendDelay: cancel fires as the first
+// statement inside Send, the one point provably after every pre-send DB
+// write (List, SetPendingEmail, the requested audit row) and before Send
+// returns, so the test never races a real clock. A fixed sleep here would be
+// flaky in exactly the direction that hides a regression -- too short and the
+// pre-send writes haven't landed (false failure), too long under load and
+// cancellation lands after the rollback already ran (false green on the
+// buggy code) -- which is the same reasoning pollForAuditRows below already
+// documents for the self-service flow.
 func TestEmailChange_Request_RollbackSurvivesCanceledRequestContext(t *testing.T) {
-	mailer := &fakeMailer{enabled: true, sendErr: errors.New("smtp exploded"), sendDelay: 20 * time.Millisecond}
+	ctx, cancel := context.WithCancel(t.Context())
+	mailer := &fakeMailer{enabled: true, sendErr: errors.New("smtp exploded"), onSend: cancel}
 	st, svc := newEmailChangeSvc(t, mailer)
 	u := seedUser(t, st, "old@example.com", "user")
-
-	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		cancel() // stand in for the client disconnecting while the send stalls
-	}()
 
 	err := svc.Request(ctx, u, "new@example.com")
 	if !errors.Is(err, ErrConfirmationNotSent) {

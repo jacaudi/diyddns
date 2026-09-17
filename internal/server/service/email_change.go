@@ -188,9 +188,19 @@ func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail
 		// Reusing ctx for the rollback would hit the hazard recordSendFailure
 		// already dodges (grants.go:120-134): database/sql rejects an
 		// already-canceled context before the write reaches the driver,
-		// silently leaving the dangling pending change this rollback exists
-		// to remove.
-		if cerr := s.st.Users().ClearPendingEmail(context.WithoutCancel(ctx), u.ID); cerr != nil {
+		// leaving the dangling pending change this rollback exists to remove.
+		//
+		// Bounded by auditWriteTimeout, the same pairing recordSendFailure
+		// uses (grants.go:136): WithoutCancel alone has a nil Done() channel,
+		// and the store caps its pool at one connection (store.go:44), so an
+		// unbounded detached write here could block this request path
+		// indefinitely if that one connection is held elsewhere (the hazard
+		// notifications.go:481 documents). Reusing the constant rather than a
+		// new one: this is the same shape -- a single detached, bounded write.
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+		cerr := s.st.Users().ClearPendingEmail(rollbackCtx, u.ID)
+		rollbackCancel()
+		if cerr != nil {
 			s.mail.log.ErrorContext(ctx, "email change: rollback of an unsent pending change failed; the pruner clears it within the hour",
 				"error", cerr, "user_id", u.ID)
 		}

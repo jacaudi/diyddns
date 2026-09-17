@@ -55,6 +55,14 @@ type fakeMailer struct {
 	// sendCh, when non-nil, additionally receives every sentEmail so a test
 	// can block on the goroutine actually calling Send instead of racing it.
 	sendCh chan sentEmail
+	// onSend, when non-nil, runs as the FIRST statement inside Send -- the one
+	// point provably after every pre-send DB write a caller made (List,
+	// SetPendingEmail, an audit Log) and before Send returns. A test uses it
+	// to trigger something (typically canceling a context) deterministically
+	// mid-send, instead of racing a fixed sleep against sendDelay: a fixed
+	// sleep is flaky in exactly the direction that hides a regression (see
+	// pollForAuditRows below, and #131 Task 4's review fix).
+	onSend func()
 
 	mu   sync.Mutex
 	sent []sentEmail
@@ -68,6 +76,9 @@ type sentEmail struct{ to, subject, body string }
 func (m *fakeMailer) Enabled() bool { return m.enabled }
 
 func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
+	if m.onSend != nil {
+		m.onSend()
+	}
 	m.mu.Lock()
 	m.calls++
 	n := m.calls
