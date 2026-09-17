@@ -94,8 +94,9 @@ var emailChangeNoticeTmpl = template.Must(template.New("email-change-notice").Pa
 	"A request was made to change the email address on your DIYDDNS account\r\n" +
 		"to {{.NewEmail}}.\r\n\r\n" +
 		"Nothing has changed yet: this address stays in charge of your account\r\n" +
-		"until the new one confirms. If this was not you, sign in, open Account\r\n" +
-		"and cancel the pending change, or contact your administrator.\r\n",
+		"until the new one confirms. If this was not you, sign in and cancel\r\n" +
+		"the pending change from Account, then contact your administrator, who\r\n" +
+		"can end every session on your account.\r\n",
 ))
 
 var emailChangedTmpl = template.Must(template.New("email-changed").Parse(
