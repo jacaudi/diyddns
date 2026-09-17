@@ -1,11 +1,28 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"slices"
 	"testing"
 )
+
+// rawPending reads the three pending-email columns directly by SQL, bypassing
+// userColumns (which deliberately omits pending_email_token_hash -- see the
+// User struct's doc comment) so tests can assert on the column the Go API
+// never exposes, and so a struct-level assertion of PendingEmail alone can't
+// mask a mutation that clears fewer than all three columns.
+func rawPending(t *testing.T, ctx context.Context, s *Store, userID string) (email, tokenHash sql.NullString, expiresAt sql.NullInt64) {
+	t.Helper()
+	err := s.DB().QueryRowContext(ctx,
+		`SELECT pending_email, pending_email_token_hash, pending_email_expires_at FROM users WHERE id = ?`, userID,
+	).Scan(&email, &tokenHash, &expiresAt)
+	if err != nil {
+		t.Fatalf("rawPending: %v", err)
+	}
+	return email, tokenHash, expiresAt
+}
 
 // TestMigration009_PendingEmailColumns pins the three columns 00009 adds and
 // that a freshly created row reads them back as zero values.
@@ -52,7 +69,16 @@ func TestMigration009_PendingEmailColumns(t *testing.T) {
 func TestUsers_SetPendingEmail_RoundTrip(t *testing.T) {
 	s, ctx := newTestStore(t)
 	u, _ := s.Users().Create(ctx, User{Email: "old@example.com", Role: roleUser})
-	before, _ := s.Users().GetByID(ctx, u.ID)
+
+	// A sentinel updated_at, written directly and far from "now": comparing
+	// against Create's own updated_at can't tell "untouched" apart from
+	// "re-stamped to the same wall-clock second", since a fast test runs
+	// Create and SetPendingEmail inside one unix second. The sentinel makes
+	// any bump observable regardless of timing.
+	const sentinelUpdatedAt = 123456789
+	if _, err := s.DB().ExecContext(ctx, `UPDATE users SET updated_at = ? WHERE id = ?`, sentinelUpdatedAt, u.ID); err != nil {
+		t.Fatalf("seed sentinel updated_at: %v", err)
+	}
 
 	if err := s.Users().SetPendingEmail(ctx, u.ID, "new@example.com", "hash-1", 4000); err != nil {
 		t.Fatalf("SetPendingEmail: %v", err)
@@ -67,11 +93,32 @@ func TestUsers_SetPendingEmail_RoundTrip(t *testing.T) {
 	if got.Email != "old@example.com" {
 		t.Errorf("Email = %q, want old@example.com — staging must not change the address", got.Email)
 	}
-	if got.UpdatedAt != before.UpdatedAt {
-		t.Errorf("UpdatedAt changed from %d to %d — staging must not bump updated_at", before.UpdatedAt, got.UpdatedAt)
+	if got.UpdatedAt != sentinelUpdatedAt {
+		t.Errorf("UpdatedAt = %d, want %d (sentinel) — staging must not bump updated_at", got.UpdatedAt, sentinelUpdatedAt)
 	}
 	if err := s.Users().SetPendingEmail(ctx, "no-such-id", "x@example.com", "h", 1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("SetPendingEmail unknown id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestUsers_SetPendingEmail_RejectsEmptyEmail pins that an empty newEmail is
+// rejected outright rather than written: PendingEmail == "" is User's
+// documented "nothing pending" sentinel, so staging "" would be
+// indistinguishable from staging nothing at all to every reader of that
+// field.
+func TestUsers_SetPendingEmail_RejectsEmptyEmail(t *testing.T) {
+	s, ctx := newTestStore(t)
+	u, _ := s.Users().Create(ctx, User{Email: "old@example.com", Role: roleUser})
+
+	if err := s.Users().SetPendingEmail(ctx, u.ID, "", "hash-1", 4000); err == nil {
+		t.Fatal("SetPendingEmail with empty newEmail: err = nil, want an error")
+	}
+	got, _ := s.Users().GetByID(ctx, u.ID)
+	if got.PendingEmail != "" || got.PendingEmailExpiresAt != 0 {
+		t.Errorf("empty newEmail must not stage a pending change; got (%q, %d)", got.PendingEmail, got.PendingEmailExpiresAt)
+	}
+	if email, hash, expires := rawPending(t, ctx, s, u.ID); email.Valid || hash.Valid || expires.Valid {
+		t.Errorf("empty newEmail wrote a raw row = (email valid=%v, hash valid=%v, expires valid=%v), want all NULL", email.Valid, hash.Valid, expires.Valid)
 	}
 }
 
@@ -93,6 +140,12 @@ func TestUsers_ClearPendingEmail(t *testing.T) {
 	got, _ := s.Users().GetByID(ctx, u.ID)
 	if got.PendingEmail != "" || got.PendingEmailExpiresAt != 0 {
 		t.Errorf("after clear pending = (%q, %d), want zero", got.PendingEmail, got.PendingEmailExpiresAt)
+	}
+	// userColumns omits pending_email_token_hash, so GetByID can't see it --
+	// check the raw row directly, so a fix that clears pending_email and
+	// pending_email_expires_at but leaves the hash behind still fails here.
+	if email, hash, expires := rawPending(t, ctx, s, u.ID); email.Valid || hash.Valid || expires.Valid {
+		t.Errorf("after clear raw row = (email valid=%v, hash valid=%v, expires valid=%v), want all NULL", email.Valid, hash.Valid, expires.Valid)
 	}
 	if err := s.Users().ClearPendingEmail(ctx, "no-such-id"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("unknown id: err = %v, want ErrNotFound", err)
@@ -118,6 +171,11 @@ func TestUsers_ConfirmPendingEmail_AppliesAndClears(t *testing.T) {
 	}
 	if got.UpdatedAt != 3000 {
 		t.Errorf("UpdatedAt = %d, want 3000 (the now the statement was given)", got.UpdatedAt)
+	}
+	// userColumns omits pending_email_token_hash -- check the raw row so a
+	// fix that stops clearing the hash on confirm still fails here.
+	if email, hash, expires := rawPending(t, ctx, s, u.ID); email.Valid || hash.Valid || expires.Valid {
+		t.Errorf("after confirm raw row = (email valid=%v, hash valid=%v, expires valid=%v), want all NULL", email.Valid, hash.Valid, expires.Valid)
 	}
 	// Single use: the same token cannot confirm twice.
 	if err := s.Users().ConfirmPendingEmail(ctx, u.ID, "hash-1", 3001); !errors.Is(err, ErrNotFound) {
@@ -213,6 +271,22 @@ func TestUsers_SetEmail(t *testing.T) {
 	}
 }
 
+// TestUsers_SetEmail_RejectsEmptyEmail pins that an empty email is rejected
+// outright rather than written: the column is NOT NULL, and a written ""
+// would leave the account unreachable at no address at all.
+func TestUsers_SetEmail_RejectsEmptyEmail(t *testing.T) {
+	s, ctx := newTestStore(t)
+	u, _ := s.Users().Create(ctx, User{Email: "old@example.com", Role: roleUser})
+
+	if err := s.Users().SetEmail(ctx, u.ID, "", 5000); err == nil {
+		t.Fatal("SetEmail with empty email: err = nil, want an error")
+	}
+	got, _ := s.Users().GetByID(ctx, u.ID)
+	if got.Email != "old@example.com" {
+		t.Errorf("empty email must not overwrite the address; got %q", got.Email)
+	}
+}
+
 func TestUsers_ClearExpiredPendingEmails(t *testing.T) {
 	s, ctx := newTestStore(t)
 	expired, _ := s.Users().Create(ctx, User{Email: "a@example.com", Role: roleUser})
@@ -243,6 +317,14 @@ func TestUsers_ClearExpiredPendingEmails(t *testing.T) {
 	}
 	if gotNone.PendingEmail != "" {
 		t.Errorf("row with nothing pending changed: %q", gotNone.PendingEmail)
+	}
+	// userColumns omits pending_email_token_hash and GetByID's struct read
+	// can't distinguish "hash cleared" from "hash left behind" once
+	// pending_email is NULL -- check the raw row so a fix that clears only
+	// pending_email still fails here. A leftover hash+expires_at would keep
+	// matching this row's WHERE clause forever, contradicting D17.
+	if email, hash, expires := rawPending(t, ctx, s, expired.ID); email.Valid || hash.Valid || expires.Valid {
+		t.Errorf("expired row raw = (email valid=%v, hash valid=%v, expires valid=%v), want all NULL", email.Valid, hash.Valid, expires.Valid)
 	}
 }
 

@@ -368,8 +368,15 @@ func requireMatched(res sql.Result, op string) error {
 // the canonical new address, the hash of its confirmation token, and when
 // that token expires. It replaces any pending change already staged. It does
 // not bump updated_at: the pending columns are staging, not the record.
-// Returns ErrNotFound if no row matched.
+// Returns ErrNotFound if no row matched. Rejects an empty newEmail without
+// writing anything: PendingEmail == "" is User's documented "nothing
+// pending" sentinel, so staging "" would silently defeat every reader of
+// that field (nullIfEmpty guards the same class of bug for OIDCProvider /
+// OIDCSubject elsewhere in this file).
 func (r *UserRepo) SetPendingEmail(ctx context.Context, userID, newEmail, tokenHash string, expiresAt int64) error {
+	if nullIfEmpty(newEmail) == nil {
+		return fmt.Errorf("users.SetPendingEmail: newEmail must not be empty")
+	}
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE users
 		 SET pending_email = ?, pending_email_token_hash = ?, pending_email_expires_at = ?
@@ -431,8 +438,14 @@ func (r *UserRepo) ConfirmPendingEmail(ctx context.Context, userID, tokenHash st
 // SetEmail writes userID's address directly (an admin set, or an IdP sync --
 // #131 D3/D9) and discards any staged self-service change, which the direct
 // write supersedes. updated_at is set to now. Returns ErrConflict when
-// another row holds the address, ErrNotFound when no row matched.
+// another row holds the address, ErrNotFound when no row matched. Rejects
+// an empty email without writing anything: the column is NOT NULL, and an
+// empty string would otherwise pass that constraint while leaving the
+// account unreachable.
 func (r *UserRepo) SetEmail(ctx context.Context, userID, email string, now int64) error {
+	if nullIfEmpty(email) == nil {
+		return fmt.Errorf("users.SetEmail: email must not be empty")
+	}
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE users
 		 SET email = ?,
