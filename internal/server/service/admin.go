@@ -118,6 +118,19 @@ func (s *AdminService) CreateUserInvite(ctx context.Context, actorID, email, rol
 		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", ErrWebAuthnUnavailable)
 	}
 
+	// D20 (#131): GetByEmail and the UNIQUE index are exact and case-sensitive,
+	// so without this an admin could create Bob@x.test beside bob@x.test --
+	// two accounts on one mailbox. exceptID is EMPTY: an invite creates a row,
+	// so no row is exempt, and passing actorID here would let an admin invite
+	// a case-variant of their own address.
+	users, err := s.st.Users().List(ctx)
+	if err != nil {
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", err)
+	}
+	if addressHeld(users, email, "", store.NowUnix()) {
+		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", store.ErrConflict)
+	}
+
 	u, err := s.st.Users().Create(ctx, store.User{Email: email, Role: role})
 	if err != nil {
 		return store.User{}, "", Delivery{}, fmt.Errorf("service.CreateUserInvite: %w", err) // ErrConflict flows up
