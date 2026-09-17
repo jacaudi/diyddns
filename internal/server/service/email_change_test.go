@@ -266,6 +266,321 @@ func TestEmailChange_Cancel(t *testing.T) {
 	}
 }
 
+// requestAndToken runs Request for u and returns the raw confirmation token
+// out of the mail that was sent to the new address, plus u re-read with the
+// pending change on it.
+func requestAndToken(t *testing.T, st *store.Store, svc *EmailChangeService, mailer *fakeMailer, u store.User, newEmail string) (store.User, string) {
+	t.Helper()
+	if err := svc.Request(t.Context(), u, newEmail); err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	sent := mailer.Sent()
+	token := extractToken(t, extractLinkFromBody(t, sent[len(sent)-2].body))
+	fresh, err := st.Users().GetByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fresh, token
+}
+
+// seedUnusedGrant stages an unconsumed registration grant for userID.
+func seedUnusedGrant(t *testing.T, st *store.Store, hash, userID string) {
+	t.Helper()
+	if err := st.AccountRecovery().Create(t.Context(), store.RecoveryToken{
+		TokenHash: hash, UserID: userID, Reason: "recovery", ExpiresAt: store.NowUnix() + 3600,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func grantGone(t *testing.T, st *store.Store, hash string) bool {
+	t.Helper()
+	_, err := st.AccountRecovery().Get(t.Context(), hash)
+	return errors.Is(err, store.ErrNotFound)
+}
+
+func TestEmailChange_Confirm_AppliesDeletesGrantsAuditsAndNotifies(t *testing.T) {
+	mailer := &fakeMailer{enabled: true}
+	st, svc := newEmailChangeSvc(t, mailer)
+	u := seedUser(t, st, "old@example.com", "user")
+	seedUnusedGrant(t, st, "grant-old", u.ID)
+	pending, token := requestAndToken(t, st, svc, mailer, u, "new@example.com")
+
+	if err := svc.Confirm(t.Context(), pending, token); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+
+	got, _ := st.Users().GetByID(t.Context(), u.ID)
+	if got.Email != "new@example.com" || got.PendingEmail != "" {
+		t.Errorf("row = (%q, pending %q), want (new@example.com, \"\")", got.Email, got.PendingEmail)
+	}
+	if !grantGone(t, st, "grant-old") {
+		t.Error("outstanding grant survived the change (D8)")
+	}
+	rows := auditRows(t, st, "user.email_changed")
+	if len(rows) != 1 || rows[0].ActorUserID != u.ID || rows[0].DetailsJSON != `{"new":"new@example.com","old":"old@example.com"}` {
+		t.Errorf("user.email_changed rows = %+v", rows)
+	}
+	sent := mailer.Sent()
+	last := sent[len(sent)-1]
+	wantSubj, _ := emailpkg.ChangedBody("new@example.com")
+	if last.to != "old@example.com" || last.subject != wantSubj {
+		t.Errorf("last mail = %+v, want the changed notice to old@example.com", last)
+	}
+	// Single use.
+	if err := svc.Confirm(t.Context(), got, token); !errors.Is(err, ErrEmailChangeInvalid) {
+		t.Errorf("second confirm: err = %v, want ErrEmailChangeInvalid", err)
+	}
+}
+
+func TestEmailChange_Confirm_Rejects(t *testing.T) {
+	t.Run("wrong token", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: true}
+		st, svc := newEmailChangeSvc(t, mailer)
+		u := seedUser(t, st, "old@example.com", "user")
+		pending, _ := requestAndToken(t, st, svc, mailer, u, "new@example.com")
+		if err := svc.Confirm(t.Context(), pending, "not-the-token"); !errors.Is(err, ErrEmailChangeInvalid) {
+			t.Fatalf("err = %v, want ErrEmailChangeInvalid", err)
+		}
+		got, _ := st.Users().GetByID(t.Context(), u.ID)
+		if got.Email != "old@example.com" || got.PendingEmail != "new@example.com" {
+			t.Errorf("row changed on a rejected confirm: %+v", got)
+		}
+	})
+	t.Run("expired", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		u := seedUser(t, st, "old@example.com", "user")
+		if err := st.Users().SetPendingEmail(t.Context(), u.ID, "new@example.com", "irrelevant", store.NowUnix()-1); err != nil {
+			t.Fatal(err)
+		}
+		u, _ = st.Users().GetByID(t.Context(), u.ID)
+		if err := svc.Confirm(t.Context(), u, "anything"); !errors.Is(err, ErrEmailChangeInvalid) {
+			t.Fatalf("err = %v, want ErrEmailChangeInvalid", err)
+		}
+	})
+	t.Run("nothing pending", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		u := seedUser(t, st, "old@example.com", "user")
+		if err := svc.Confirm(t.Context(), u, "anything"); !errors.Is(err, ErrEmailChangeInvalid) {
+			t.Fatalf("err = %v, want ErrEmailChangeInvalid", err)
+		}
+	})
+	t.Run("oidc-linked meanwhile", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: true}
+		st, svc := newEmailChangeSvc(t, mailer)
+		u := seedUser(t, st, "old@example.com", "user")
+		pending, token := requestAndToken(t, st, svc, mailer, u, "new@example.com")
+		pending.OIDCProvider, pending.OIDCSubject = "https://idp.example.com", "s1"
+		if err := st.Users().Update(t.Context(), pending); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.Confirm(t.Context(), pending, token); !errors.Is(err, ErrEmailManagedByOIDC) {
+			t.Fatalf("err = %v, want ErrEmailManagedByOIDC", err)
+		}
+	})
+	t.Run("address taken between request and confirm", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: true}
+		st, svc := newEmailChangeSvc(t, mailer)
+		u := seedUser(t, st, "old@example.com", "user")
+		pending, token := requestAndToken(t, st, svc, mailer, u, "new@example.com")
+		seedUser(t, st, "new@example.com", "user")
+		if err := svc.Confirm(t.Context(), pending, token); !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("err = %v, want store.ErrConflict", err)
+		}
+		got, _ := st.Users().GetByID(t.Context(), u.ID)
+		if got.Email != "old@example.com" || got.PendingEmail != "new@example.com" {
+			t.Errorf("row after conflict = %+v, want unchanged with pending intact", got)
+		}
+	})
+}
+
+func TestEmailChange_AdminSet(t *testing.T) {
+	t.Run("applies immediately, notifies old, deletes grants, audits by admin", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: true}
+		st, svc := newEmailChangeSvc(t, mailer)
+		admin := seedUser(t, st, "admin@example.com", "admin")
+		target := seedUser(t, st, "old@example.com", "user")
+		seedUnusedGrant(t, st, "grant-old", target.ID)
+		if err := st.Users().SetPendingEmail(t.Context(), target.ID, "pending@example.com", "h", store.NowUnix()+3600); err != nil {
+			t.Fatal(err)
+		}
+		target, _ = st.Users().GetByID(t.Context(), target.ID)
+
+		updated, d, err := svc.AdminSet(t.Context(), admin.ID, target, "New@example.com")
+		if err != nil {
+			t.Fatalf("AdminSet: %v", err)
+		}
+		if updated.Email != "New@example.com" || updated.PendingEmail != "" || updated.ID != target.ID {
+			t.Errorf("returned user = %+v", updated)
+		}
+		got, _ := st.Users().GetByID(t.Context(), target.ID)
+		if got.Email != "New@example.com" || got.PendingEmail != "" {
+			t.Errorf("persisted row = (%q, pending %q)", got.Email, got.PendingEmail)
+		}
+		if got.UpdatedAt != updated.UpdatedAt {
+			t.Errorf("UpdatedAt: returned %d, persisted %d", updated.UpdatedAt, got.UpdatedAt)
+		}
+		if !grantGone(t, st, "grant-old") {
+			t.Error("outstanding grant survived the change (D8)")
+		}
+		rows := auditRows(t, st, "user.email_changed_by_admin")
+		if len(rows) != 1 || rows[0].ActorUserID != admin.ID || rows[0].TargetID != target.ID ||
+			rows[0].DetailsJSON != `{"new":"New@example.com","old":"old@example.com"}` {
+			t.Errorf("audit rows = %+v", rows)
+		}
+		wantSubj, _ := emailpkg.AdminChangedBody("New@example.com")
+		sent := mailer.Sent()
+		if !d.Sent() || len(sent) != 1 || sent[0].to != "old@example.com" || sent[0].subject != wantSubj {
+			t.Errorf("Delivery = %+v, sent = %+v; want one admin changed notice to old@example.com", d, sent)
+		}
+	})
+	t.Run("guards", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		admin := seedUser(t, st, "admin@example.com", "admin")
+		target := seedUser(t, st, "old@example.com", "user")
+		seedUser(t, st, "taken@example.com", "user")
+		for _, tc := range []struct {
+			in   string
+			want error
+		}{
+			{"nope", ErrInvalidEmail},
+			{"OLD@example.com", ErrEmailUnchanged},
+			{"Taken@example.com", store.ErrConflict},
+		} {
+			if _, _, err := svc.AdminSet(t.Context(), admin.ID, target, tc.in); !errors.Is(err, tc.want) {
+				t.Errorf("%q: err = %v, want %v", tc.in, err, tc.want)
+			}
+		}
+	})
+	t.Run("a case variant of the target's own pending address is allowed", func(t *testing.T) {
+		// exceptID exempts the target's own row: its pending address is not
+		// "held by another account". Pins the argument at this site.
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		admin := seedUser(t, st, "admin@example.com", "admin")
+		target := seedUser(t, st, "old@example.com", "user")
+		if err := st.Users().SetPendingEmail(t.Context(), target.ID, "pending@example.com", "h", store.NowUnix()+3600); err != nil {
+			t.Fatal(err)
+		}
+		target, _ = st.Users().GetByID(t.Context(), target.ID)
+		if _, _, err := svc.AdminSet(t.Context(), admin.ID, target, "PENDING@example.com"); err != nil {
+			t.Fatalf("AdminSet to the target's own pending address: %v, want nil", err)
+		}
+	})
+	t.Run("self target is allowed and immediate (D21)", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		admin := seedUser(t, st, "admin@example.com", "admin")
+		if _, _, err := svc.AdminSet(t.Context(), admin.ID, admin, "admin2@example.com"); err != nil {
+			t.Fatalf("AdminSet on self: %v", err)
+		}
+		got, _ := st.Users().GetByID(t.Context(), admin.ID)
+		if got.Email != "admin2@example.com" {
+			t.Errorf("Email = %q", got.Email)
+		}
+	})
+	t.Run("disabled target is still notified", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: true}
+		st, svc := newEmailChangeSvc(t, mailer)
+		admin := seedUser(t, st, "admin@example.com", "admin")
+		target, _ := st.Users().Create(t.Context(), store.User{Email: "old@example.com", Role: "user", Disabled: true})
+		if _, d, err := svc.AdminSet(t.Context(), admin.ID, target, "new@example.com"); err != nil || !d.Sent() {
+			t.Fatalf("err = %v, Delivery = %+v; want nil and Sent", err, d)
+		}
+	})
+	t.Run("without a mailer the change still applies", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, nil)
+		admin := seedUser(t, st, "admin@example.com", "admin")
+		target := seedUser(t, st, "old@example.com", "user")
+		if _, d, err := svc.AdminSet(t.Context(), admin.ID, target, "new@example.com"); err != nil || d.Attempted {
+			t.Fatalf("err = %v, Delivery = %+v; want nil and not Attempted", err, d)
+		}
+	})
+}
+
+func TestEmailChange_SyncFromIDP(t *testing.T) {
+	const iss = "https://idp.example.com"
+	linked := func(t *testing.T, st *store.Store, addr string) store.User {
+		t.Helper()
+		u, err := st.Users().Create(t.Context(), store.User{Email: addr, Role: "user", OIDCProvider: iss, OIDCSubject: "s1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	noWrite := func(t *testing.T, st *store.Store, u store.User) {
+		t.Helper()
+		got, _ := st.Users().GetByID(t.Context(), u.ID)
+		if got != u {
+			t.Errorf("row changed:\n before %+v\n after  %+v", u, got)
+		}
+		if n := len(auditRows(t, st, "user.email_changed_by_oidc")); n != 0 {
+			t.Errorf("audit rows = %d, want 0", n)
+		}
+	}
+
+	t.Run("empty claim keeps the stored address", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		u := linked(t, st, "a@example.com")
+		if got := svc.SyncFromIDP(t.Context(), u, ""); got != u {
+			t.Errorf("returned %+v, want the input row", got)
+		}
+		noWrite(t, st, u)
+	})
+	t.Run("unusable claim keeps the stored address", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		u := linked(t, st, "a@example.com")
+		for _, bad := range []string{"not-an-email", "josé@example.com"} {
+			if got := svc.SyncFromIDP(t.Context(), u, bad); got != u {
+				t.Errorf("%q: returned %+v, want the input row", bad, got)
+			}
+		}
+		noWrite(t, st, u)
+	})
+	t.Run("same address, any case, is a silent no-op", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		u := linked(t, st, "a@example.com")
+		if got := svc.SyncFromIDP(t.Context(), u, "A@Example.COM"); got != u {
+			t.Errorf("returned %+v, want the input row", got)
+		}
+		noWrite(t, st, u)
+	})
+	t.Run("address held by another account keeps the stored address", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
+		u := linked(t, st, "a@example.com")
+		seedUser(t, st, "b@example.com", "user")
+		if got := svc.SyncFromIDP(t.Context(), u, "B@example.com"); got != u {
+			t.Errorf("returned %+v, want the input row", got)
+		}
+		noWrite(t, st, u)
+	})
+	t.Run("a changed claim overwrites, deletes grants, audits and notifies off-path", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: true, sendCh: make(chan sentEmail, 1)}
+		st, svc := newEmailChangeSvc(t, mailer)
+		u := linked(t, st, "a@example.com")
+		seedUnusedGrant(t, st, "grant-a", u.ID)
+
+		got := svc.SyncFromIDP(t.Context(), u, "b@example.com")
+		if got.Email != "b@example.com" || got.ID != u.ID {
+			t.Fatalf("returned %+v, want the row with b@example.com", got)
+		}
+		persisted, _ := st.Users().GetByID(t.Context(), u.ID)
+		if persisted.Email != "b@example.com" {
+			t.Errorf("persisted Email = %q", persisted.Email)
+		}
+		if !grantGone(t, st, "grant-a") {
+			t.Error("outstanding grant survived the change (D8)")
+		}
+		rows := auditRows(t, st, "user.email_changed_by_oidc")
+		if len(rows) != 1 || rows[0].ActorUserID != u.ID || rows[0].DetailsJSON != `{"new":"b@example.com","old":"a@example.com"}` {
+			t.Errorf("audit rows = %+v", rows)
+		}
+		e := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+		wantSubj, _ := emailpkg.ChangedBody("b@example.com")
+		if e.to != "a@example.com" || e.subject != wantSubj {
+			t.Errorf("notice = %+v, want the changed notice to a@example.com", e)
+		}
+	})
+}
+
 // TestEmailChange_Request_RollbackSurvivesCanceledRequestContext pins the same
 // hazard grants.go's recordSendFailure and sendAdvisory already dodge
 // (grants.go:120-134): sendAdvisory detaches the SEND itself from

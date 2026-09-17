@@ -227,3 +227,146 @@ func (s *EmailChangeService) Cancel(ctx context.Context, u store.User) error {
 	})
 	return nil
 }
+
+// changedRow is the in-memory image of u after its address became newEmail at
+// now, with any pending change cleared: exactly what ConfirmPendingEmail and
+// SetEmail wrote. Nothing re-reads the row after a write (design §4): the
+// store's predicate binds the address to the token, so this cannot diverge
+// from what was written.
+func changedRow(u store.User, newEmail string, now int64) store.User {
+	u.Email = newEmail
+	u.PendingEmail = ""
+	u.PendingEmailExpiresAt = 0
+	u.UpdatedAt = now
+	return u
+}
+
+// applyChanged performs the two DATABASE side effects every completed change
+// shares (design §5.4): it deletes the account's outstanding registration
+// grants (D8 -- a link mailed to the old address must not survive the moment
+// that address stops speaking for the account) and audits event with the
+// old/new pair. Neither can fail the operation: the address is already
+// changed, and reporting failure would tell the caller something false. The
+// notice to the old address is the CALLER's job, because the three callers
+// differ in body and in whether the send may sit on the request path.
+func (s *EmailChangeService) applyChanged(ctx context.Context, actorID string, u store.User, oldEmail, event string) {
+	if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
+		s.mail.log.ErrorContext(ctx, "email change: deleting outstanding registration grants failed; they expire within the hour",
+			"error", err, "user_id", u.ID)
+	}
+	s.mail.audit.Log(ctx, store.AuditEntry{
+		ActorUserID: actorID, EventType: event,
+		TargetType: "user", TargetID: u.ID, DetailsJSON: emailChangeDetails(oldEmail, u.Email),
+	})
+}
+
+// Confirm redeems token for u's pending change (design §5.2). The store's
+// single conditional UPDATE is the single-use gate and the apply; every
+// rejection -- wrong token, expired, nothing pending -- is ErrEmailChangeInvalid
+// so the page cannot tell them apart. An OIDC-linked row is refused first:
+// its address follows the identity provider (D9), and a pending change staged
+// before the link is inert. The caller must pass the SESSION's user (D6): the
+// link alone proves possession of the new mailbox, not of the account.
+func (s *EmailChangeService) Confirm(ctx context.Context, u store.User, token string) error {
+	if u.OIDCSubject != "" {
+		return fmt.Errorf("service.Confirm: %w", ErrEmailManagedByOIDC)
+	}
+	now := store.NowUnix()
+	if err := s.st.Users().ConfirmPendingEmail(ctx, u.ID, auth.HashToken(token), now); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("service.Confirm: %w", ErrEmailChangeInvalid)
+		}
+		return fmt.Errorf("service.Confirm: %w", err) // store.ErrConflict flows up
+	}
+	updated := changedRow(u, u.PendingEmail, now)
+	s.applyChanged(ctx, u.ID, updated, u.Email, "user.email_changed")
+	subject, body := emailpkg.ChangedBody(updated.Email)
+	sendAdvisory(ctx, s.mail, u.ID, u.ID, u.Email, subject, body)
+	return nil
+}
+
+// AdminSet writes target's address directly, effective immediately (design
+// §5.3, D3): the admin has authenticated as themselves and the support case
+// is an address the user cannot receive mail at, so a confirmation step would
+// be circular. Any pending self-service change is discarded (SetEmail). The
+// old address is told (AdminChangedBody); that Delivery is returned so
+// the page can say whether it was. A disabled target is still notified -- a
+// heads-up is useful to a disabled account's owner in a way a registration
+// link is not. Nothing here branches on actorID == target.ID (D21).
+func (s *EmailChangeService) AdminSet(ctx context.Context, actorID string, target store.User, newEmail string) (store.User, Delivery, error) {
+	now := store.NowUnix()
+	normalized, err := emailpkg.NormalizeAddress(newEmail)
+	if err != nil {
+		return store.User{}, Delivery{}, fmt.Errorf("service.AdminSet: %w", ErrInvalidEmail)
+	}
+	if strings.EqualFold(normalized, target.Email) {
+		return store.User{}, Delivery{}, fmt.Errorf("service.AdminSet: %w", ErrEmailUnchanged)
+	}
+	users, err := s.st.Users().List(ctx)
+	if err != nil {
+		return store.User{}, Delivery{}, fmt.Errorf("service.AdminSet: %w", err)
+	}
+	if addressHeld(users, normalized, target.ID, now) {
+		return store.User{}, Delivery{}, fmt.Errorf("service.AdminSet: %w", store.ErrConflict)
+	}
+	if err := s.st.Users().SetEmail(ctx, target.ID, normalized, now); err != nil {
+		return store.User{}, Delivery{}, fmt.Errorf("service.AdminSet: %w", err) // ErrConflict / ErrNotFound flow up
+	}
+	updated := changedRow(target, normalized, now)
+	s.applyChanged(ctx, actorID, updated, target.Email, "user.email_changed_by_admin")
+	subject, body := emailpkg.AdminChangedBody(normalized)
+	return updated, sendAdvisory(ctx, s.mail, actorID, target.ID, target.Email, subject, body), nil
+}
+
+// SyncFromIDP makes a linked account's stored address follow its identity
+// provider's raw email claim (design §5.6, D9) and returns the row as it now
+// stands. It has NO error return by construction: nothing below can reject a
+// login. A claim that is empty, does not normalise, equals the stored address
+// (any case), is held by another account, or fails to write leaves the row
+// alone and is logged. This is the #87/#93 guard-placement lesson kept
+// intact -- a formatting rule or a collision must never lock out an
+// already-linked user.
+//
+// On an actual change the database side effects run on the request path (local
+// writes, microseconds) and the notice to the old address is DETACHED: a
+// goroutine on context.Background, bounded by sendAdvisory's own timeout, so
+// neither the browser login nor the device-enrollment poll ever waits on a
+// mail server.
+func (s *EmailChangeService) SyncFromIDP(ctx context.Context, u store.User, claim string) store.User {
+	if claim == "" {
+		s.mail.log.InfoContext(ctx, "oidc: linked user's IdP sent no email claim; keeping the stored address", "user_id", u.ID)
+		return u
+	}
+	normalized, err := emailpkg.NormalizeAddress(claim)
+	if err != nil {
+		s.mail.log.InfoContext(ctx, "oidc: linked user's IdP email claim is not a usable address; keeping the stored address", "user_id", u.ID)
+		return u
+	}
+	if strings.EqualFold(normalized, u.Email) {
+		return u
+	}
+	now := store.NowUnix()
+	users, err := s.st.Users().List(ctx)
+	if err != nil {
+		s.mail.log.ErrorContext(ctx, "oidc: email sync: list users failed; keeping the stored address", "error", err, "user_id", u.ID)
+		return u
+	}
+	if addressHeld(users, normalized, u.ID, now) {
+		s.mail.log.WarnContext(ctx, "oidc: IdP address is held by another account; keeping the stored address", "user_id", u.ID)
+		return u
+	}
+	if err := s.st.Users().SetEmail(ctx, u.ID, normalized, now); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			s.mail.log.WarnContext(ctx, "oidc: IdP address is held by another account; keeping the stored address", "user_id", u.ID)
+		} else {
+			s.mail.log.ErrorContext(ctx, "oidc: email sync: write failed; keeping the stored address", "error", err, "user_id", u.ID)
+		}
+		return u
+	}
+	updated := changedRow(u, normalized, now)
+	s.applyChanged(ctx, u.ID, updated, u.Email, "user.email_changed_by_oidc")
+	subject, body := emailpkg.ChangedBody(normalized)
+	//nolint:gosec // G118: deliberate -- ctx is the login request's context and the notice must outlive it; sendAdvisory bounds the goroutine with its own timeout (design §5.4).
+	go sendAdvisory(context.Background(), s.mail, u.ID, u.ID, u.Email, subject, body)
+	return updated
+}
