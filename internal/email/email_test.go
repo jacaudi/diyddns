@@ -639,6 +639,22 @@ func TestSmtpMailer_Send_MailableStillSends(t *testing.T) {
 		"your recovery link", "click here: https://x.test/r/abc")
 }
 
+// TestSmtpMailer_Send_FromDomainLiteralIsRoutable pins checkAddress's per-field
+// predicate dispatch: a From domain literal is exactly the input IsRoutableFrom
+// accepts and IsRoutable rejects (the brackets are recipient-side list
+// delimiters, not a From-side one), so this only passes if the From field is
+// actually checked against IsRoutableFrom rather than IsRoutable.
+func TestSmtpMailer_Send_FromDomainLiteralIsRoutable(t *testing.T) {
+	host, port, envelopes := startFakeSMTP(t)
+	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@[192.168.1.1]", TLS: "none"}
+	m := email.New(cfg, debugLogger())
+
+	if err := m.Send(t.Context(), "user@example.test", "your recovery link", "click here"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertEnvelope(t, envelopes, "noreply@[192.168.1.1]", "user@example.test", "your recovery link", "click here")
+}
+
 func TestChangeConfirmBody_ContainsLinkAndSignInNote(t *testing.T) {
 	const link = "https://ddns.example.com/account/email/confirm?token=abc"
 	subject, body := email.ChangeConfirmBody(link)
