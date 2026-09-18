@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.5.0](https://github.com/jacaudi/diyddns/compare/v0.4.0...v0.5.0) (2026-09-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** turning on feed.expire_after_days changes behaviour for existing deployments on their first boot. The migration seeds the per-family confirmation instants from last_seen_at, so any device silent for longer than the window (21 days by default) is already past every warning rung and has its address cleared on the very first sweep, with no warning email beforehand. A deployment carrying 30 long-dead devices drops their addresses and sends 30 owner emails plus one admin digest within the hour. Set feed.expire_after_days: 0 -- the documented opt-out -- to keep the previous behaviour and leave the sweeper unbuilt.
+
+### Features
+
+* allow an account's email address to be changed ([e0f2a7a](https://github.com/jacaudi/diyddns/commit/e0f2a7a6fc1a21b915e85a7060f8213db7a377c3))
+* **config:** add feed.expire_after_days for the [#127](https://github.com/jacaudi/diyddns/issues/127) staleness policy ([caf1750](https://github.com/jacaudi/diyddns/commit/caf1750c90a625c492dc0e10ef6c4e24bbc0e1b1))
+* **email:** bodies for confirming, warning about and announcing an address change ([#131](https://github.com/jacaudi/diyddns/issues/131)) ([32521b3](https://github.com/jacaudi/diyddns/commit/32521b3020133884a0e359799f14dea6fd9287ef))
+* **oidc:** a linked account's address follows its IdP; wire EmailChangeService; prune expired pending changes ([#131](https://github.com/jacaudi/diyddns/issues/131)) ([a3322a5](https://github.com/jacaudi/diyddns/commit/a3322a5880f25a75162a8bc49f4be99a95da9c32))
+* **server:** construct and gate the staleness sweeper ([5f07c83](https://github.com/jacaudi/diyddns/commit/5f07c83fef3244a23c22b457ae60c975f562fe8a)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **server:** sweep unconfirmed addresses out of the gateway feed ([9699f28](https://github.com/jacaudi/diyddns/commit/9699f28942d328d68245762b3b8ee77be379dab0)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **service:** confirm, admin-set and IdP-sync an email address, deleting stale grants ([bc2252a](https://github.com/jacaudi/diyddns/commit/bc2252a6b7e4d274e044008a89ca2e29ba6599dd))
+* **service:** stage a self-service email change behind new-address confirmation ([bb43c61](https://github.com/jacaudi/diyddns/commit/bb43c61fb804a4ffdf0265c5ddf87b581752c729))
+* **stale:** add the window and warning-ladder arithmetic ([fae319c](https://github.com/jacaudi/diyddns/commit/fae319cf7225afa5ea683ea993eeb1fd688cd0b0)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **stale:** render and deliver the staleness notices ([7433e31](https://github.com/jacaudi/diyddns/commit/7433e31f5680a7588e61c6645a0bd49dab39dfd9)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **store:** add the per-family confirmation and warn-level columns ([2beb3ad](https://github.com/jacaudi/diyddns/commit/2beb3ad8932cc59a7d2235e1de1025db11b2743b)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **store:** expire an address family and emit the resulting event ([8b31f89](https://github.com/jacaudi/diyddns/commit/8b31f890fff2d6e3c4e773ee33e80f993a25dcb3)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **store:** stage, confirm and clear a pending email change on the users row ([e2612f3](https://github.com/jacaudi/diyddns/commit/e2612f36862555504ee89d4581d749dcac61a9fa))
+* **store:** track per-family confirmation instants on every contact ([e6ebccc](https://github.com/jacaudi/diyddns/commit/e6ebccc58a4fbc70c602f832d33d4aab975a3852)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **webui:** change your own email address from the account page, confirmed from the new inbox ([19d0fbe](https://github.com/jacaudi/diyddns/commit/19d0fbe729532f73e6667656f85d91ddeb2f3d19))
+* **webui:** enforce the design system: width scale, component inventory, CI checks ([527aea1](https://github.com/jacaudi/diyddns/commit/527aea1ed44579aa9f1501e12c73be2be3b855a2))
+* **webui:** label the admin device list "All Devices" ([906d52c](https://github.com/jacaudi/diyddns/commit/906d52c64c417c7e5f93a4b3ae6311619857812a))
+* **webui:** let an admin set a user's email address from the user page ([d5659c5](https://github.com/jacaudi/diyddns/commit/d5659c5d6c384604e9a11c45e5d2dbb47ec31d2d))
+* **webui:** put every typed confirmation behind the modal it already had ([25a3096](https://github.com/jacaudi/diyddns/commit/25a30969a8d847fe92d00159e9362c60bcaaaaaa))
+* **webui:** show the last-known address and an expiry countdown ([5f9a9de](https://github.com/jacaudi/diyddns/commit/5f9a9de39426d7e3c815ad6760622f8e56f1a5ce)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+
+
+### Bug Fixes
+
+* **audit:** record actor and IP on user.logout ([#137](https://github.com/jacaudi/diyddns/issues/137)) ([9e892ad](https://github.com/jacaudi/diyddns/commit/9e892ad692689b5b6cece817e38467b5d19f3837)), closes [#134](https://github.com/jacaudi/diyddns/issues/134)
+* **email:** stop presenting cancel and contact-admin as an either/or ([3c78969](https://github.com/jacaudi/diyddns/commit/3c78969369ab895d1eae7847a4a90ddfc5527b32))
+* **service:** detach the email-change rollback from a canceled request context ([c5047a3](https://github.com/jacaudi/diyddns/commit/c5047a37a6d8751c6a98fc82cfb49480b3a2b00b))
+* **service:** deterministic rollback test sync, bound the rollback context ([ad3d37a](https://github.com/jacaudi/diyddns/commit/ad3d37a2472f54d49b98ae4b809c471e2aaa2975))
+* **stale:** bound every staleness delivery, and unify the day rendering ([30c8a8e](https://github.com/jacaudi/diyddns/commit/30c8a8e2359c2be34c26d26e85060b6e00ff487f)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **store:** close pending-email review gaps — unpinned assertions, empty-address writes ([c5fae81](https://github.com/jacaudi/diyddns/commit/c5fae81f58e51404d94a5942bfe30bff8dfaee49))
+* **webui,email,service:** correct stale docs, mislabeled cancel link, and pin OIDC sync's exceptID ([#131](https://github.com/jacaudi/diyddns/issues/131)) ([9f21f28](https://github.com/jacaudi/diyddns/commit/9f21f2870a4e2091d52a6dd9d447fe1c748d7fe9))
+* **webui:** align the form controls and make the quiet controls visible ([9b52efb](https://github.com/jacaudi/diyddns/commit/9b52efbc636a4f61a33d7fdf3bb68a9be5a45a83))
+* **webui:** close the responsive card borders, and align the expiry surfaces ([d4a9aba](https://github.com/jacaudi/diyddns/commit/d4a9abaa19d3b2bbcbbc85c20511db83fd7acf2e)), closes [#127](https://github.com/jacaudi/diyddns/issues/127)
+* **webui:** give the audit bar a growing field, and draw passkeys as records ([c13efd9](https://github.com/jacaudi/diyddns/commit/c13efd9da82bd1a50b8d8a8d91780a8eaef7e197))
+* **webui:** repair the spacing, type and copy-pill rules the UI review found ([425649d](https://github.com/jacaudi/diyddns/commit/425649d7b7d135f6c00448412c019df57e67e1cf))
+* **webui:** separate the account page's two acts, and centre Apply properly ([f9cd1d1](https://github.com/jacaudi/diyddns/commit/f9cd1d155ed52a3ac8d84c77617063815262c3ce))
+
 ## [0.4.0](https://github.com/jacaudi/diyddns/compare/v0.3.0...v0.4.0) (2026-09-14)
 
 
