@@ -182,7 +182,7 @@ func TestMailer_Send_AbandonedFailureIsSanitizedInTheWarnLog(t *testing.T) {
 	}
 }
 
-// TestMailer_Send_AbandonedRaceReportsExactlyOnce is a regression test for
+// TestMailer_Send_AbandonedRaceNeverLosesTheOutcome is a regression test for
 // the ordering of Store(&abandoned, true) relative to the non-blocking
 // re-check of done in Send's ctx.Done branch. With the buggy ordering
 // (re-check, THEN Store), a done <- err landing strictly between the two
@@ -192,7 +192,13 @@ func TestMailer_Send_AbandonedFailureIsSanitizedInTheWarnLog(t *testing.T) {
 // -- never fires either. Reproducing that interleaving needs many rounds:
 // racing a very short deadline against the stub's release, over enough
 // iterations, used to lose the WARN on the buggy ordering.
-func TestMailer_Send_AbandonedRaceReportsExactlyOnce(t *testing.T) {
+//
+// This pins AT LEAST ONCE, not exactly once: the fixed ordering makes a rare
+// duplicate report reachable (the caller's own result AND the WARN both
+// fire for the same send), which is expected and harmless -- see the Store
+// comment in apprise.go. This test does not fail on a duplicate; it only
+// fails if an abandoned send's outcome is reported zero times.
+func TestMailer_Send_AbandonedRaceNeverLosesTheOutcome(t *testing.T) {
 	verifyNoLeak(t)
 	const iterations = 400
 	for i := range iterations {
@@ -317,12 +323,14 @@ func TestMailer_Send_SanitizesLibraryErrors(t *testing.T) {
 
 // TestMailer_TargetURL pins the URL shape the facade renders: mode, format,
 // from and to are explicit; the password survives url.UserPassword and
-// url.Parse for every reserved character it might contain. This task does
-// not wire appriseMailer into email.New (Task 4 does), so the wire tests in
-// email_test.go today exercise smtpMailer only, not this shape; once Task 4
-// switches New over, those wire tests become the proof that the real library
-// accepts what targetURL renders, and Task 4 must re-verify that (this test
-// only proves apprise.New().Add's scheme/syntax validation accepts it).
+// url.Parse for every reserved character it might contain. This test calls
+// neither apprise.New nor .Add -- it only proves the string round-trips
+// through Go's own net/url, nothing about whether the real apprise-go
+// library would parse or accept it. This task does not wire appriseMailer
+// into email.New (Task 4 does), so the wire tests in email_test.go today
+// exercise smtpMailer only; that library-acceptance question stays
+// unverified until Task 4 switches New over and those wire tests actually
+// exercise appriseMailer end-to-end -- Task 4 must confirm it then.
 func TestMailer_TargetURL(t *testing.T) {
 	const password = "p@ss:w/rd%25#&=+"
 	tests := []struct {

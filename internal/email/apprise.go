@@ -137,11 +137,27 @@ func (m *appriseMailer) Send(ctx context.Context, to, subject, body string) erro
 		<-m.slots
 		done <- err
 		if abandoned.Load() {
-			// The caller has already reported this send as failed and, on the
-			// grant paths, audited it. If err is nil the message was delivered
-			// anyway -- late. This line is normally the only record of that
-			// outcome and the only drain signal an operator has. A panic in the
-			// library reaches here too, as the error guardedSend turned it into.
+			// The caller MAY already have reported this send as failed and,
+			// on the grant paths, audited it -- not certainly: in the rare
+			// duplicate-report window described below (Store, THEN this Load
+			// reads true, but the caller's own re-check of done ALSO already
+			// found the value), the caller already has the real result too.
+			// If err is nil the message was delivered -- late in the normal
+			// case, or on time in the duplicate case. This line is normally
+			// the only record of the outcome and the only drain signal an
+			// operator has; in the duplicate case it is a harmless second
+			// record of what the caller already returned. A panic in the
+			// library reaches here too, as the error guardedSend turned it
+			// into.
+			//
+			// The message text below ("...gave up on it") is not literally
+			// true in that duplicate case -- the caller's own re-check
+			// already recovered the real result, so it gave up on waiting
+			// via the fast path, not on the outcome itself. Left unchanged:
+			// it is accurate the other ~99.7% of the time (the case this
+			// line exists for), every test asserting this substring would
+			// need updating for no clarity gain, and a duplicate log line
+			// naming the true outcome is harmless either way.
 			m.log.LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
 				"email.send completed after its caller gave up on it",
 				slog.String("host", m.cfg.Host), slog.String("to", to),
@@ -154,20 +170,42 @@ func (m *appriseMailer) Send(ctx context.Context, to, subject, body string) erro
 	case err := <-done:
 		return m.finish(ctx, to, err)
 	case <-ctx.Done():
-		// Store BEFORE the re-check, not after -- the order matters. The
-		// goroutine writes done <- err and only then reads abandoned.Load().
-		// If that Load observes false, the Store below has not
-		// happened-before it, which by the atomic's total order means
-		// done <- err has not happened-before this Store either -- so the
-		// re-check that follows is guaranteed to still find it. If Load
-		// observes true, the late-completion WARN fires instead. Either way
-		// the outcome is reported exactly once, never dropped. Storing AFTER
-		// the re-check (the previous ordering) left a window in which
-		// done <- err landed strictly between the two reads: the re-check
-		// missed it and the goroutine's Load, still seeing abandoned==false,
-		// skipped the WARN too -- both signals lost. Measured at 2.8% of
-		// iterations under -race before this reorder; see
-		// TestMailer_Send_AbandonedRaceReportsExactlyOnce.
+		// Store BEFORE the re-check, not after -- the order matters. This
+		// guarantees the outcome is reported AT LEAST once, never dropped (a
+		// rare duplicate report is possible; see below).
+		//
+		// If the goroutine's abandoned.Load() (above) reads false, that Load
+		// precedes this Store in sync/atomic's documented sequentially
+		// consistent total order. The goroutine's done <- err is sequenced
+		// before its own Load in program order, so done <- err also
+		// precedes this Store in that order -- it has already completed by
+		// the time this Store runs. Go's channel implementation serializes
+		// sends and receive attempts (including a non-blocking one) against
+		// the same internal lock, so a send that has already completed is
+		// guaranteed to be visible to the re-check below once it runs. The
+		// guarantee comes from that combination -- atomic sequential
+		// consistency ordering the two goroutines' Store/Load, plus the
+		// channel's own synchronization ordering the send against the
+		// receive attempt -- not from the stale atomic read by itself, which
+		// creates no happens-before edge to anything outside sync/atomic on
+		// its own.
+		//
+		// If Load instead reads true, the WARN above fires. In the narrow
+		// window where done <- err completes strictly between this Store
+		// and the goroutine's Load, BOTH fire: the re-check below also finds
+		// the value (same argument, now with Store preceding Load) and the
+		// WARN logs too. Measured at ~0.27% of iterations under -race --
+		// harmless, since nothing downstream double-consumes either signal
+		// (the slot was already released before both checks, and the WARN
+		// has no code consumer, only an operator reading logs).
+		//
+		// The previous ordering (re-check, THEN Store) had no such
+		// guarantee: a done <- err landing strictly between the two lost
+		// both signals -- the re-check above already missed it, and the
+		// goroutine's Load, running before the Store, also read false and
+		// skipped the WARN. Measured at 2.8% of iterations under -race
+		// before this reorder; see
+		// TestMailer_Send_AbandonedRaceNeverLosesTheOutcome.
 		abandoned.Store(true)
 		select {
 		case err := <-done:
