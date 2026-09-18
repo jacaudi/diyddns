@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -60,6 +62,55 @@ var ErrAddressNotCanonical = errors.New("email: address is not in canonical addr
 // the body (which legitimately contains \n).
 var ErrHeaderInjection = errors.New("email: header value contains a CR or LF")
 
+// ErrAddressUnroutable reports an address the transport would not carry as
+// written. unraid/apprise-go filters every mailto address through
+// parseDelimitedList (split on `[\[\];,\s]+`, internal/notify/parse_helpers.go:10)
+// and then isSimpleEmail (`^[^@\s]+@[^@\s]+\.[^@\s]+$`, internal/notify/smtp2go.go:13).
+// A To that fails is NOT refused: it is dropped, and the message is sent to
+// From instead (internal/notify/mailto_target.go:129-132). The From address
+// takes a different path (parseMailtoFrom, mailto_target.go:180-217):
+// mail.ParseAddress, then isSimpleEmail, with NO delimiter split -- so a
+// domain literal such as noreply@[192.168.1.1] is a working From and an
+// unroutable To. A From that fails is refused loudly ("invalid from email")
+// before anything reaches the wire. Refuse both here, each by its own rule.
+// This is a different defect from ErrAddressUnsupported (a quoted local
+// part that cannot be canonicalised): `user@[192.168.1.1]` canonicalises
+// fine and is unroutable as a recipient, because the brackets are list
+// delimiters to the library. IsRoutable and IsRoutableFrom must stay in
+// lockstep with the pinned library version (go.mod); re-read both library
+// sites on every bump.
+var ErrAddressUnroutable = errors.New("email: address cannot be carried by the transport as written")
+
+var (
+	// libraryListDelims is the library's parseDelimitedList separator set.
+	libraryListDelims = regexp.MustCompile(`[\[\];,\s]+`)
+	// libraryRecipientRe is the library's isSimpleEmail predicate.
+	libraryRecipientRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+)
+
+// IsRoutable reports whether the transport would carry addr as a RECIPIENT
+// exactly as written: after the library splits it on its list delimiters,
+// exactly one element must survive, it must be the whole input, and it must
+// match the library's recipient predicate. It is at least as strict as the
+// library (a value the library would mangle rather than drop, such as one
+// with a trailing space, is also refused; checkAddress rejects those
+// earlier anyway). Exported for the external test package; IsRoutableFrom
+// is the one internal/config pins its duplicate against.
+func IsRoutable(addr string) bool {
+	parts := libraryListDelims.Split(addr, -1)
+	parts = slices.DeleteFunc(parts, func(p string) bool { return p == "" })
+	return len(parts) == 1 && parts[0] == addr && libraryRecipientRe.MatchString(addr)
+}
+
+// IsRoutableFrom reports whether the transport would accept addr as the
+// FROM address: the library's isSimpleEmail predicate alone, no delimiter
+// split. checkAddress has already required addr to be a canonical
+// addr-spec, so only the dotted-domain requirement can still fail here.
+// Exported for the same reason as IsRoutable.
+func IsRoutableFrom(addr string) bool {
+	return libraryRecipientRe.MatchString(addr)
+}
+
 // IsASCII reports whether s is entirely 7-bit ASCII.
 //
 // It iterates BYTES, not runes: the question is what goes on the wire, and any
@@ -103,9 +154,12 @@ func NormalizeAddress(addr string) (string, error) {
 }
 
 // checkAddress applies the ADDRESS predicate to one envelope address: it must
-// parse, be 7-bit, and ALREADY be in canonical form. The last clause is what
-// catches a display-name-form value stored before the boundary validations
-// existed.
+// parse, be 7-bit, ALREADY be in canonical form, and be routable by the
+// transport under that field's own rule (IsRoutableFrom for From, IsRoutable
+// for To). The canonical clause is what catches a display-name-form value
+// stored before the boundary validations existed; the routable clause is
+// what stops the transport from silently swapping in the From address for a
+// recipient it cannot carry.
 func checkAddress(field, addr string) error {
 	normalized, err := NormalizeAddress(addr)
 	if err != nil {
@@ -113,6 +167,13 @@ func checkAddress(field, addr string) error {
 	}
 	if normalized != addr {
 		return fmt.Errorf("%w: %s header", ErrAddressNotCanonical, field)
+	}
+	routable := IsRoutable
+	if field == "From" {
+		routable = IsRoutableFrom
+	}
+	if !routable(addr) {
+		return fmt.Errorf("%w: %s header", ErrAddressUnroutable, field)
 	}
 	return nil
 }

@@ -135,3 +135,54 @@ func TestRenderedMessagesAreASCII(t *testing.T) {
 		})
 	}
 }
+
+// TestIsRoutable pins the transport predicate against the cases the library
+// treats differently from mail.ParseAddress. A false here for a value
+// NormalizeAddress accepts is exactly the misdelivery the predicate exists
+// to stop: unraid/apprise-go drops such a recipient and mails From instead.
+func TestIsRoutable(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{in: "user@example.test", want: true},
+		{in: "user+tag@example.test", want: true},
+		{in: "a@b.c", want: true},
+		{in: "Bob@Example.COM", want: true},
+		{in: "user@localhost", want: false},     // no dot in the domain
+		{in: "user@intranet", want: false},      // no dot in the domain
+		{in: "user@[192.168.1.1]", want: false}, // brackets are list delimiters
+		{in: "user@example.test ", want: false}, // the library would trim it, then send to a different string than it was given; refused as not-the-whole-input
+		{in: "a@b.c;d@e.f", want: false},        // two addresses
+		{in: `"john doe"@example.com`, want: false},
+		{in: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := email.IsRoutable(tt.in); got != tt.want {
+				t.Errorf("IsRoutable(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsRoutableFrom pins the From rule, which differs from the recipient
+// rule in exactly one way: no delimiter split, so a domain literal is fine.
+func TestIsRoutableFrom(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{in: "noreply@example.test", want: true},
+		{in: "noreply@[192.168.1.1]", want: true}, // measured: the library sends MAIL FROM:<noreply@[192.168.1.1]>
+		{in: "noreply@localhost", want: false},    // no dot in the domain
+		{in: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := email.IsRoutableFrom(tt.in); got != tt.want {
+				t.Errorf("IsRoutableFrom(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}

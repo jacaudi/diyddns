@@ -586,6 +586,19 @@ func TestSmtpMailer_Send_RejectsUnmailable(t *testing.T) {
 		{name: "CR/LF in subject (header injection)", from: "noreply@example.com", to: "user@example.test",
 			subject: "your recovery link\r\nBcc: attacker@evil.test", body: "click here",
 			wantErr: email.ErrHeaderInjection},
+		// The transport drops a recipient its own predicate rejects and mails
+		// FROM instead (unraid/apprise-go mailto_target.go:129-132), reporting
+		// success. Both shapes canonicalise cleanly, so only IsRoutable stops
+		// them.
+		{name: "dot-less recipient domain (transport would mail From)", from: "noreply@example.com",
+			to: "user@localhost", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnroutable},
+		{name: "domain-literal recipient (brackets are delimiters to the transport)", from: "noreply@example.com",
+			to: "user@[192.168.1.1]", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnroutable},
+		{name: "dot-less from domain (transport refuses it)", from: "noreply@localhost",
+			to: "user@example.test", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnroutable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
