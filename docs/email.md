@@ -28,7 +28,9 @@ Enabling email **requires `server.base_url`, `email.host`, `email.port` and `ema
 server refuses to start without them. Emailed links must be absolute, and the other three have no
 usable default — `port` defaults to `0`. It also refuses to start with `email.username` set and
 `email.tls: none` against anything other than `localhost`/`127.0.0.1`/`::1` — credentials are
-never sent over an unencrypted connection. Every problem is collected and
+never sent over an unencrypted connection. It likewise refuses to start if only one of
+`email.username`/`email.password` is set, or if either one has leading or trailing whitespace.
+Every problem is collected and
 reported in a single error, so enabling email from scratch means fixing everything in one deploy
 cycle instead of discovering the next missing key on each restart.
 
