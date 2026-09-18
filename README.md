@@ -250,9 +250,9 @@ naming, commit conventions, and what CI runs on a PR.
 
 ## Documentation
 
-**Configuration** — each optional subsystem is off by default (except feed
-expiry) and documented on its own. Every key also has a `DIYDDNS_`-prefixed
-environment variable; the full annotated set lives in
+**Configuration** — each optional subsystem is off by default (except the
+feed and feed expiry) and documented on its own. Every key also has a
+`DIYDDNS_`-prefixed environment variable; the full annotated set lives in
 [`config.example.yaml`](config.example.yaml).
 
 | Doc | Default | Covers |
@@ -260,7 +260,7 @@ environment variable; the full annotated set lives in
 | [Deployment](docs/deployment.md) | — | Containers, production Docker/Compose/Kubernetes, client credential volumes |
 | [Email](docs/email.md) | off | SMTP delivery for invite/recovery links |
 | [Notifications](docs/notifications.md) | off | Signed outbound webhooks, payload contract, verification |
-| [Feed](docs/feed.md) | off | REST/WebSocket gateway allow-list |
+| [Feed](docs/feed.md) | **on** | REST/WebSocket gateway allow-list |
 | [Feed Expiry](docs/feed.md#feed-expiry) | **on**, 21 days | Ages out unconfirmed addresses |
 | [Retention](docs/retention.md) | off | Pruning `ip_history` and `audit_log` |
 | [Observability](docs/observability.md) | off | Request IDs and OpenTelemetry (OTLP) export |
