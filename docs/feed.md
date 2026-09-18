@@ -1,14 +1,17 @@
 # Feed
 
-*Optional, off by default.*
+*On by default.*
 
 The feed is how a firewall, WAF, Envoy Gateway or other Kubernetes gateway consumes the current
 device addresses: a bearer-token REST snapshot to poll, and a WebSocket stream for live changes.
 It lists **every enabled device of every enabled user** that has an address.
 
+It is **enabled by default** — reading it still requires a token an admin mints at `/admin/feed`
+(below), so a fresh deployment discloses nothing until an admin acts.
+
 | Key | Env var | Notes |
 |---|---|---|
-| `feed.enabled` | `DIYDDNS_FEED_ENABLED` | `false` by default; when off, none of the routes below nor `/admin/feed` exists |
+| `feed.enabled` | `DIYDDNS_FEED_ENABLED` | `true` by default; when off, none of the routes below nor `/admin/feed` exists |
 
 ## Tokens
 

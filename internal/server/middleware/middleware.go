@@ -130,8 +130,19 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // unaffected.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
-// AccessLog emits exactly one structured info line per request. Sensitive
-// headers are never logged.
+// healthCheckRoutes are polled every few seconds by a liveness/readiness
+// probe. Logging them at Info would spam every deployment's default-level
+// logs with synthetic traffic that carries no operational signal, so
+// AccessLog logs them at Debug instead -- still visible to an operator who
+// turns on logging.level: debug, silent at the config default ("info").
+var healthCheckRoutes = map[string]bool{
+	"GET /healthz": true,
+	"GET /readyz":  true,
+}
+
+// AccessLog emits exactly one structured line per request, at Info except
+// for the health-check routes above, which log at Debug. Sensitive headers
+// are never logged.
 func AccessLog(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +152,11 @@ func AccessLog(log *slog.Logger) func(http.Handler) http.Handler {
 			if rec.status == 0 {
 				rec.status = http.StatusOK
 			}
-			log.LogAttrs(r.Context(), slog.LevelInfo, "request",
+			level := slog.LevelInfo
+			if healthCheckRoutes[r.Pattern] {
+				level = slog.LevelDebug
+			}
+			log.LogAttrs(r.Context(), level, "request",
 				slog.String("method", r.Method),
 				// r.Pattern is the low-cardinality route template (Go 1.23+).
 				// r.URL.Path carries device and user ids, so logging it wrote a
