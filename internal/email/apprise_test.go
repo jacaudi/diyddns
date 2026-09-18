@@ -147,6 +147,85 @@ func TestMailer_Send_LateCompletionIsLogged(t *testing.T) {
 	}
 }
 
+// TestMailer_Send_AbandonedFailureIsSanitizedInTheWarnLog pins the one log
+// line written from inside the send goroutine, not the caller: the
+// late-completion WARN. TestMailer_Send_SanitizesLibraryErrors never reaches
+// it -- its stub has release == nil, so the send returns while the caller is
+// still listening and abandoned never becomes true. This test forces the
+// abandon-then-fail path so the WARN itself is exercised.
+func TestMailer_Send_AbandonedFailureIsSanitizedInTheWarnLog(t *testing.T) {
+	verifyNoLeak(t)
+	const password = "PASS-do-not-leak-in-the-warn"
+	stub := &stubSend{release: make(chan struct{}), err: errors.Join(&apprise.TargetError{
+		URL: "mailto://svc:" + password + "@smtp.example.test:587?from=a@b.c", Err: errors.New("boom"),
+	})}
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	cfg := testCfg
+	cfg.Username, cfg.Password = "svc", password
+	m := email.NewMailerForTest(cfg, log, 1, stub.send)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if err := m.Send(ctx, "user@example.test", "s", "b"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send err = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	close(stub.release) // the peer answers, late, with a failure
+
+	waitForLog(t, &buf, "completed after its caller gave up")
+	got := buf.String()
+	if !strings.Contains(got, "delivered=false") {
+		t.Errorf("late-completion line must report the real (failed) outcome, got:\n%s", got)
+	}
+	if strings.Contains(got, password) {
+		t.Errorf("late-completion WARN carries the SMTP password:\n%s", got)
+	}
+}
+
+// TestMailer_Send_AbandonedRaceReportsExactlyOnce is a regression test for
+// the ordering of Store(&abandoned, true) relative to the non-blocking
+// re-check of done in Send's ctx.Done branch. With the buggy ordering
+// (re-check, THEN Store), a done <- err landing strictly between the two
+// loses both signals: the caller returns DeadlineExceeded for a send that
+// may have succeeded, AND the goroutine's own abandoned.Load() still reads
+// false, so the late-completion WARN -- normally the only remaining record
+// -- never fires either. Reproducing that interleaving needs many rounds:
+// racing a very short deadline against the stub's release, over enough
+// iterations, used to lose the WARN on the buggy ordering.
+func TestMailer_Send_AbandonedRaceReportsExactlyOnce(t *testing.T) {
+	verifyNoLeak(t)
+	const iterations = 400
+	for i := range iterations {
+		var buf syncBuffer
+		log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		stub := &stubSend{release: make(chan struct{})}
+		m := email.NewMailerForTest(testCfg, log, 1, stub.send)
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+		var releaseWG sync.WaitGroup
+		releaseWG.Go(func() {
+			time.Sleep(time.Millisecond) // race this against the same-length deadline
+			close(stub.release)
+		})
+
+		err := m.Send(ctx, "user@example.test", "s", "b")
+		cancel()
+		releaseWG.Wait()
+
+		if err == nil {
+			// The stub answered before (or exactly at) the deadline: the
+			// caller already holds the real, non-abandoned result.
+			continue
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("iteration %d: Send err = %v, want nil or context.DeadlineExceeded", i, err)
+		}
+		// Abandoned: the WARN is the only remaining record of the outcome,
+		// and the fix guarantees it is never silently dropped.
+		waitForLog(t, &buf, "completed after its caller gave up")
+	}
+}
+
 // syncBuffer is a bytes.Buffer safe for a logger written from the send
 // goroutine and read by the test.
 type syncBuffer struct {
@@ -238,9 +317,12 @@ func TestMailer_Send_SanitizesLibraryErrors(t *testing.T) {
 
 // TestMailer_TargetURL pins the URL shape the facade renders: mode, format,
 // from and to are explicit; the password survives url.UserPassword and
-// url.Parse for every reserved character it might contain. The library's
-// acceptance is proven by the wire tests in email_test.go, not here
-// (apprise.New().Add validates scheme and syntax only).
+// url.Parse for every reserved character it might contain. This task does
+// not wire appriseMailer into email.New (Task 4 does), so the wire tests in
+// email_test.go today exercise smtpMailer only, not this shape; once Task 4
+// switches New over, those wire tests become the proof that the real library
+// accepts what targetURL renders, and Task 4 must re-verify that (this test
+// only proves apprise.New().Add's scheme/syntax validation accepts it).
 func TestMailer_TargetURL(t *testing.T) {
 	const password = "p@ss:w/rd%25#&=+"
 	tests := []struct {

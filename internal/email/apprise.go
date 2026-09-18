@@ -154,15 +154,26 @@ func (m *appriseMailer) Send(ctx context.Context, to, subject, body string) erro
 	case err := <-done:
 		return m.finish(ctx, to, err)
 	case <-ctx.Done():
-		// If the result landed in the same instant, prefer it: the message
-		// may have been delivered, and reporting that as a failure would
-		// write an audit row for a send that succeeded.
+		// Store BEFORE the re-check, not after -- the order matters. The
+		// goroutine writes done <- err and only then reads abandoned.Load().
+		// If that Load observes false, the Store below has not
+		// happened-before it, which by the atomic's total order means
+		// done <- err has not happened-before this Store either -- so the
+		// re-check that follows is guaranteed to still find it. If Load
+		// observes true, the late-completion WARN fires instead. Either way
+		// the outcome is reported exactly once, never dropped. Storing AFTER
+		// the re-check (the previous ordering) left a window in which
+		// done <- err landed strictly between the two reads: the re-check
+		// missed it and the goroutine's Load, still seeing abandoned==false,
+		// skipped the WARN too -- both signals lost. Measured at 2.8% of
+		// iterations under -race before this reorder; see
+		// TestMailer_Send_AbandonedRaceReportsExactlyOnce.
+		abandoned.Store(true)
 		select {
 		case err := <-done:
 			return m.finish(ctx, to, err)
 		default:
 		}
-		abandoned.Store(true)
 		m.log.ErrorContext(ctx, "email.send abandoned at deadline; the SMTP conversation may still be open",
 			"host", m.cfg.Host, "to", to, "error", ctx.Err(), "in_flight", len(m.slots))
 		return fmt.Errorf("email: send to %s abandoned: %w", m.cfg.Host, ctx.Err())
@@ -174,9 +185,11 @@ func (m *appriseMailer) Send(ctx context.Context, to, subject, body string) erro
 // goroutine, so middleware.Recover cannot catch it; a panic here must be a
 // delivery failure, not a dead process, whether or not the caller is still
 // waiting. The recovered value is rendered with %v, which sanitize's
-// type-based stripping cannot see into; the mailto path of the pinned
-// library contains no panic call, so this is a safety net, not a path a
-// URL-bearing error travels today.
+// type-based stripping cannot see into; the pinned library's five reachable
+// panics (all sync.Once-guarded embedded-asset-decode failures in NewTarget)
+// carry no URL or credential, so this is a safety net against a class of
+// panic that is credential-safe today, not evidence that the library has no
+// panic path.
 func (m *appriseMailer) guardedSend(rawURL, subject, body string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
