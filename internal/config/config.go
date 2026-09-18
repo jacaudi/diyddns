@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -59,6 +60,10 @@ type LoggingSection struct {
 
 // EmailSection holds SMTP settings for outbound account email (e.g. passkey
 // recovery notices). Enabled gates whether the email subsystem is active.
+// internal/email renders these into an Apprise mailto URL per send; the
+// three validateEmail rules below that go beyond "is it set" mirror that
+// transport's own behaviour (paired credentials, no edge whitespace, a
+// dotted From domain).
 type EmailSection struct {
 	Enabled  bool
 	Host     string
@@ -429,26 +434,36 @@ func isASCII(s string) bool {
 	return true
 }
 
-// validateFromAddress enforces route 4 (#80). It MUST accept exactly what
-// internal/email's send-path check accepts, and nothing more.
+// isRoutableFrom deliberately duplicates email.IsRoutableFrom, for the same
+// reason isASCII duplicates email.IsASCII: internal/config cannot import
+// internal/email. It is the transport's own From predicate
+// (unraid/apprise-go internal/notify/smtp2go.go:13, isSimpleEmail, applied to
+// From by mailto_target.go parseMailtoFrom with no delimiter split). The two
+// copies must stay in lockstep, and TestFromValidationMatchesTheEmailPackage
+// pins that: if they diverge, an email.from accepted at startup is refused by
+// the transport at every send, and the deployment boots clean while mailing
+// NOTHING.
+func isRoutableFrom(addr string) bool {
+	return routableFromRe.MatchString(addr)
+}
+
+var routableFromRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
+// validateFromAddress enforces route 4 (#80) plus the transport's own From
+// rule. It MUST accept exactly what internal/email's send-path check
+// (checkSendable, via checkAddress) accepts, and nothing more: 7-bit, bare
+// addr-spec form, and routable by the transport.
 //
-// That is why it is not merely an isASCII call. cfg.Email.From reaches
-// c.Mail(m.cfg.From) (internal/email/smtp.go:187) as well as the From: header, and net/smtp
-// passes it through verbatim — measured, a display-name value produces the
-// malformed envelope `MAIL FROM:<DIYDDNS <noreply@example.com>>`, and a
-// trailing space produces `MAIL FROM:<noreply@example.com >`. net/smtp accepts
-// both without complaint; a real MTA does not. So a display-name email.from is
-// ALREADY broken today, just later and less legibly.
+// The bare-form clause is kept even though the transport would now parse a
+// display name: the boundary and the send path apply one predicate, and
+// widening it is its own change (see the design's follow-ups). The routable
+// clause is new with #129: unraid/apprise-go refuses a From whose domain has
+// no dot ("invalid from email") before anything reaches the wire.
 //
 // If this check and internal/email's diverge, a From accepted at startup is
 // rejected at send and the deployment sends NOTHING while booting clean — the
 // permanently-unmailable state #80 exists to remove, moved from one account to
-// every message.
-//
-// FOLLOW-UP, deliberately out of scope: supporting a display name properly
-// means passing addr.Address to c.Mail while writing the full form into the
-// From: header. That is a feature; #80 is a boundary-rejection workstream. File
-// it, do not build it here.
+// every message. TestFromValidationMatchesTheEmailPackage pins both sides.
 func validateFromAddress(from string) error {
 	addr, err := mail.ParseAddress(from)
 	if err != nil {
@@ -458,7 +473,10 @@ func validateFromAddress(from string) error {
 		return fmt.Errorf(`config: email.from must be 7-bit ASCII (outbound messages declare 7bit and cannot carry it), got %q`, from)
 	}
 	if addr.Address != from {
-		return fmt.Errorf(`config: email.from must be a bare address with no display name or surrounding whitespace, e.g. %q rather than %q — net/smtp passes it to MAIL FROM verbatim`, addr.Address, from)
+		return fmt.Errorf(`config: email.from must be a bare address with no display name or surrounding whitespace, e.g. %q rather than %q`, addr.Address, from)
+	}
+	if !isRoutableFrom(from) {
+		return fmt.Errorf(`config: email.from must be a bare address whose domain contains a dot, as the transport requires ("diyddns@localhost" is refused; use the domain your MTA accepts mail from, e.g. "diyddns@example.com"), got %q`, from)
 	}
 	return nil
 }
@@ -500,11 +518,30 @@ func validateEmail(cfg Server) error {
 	default:
 		problems = append(problems, fmt.Errorf("config: email.tls must be one of starttls, implicit, none, got %q", cfg.Email.TLS))
 	}
-	// net/smtp's PlainAuth.Start refuses to send credentials over an unencrypted
-	// connection unless the host is localhost, so this combination fails EVERY
-	// send with "unencrypted connection" — detectable here instead.
+	// validateEmail sits at gocyclo's ceiling of 15 exactly after the two
+	// rules below; a further condition here must be extracted into a helper.
+	//
+	// net/smtp's PlainAuth.Start (which the transport uses) refuses to send
+	// credentials over an unencrypted connection unless the host is localhost,
+	// so this combination fails EVERY send with "unencrypted connection" —
+	// detectable here instead.
 	if cfg.Email.TLS == "none" && cfg.Email.Username != "" && !isLocalhostHost(cfg.Email.Host) {
-		problems = append(problems, errors.New("config: email.username requires email.tls to be starttls or implicit; net/smtp refuses to send credentials over an unencrypted connection"))
+		problems = append(problems, errors.New("config: email.username requires email.tls to be starttls or implicit; credentials are never sent over an unencrypted connection"))
+	}
+	// The transport authenticates only when BOTH username and password are
+	// set (unraid/apprise-go mailto_target.go authenticate, a symmetric
+	// check). A username alone used to fail loudly at AUTH; it would now
+	// silently skip AUTH and fail — or, against an open relay, succeed — at
+	// RCPT. A password alone silently skips AUTH under either client. Fail
+	// fast here instead.
+	if (cfg.Email.Username == "") != (cfg.Email.Password == "") {
+		problems = append(problems, errors.New("config: email.username and email.password must be set together (the transport authenticates only when both are set)"))
+	}
+	// The transport strings.TrimSpaces both credentials when it parses its
+	// URL (mailto_target.go), so a value with edge whitespace would
+	// authenticate with the old client and get a bare 535 with this one.
+	if strings.TrimSpace(cfg.Email.Username) != cfg.Email.Username || strings.TrimSpace(cfg.Email.Password) != cfg.Email.Password {
+		problems = append(problems, errors.New("config: email.username and email.password may not begin or end with whitespace (the transport trims it, so the credentials sent would differ from the ones configured)"))
 	}
 
 	return errors.Join(problems...)

@@ -475,6 +475,7 @@ func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
 		port     int
 		from     string
 		username string
+		password string
 		tls      string
 		wantErr  []string // every substring the error must name; empty means expect success
 	}{
@@ -500,9 +501,37 @@ func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
 
 		// net/smtp refuses PLAIN auth over an unencrypted connection.
 		{name: "auth over plaintext to a remote host", enabled: true, baseURL: okURL, host: okHost, port: 25, from: okFrom,
-			username: "user", tls: "none", wantErr: []string{"email.username"}},
+			username: "user", password: "pw", tls: "none", wantErr: []string{"email.username"}},
 		{name: "auth over plaintext to localhost is allowed", enabled: true, baseURL: okURL, host: "localhost", port: 25, from: okFrom,
-			username: "user", tls: "none"},
+			username: "user", password: "pw", tls: "none"},
+
+		// The transport authenticates only when BOTH are set; a username alone
+		// would silently skip AUTH instead of failing at it, and a password
+		// alone silently skips it under both clients.
+		{name: "username without password", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom,
+			username: "user", wantErr: []string{"email.username and email.password must be set together"}},
+		{name: "password without username", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom,
+			password: "pw", wantErr: []string{"email.username and email.password must be set together"}},
+		{name: "username with password is accepted", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom,
+			username: "user", password: "pw"},
+
+		// The transport strings.TrimSpaces both credentials, so a value with
+		// edge whitespace would authenticate today and get a bare 535 tomorrow.
+		{name: "password with a trailing space", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom,
+			username: "user", password: "pw ", wantErr: []string{"may not begin or end with whitespace"}},
+		{name: "username with a leading space", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom,
+			username: " user", password: "pw", wantErr: []string{"may not begin or end with whitespace"}},
+		{name: "password with an interior space is fine", enabled: true, baseURL: okURL, host: okHost, port: okPort, from: okFrom,
+			username: "user", password: "p w"},
+
+		// The transport refuses a From without a dotted domain before anything
+		// reaches the wire, so such a deployment would boot clean and send
+		// nothing. localhost is a fine SMTP HOST (above) but not a From DOMAIN.
+		// A domain literal has dots and the transport accepts it as From.
+		{name: "dot-less from domain", enabled: true, baseURL: okURL, host: okHost, port: okPort,
+			from: "diyddns@localhost", wantErr: []string{"email.from must be a bare address whose domain contains a dot"}},
+		{name: "domain-literal from is accepted", enabled: true, baseURL: okURL, host: okHost, port: okPort,
+			from: "diyddns@[192.168.1.1]"},
 
 		// The aggregation requirement: ONE Load reports ALL of them.
 		{name: "every problem is reported together", enabled: true,
@@ -519,6 +548,7 @@ func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
 			v.Set("email.port", tt.port)
 			v.Set("email.from", tt.from)
 			v.Set("email.username", tt.username)
+			v.Set("email.password", tt.password)
 
 			_, err := config.Load(v, "")
 			if len(tt.wantErr) == 0 {
@@ -591,6 +621,14 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 		{name: "display name", from: "DIYDDNS <noreply@example.com>", wantErr: true},
 		{name: "trailing space", from: "noreply@example.com ", wantErr: true},
 		{name: "quoted local part", from: `"john doe"@example.com`, wantErr: true},
+
+		// The routable half. A dot-less domain canonicalises cleanly, so an
+		// isASCII-plus-canonical check accepts it — and then the transport
+		// refuses the From, so the deployment boots clean and mails nothing.
+		// A domain literal is a working From under the transport (its From
+		// rule has no delimiter split) and must stay accepted on both sides.
+		{name: "dot-less domain", from: "diyddns@localhost", wantErr: true},
+		{name: "domain literal", from: "diyddns@[192.168.1.1]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -613,7 +651,7 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 			// path applies, so if config accepts something it rejects, that
 			// deployment boots clean and sends nothing.
 			normalized, normErr := email.NormalizeAddress(tt.from)
-			emailRejects := normErr != nil || normalized != tt.from
+			emailRejects := normErr != nil || normalized != tt.from || !email.IsRoutableFrom(tt.from)
 			if emailRejects != tt.wantErr {
 				t.Errorf("internal/email %s %q but config %s it — the two sides have diverged",
 					map[bool]string{true: "rejects", false: "accepts"}[emailRejects], tt.from,

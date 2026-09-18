@@ -200,6 +200,9 @@ If a notification endpoint sits behind a certificate from an internal/private CA
 HTTPS client trusts it. **This works on Linux — the shipped container image — but not on
 macOS**: Go's certificate verifier on Darwin uses the OS's own Security framework instead of these
 variables, so a self-built macOS binary needs the CA installed in the system keychain instead.
+The SMTP transport is the exception: it honours `SSL_CERT_FILE` on every platform and ignores
+`SSL_CERT_DIR` (see [Email](email.md)), so an internal CA for the mail server goes in
+`SSL_CERT_FILE` specifically.
 
 ## What an Admin Sees on Failure
 

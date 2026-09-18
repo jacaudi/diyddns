@@ -19,18 +19,27 @@ never costs them the link.
 | `email.enabled` | `DIYDDNS_EMAIL_ENABLED` | `false` by default |
 | `email.host` | `DIYDDNS_EMAIL_HOST` | **required** when enabled |
 | `email.port` | `DIYDDNS_EMAIL_PORT` | **required** when enabled — 587 starttls · 465 implicit · 25 none |
-| `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH; non-empty with `tls: none` refuses to start (see below) |
-| `email.password` | `DIYDDNS_EMAIL_PASSWORD` | never logged |
-| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — envelope sender |
+| `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH; set it together with `email.password` or not at all; with `tls: none` refuses to start (see below). No leading or trailing whitespace |
+| `email.password` | `DIYDDNS_EMAIL_PASSWORD` | never logged; set it together with `email.username` or not at all. No leading or trailing whitespace |
+| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — envelope sender; a bare address with a dotted domain (`diyddns@example.com`, not `diyddns@localhost`) |
 | `email.tls` | `DIYDDNS_EMAIL_TLS` | `starttls` (default), `implicit`, or `none` |
 
 Enabling email **requires `server.base_url`, `email.host`, `email.port` and `email.from`**; the
 server refuses to start without them. Emailed links must be absolute, and the other three have no
 usable default — `port` defaults to `0`. It also refuses to start with `email.username` set and
-`email.tls: none` against anything other than `localhost`/`127.0.0.1`/`::1` — Go's `net/smtp`
-refuses to send credentials over an unencrypted connection. Every problem is collected and
+`email.tls: none` against anything other than `localhost`/`127.0.0.1`/`::1` — credentials are
+never sent over an unencrypted connection. Every problem is collected and
 reported in a single error, so enabling email from scratch means fixing everything in one deploy
 cycle instead of discovering the next missing key on each restart.
+
+Mail is sent through the `mailto` service of [`unraid/apprise-go`](https://github.com/unraid/apprise-go).
+For `tls: starttls` and `tls: implicit`, that library reads `SSL_CERT_FILE` itself, on every
+platform: when the variable is set, the PEM file it names **replaces** the trust store for the SMTP
+connection, and `SSL_CERT_DIR` is not consulted for SMTP at all. Leave both unset to use the
+system roots. The trap: if you set `SSL_CERT_FILE` to trust an internal CA for a **webhook**
+endpoint (see [Trusting an Internal CA](notifications.md#trusting-an-internal-ca)), that file becomes the **only** root for SMTP too,
+and STARTTLS/implicit TLS to a public-CA mail relay fails until you append the public roots to
+the same bundle.
 
 Feed expiry warnings also route through this — see [Feed](feed.md#feed-expiry).
 
