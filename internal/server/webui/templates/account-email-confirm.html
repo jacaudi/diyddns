@@ -1,0 +1,19 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/account">Account</a> / Confirm email address</div>
+<div class="page-head"><div><h1>Confirm your new email address</h1></div></div>
+<div class="card measure-1">
+  <div class="card-body">
+    <p class="muted">Change the address on this account from <code>{{.Email}}</code> to
+      <code>{{.PendingEmail}}</code>? Sign-in and passkey recovery mail will go to the new
+      address from now on, and any outstanding invite or recovery link stops working.</p>
+    <form method="post" action="/account/email/confirm">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="token" value="{{.Token}}">
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Confirm change</button>
+        <a class="btn ghost" href="/account">Back to account</a>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}

@@ -34,5 +34,31 @@ cycle instead of discovering the next missing key on each restart.
 
 Feed expiry warnings also route through this — see [Feed](feed.md#feed-expiry).
 
+## Changing an Account's Email Address
+
+Users can change their own address from `/account`; administrators can change any user's
+address from `/admin/users/{id}`.
+
+**Self-service** (`/account`): the user enters a new address, and a confirmation link is
+emailed to it. Nothing about the account changes until they open that link while signed in
+and confirm — the old address stays authoritative until then. The old address gets a
+heads-up notice when the change is requested, and a change notice once it's confirmed. A
+pending change can be cancelled from `/account` at any time before confirmation.
+
+**Admin-set** (`/admin/users/{id}`): an administrator can set a user's address directly,
+effective immediately, with no confirmation step. The previous address is notified of the
+change.
+
+**OIDC-linked accounts**: a user who signs in through an external identity provider has
+their stored address follow the identity provider's `email` claim at every sign-in, so
+self-service change is unavailable to them. An administrator can still set the address
+directly; the admin UI warns that the identity provider will replace it again at the
+user's next sign-in.
+
+Self-service change requires `email.enabled: true` — without a mailer there is nowhere to
+send the confirmation link, so the form is not shown. Admin-set changes take effect
+immediately regardless of `email.enabled`, since applying the change doesn't depend on
+sending anything; with email disabled, the previous address simply isn't notified.
+
 ---
 [← Back to README](../README.md)

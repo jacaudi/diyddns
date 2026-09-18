@@ -5,12 +5,14 @@ import (
 	"text/template"
 )
 
-// recoveryTmpl, adminNotifyTmpl, inviteTmpl and adminRecoveryTmpl are fixed,
-// package-level templates validated at init time via template.Must. Their data
-// is always a single plain-string field (no user-supplied templates, no
-// functions that could error), so renderTemplate's error path below is
-// unreachable in practice — it exists only as a safe fallback, not a
-// documented failure mode.
+// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl,
+// emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl and
+// adminEmailChangedTmpl (#131, via ChangeConfirmBody, ChangeNoticeBody,
+// ChangedBody and AdminChangedBody) are fixed, package-level templates
+// validated at init time via template.Must. Their data is always a single
+// plain-string field (no user-supplied templates, no functions that could
+// error), so renderTemplate's error path below is unreachable in practice —
+// it exists only as a safe fallback, not a documented failure mode.
 //
 // recoveryTmpl is the SELF-SERVICE recovery body: the user asked for the link
 // themselves and their passkeys still work, so it is safe to ignore. When an
@@ -72,6 +74,73 @@ func InviteLinkBody(link string) (subject, body string) {
 // on the account, so disregarding this email leaves the user locked out.
 func AdminRecoveryLinkBody(link string) (subject, body string) {
 	return renderTemplate(adminRecoveryTmpl, "Your DIYDDNS passkeys were reset by an administrator", struct{ Link string }{Link: link})
+}
+
+// The four #131 bodies. Every address interpolated below has passed
+// NormalizeAddress at the service boundary, so it is 7-bit ASCII and
+// checkSendable's body check cannot reject the message; no body function
+// ever receives a raw input (design §5.4).
+
+var emailChangeConfirmTmpl = template.Must(template.New("email-change-confirm").Parse(
+	"A request was made to change the email address on your DIYDDNS account\r\n" +
+		"to this one.\r\n\r\n" +
+		"Nothing changes until you open the link below. You need to be signed in\r\n" +
+		"to DIYDDNS in the same browser when you open it; if you are not, sign in\r\n" +
+		"first and then open the link again. It expires in one hour and can be\r\n" +
+		"used once.\r\n\r\n" +
+		"{{.Link}}\r\n\r\n" +
+		"If you did not request this, you can ignore this email.\r\n",
+))
+
+var emailChangeNoticeTmpl = template.Must(template.New("email-change-notice").Parse(
+	"A request was made to change the email address on your DIYDDNS account\r\n" +
+		"to {{.NewEmail}}.\r\n\r\n" +
+		"Nothing has changed yet: this address stays in charge of your account\r\n" +
+		"until the new one confirms. If this was not you, sign in and cancel\r\n" +
+		"the pending change from Account, then contact your administrator, who\r\n" +
+		"can end every session on your account.\r\n",
+))
+
+var emailChangedTmpl = template.Must(template.New("email-changed").Parse(
+	"The email address on your DIYDDNS account has been changed to\r\n" +
+		"{{.NewEmail}}. Sign-in and passkey recovery mail now go there.\r\n\r\n" +
+		"If you did not make this change, contact your administrator immediately.\r\n",
+))
+
+var adminEmailChangedTmpl = template.Must(template.New("admin-email-changed").Parse(
+	"An administrator has changed the email address on your DIYDDNS account\r\n" +
+		"to {{.NewEmail}}. Sign-in and passkey recovery mail now go there.\r\n\r\n" +
+		"If this was unexpected, contact your administrator.\r\n",
+))
+
+// ChangeConfirmBody renders the mail sent to a NEW address the account
+// holder wants to move to. Opening the link needs their session (design D6),
+// and the body says so.
+func ChangeConfirmBody(link string) (subject, body string) {
+	return renderTemplate(emailChangeConfirmTmpl, "Confirm your new DIYDDNS email address", struct{ Link string }{Link: link})
+}
+
+// ChangeNoticeBody renders the heads-up sent to the OLD address when a
+// self-service change is requested, naming the requested address and the two
+// ways to react.
+func ChangeNoticeBody(newEmail string) (subject, body string) {
+	return renderTemplate(emailChangeNoticeTmpl, "A DIYDDNS email address change was requested", struct{ NewEmail string }{NewEmail: newEmail})
+}
+
+// ChangedBody renders the notice sent to the OLD address once a change
+// the account holder made (self-service confirm, or their IdP) has taken
+// effect. For an admin-made change use AdminChangedBody: this body's
+// closing line assumes the reader could have made the change themselves.
+func ChangedBody(newEmail string) (subject, body string) {
+	return renderTemplate(emailChangedTmpl, "Your DIYDDNS email address was changed", struct{ NewEmail string }{NewEmail: newEmail})
+}
+
+// AdminChangedBody renders the notice sent to the OLD address once an
+// ADMIN has changed it. Deliberately not ChangedBody with a flag, for
+// the reason AdminRecoveryLinkBody gives: the closing lines say opposite
+// things.
+func AdminChangedBody(newEmail string) (subject, body string) {
+	return renderTemplate(adminEmailChangedTmpl, "Your DIYDDNS email address was changed by an administrator", struct{ NewEmail string }{NewEmail: newEmail})
 }
 
 // renderTemplate executes tmpl against data and returns (subject, body). If

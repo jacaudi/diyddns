@@ -22,6 +22,10 @@
 
 {{define "errorBanner"}}{{if .}}<div class="callout warn" role="alert">{{.}}</div>{{end}}{{end}}
 
+{{/* The status/success counterpart of errorBanner: same rule, only ever built
+     through this partial (app.css inventory, .callout.info). */}}
+{{define "noticeBanner"}}{{if .}}<div class="callout info" role="status">{{.}}</div>{{end}}{{end}}
+
 {{/* v4AddressCell and v6AddressCell render a device list row's address column
      (#127 D17): the address itself -- current, or the last-known value once
      the sweep has cleared it -- plus the per-family countdown when the

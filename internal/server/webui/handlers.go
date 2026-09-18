@@ -173,10 +173,3 @@ type registerData struct {
 func (h *handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "register", registerData{Token: r.URL.Query().Get("token")})
 }
-
-// handleAccount renders /account. requireSession has already guaranteed a
-// valid session (usr, sess) by the time this runs. Since #106 the page has no
-// notification card: endpoints are admin-only and live under /admin.
-func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	h.render(w, r, "account", h.newAppData(usr, sess, "Account", "account"))
-}

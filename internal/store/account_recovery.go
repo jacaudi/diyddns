@@ -132,3 +132,23 @@ func (r *AccountRecoveryRepo) PruneExpired(ctx context.Context, now int64) (int,
 	}
 	return int(n), nil
 }
+
+// DeleteUnusedByUser deletes every registration grant (invite or recovery)
+// for userID that has not been consumed, and returns how many it deleted.
+// Zero rows is not an error. Called when an account's email address changes
+// (#131 D8): a grant mailed to the old address must not survive the moment
+// that address stops speaking for the account. Delete rather than mark used:
+// these rows are not an audit trail (the passkey.*_issued audit events are).
+func (r *AccountRecoveryRepo) DeleteUnusedByUser(ctx context.Context, userID string) (int, error) {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM account_recovery_tokens WHERE user_id = ? AND used_at IS NULL`, userID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("account_recovery.DeleteUnusedByUser: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("account_recovery.DeleteUnusedByUser: RowsAffected: %w", err)
+	}
+	return int(n), nil
+}

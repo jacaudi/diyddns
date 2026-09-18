@@ -145,19 +145,24 @@ func (h *handler) handleAdminUserSetEnabled(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
-// adminGuardMessage maps an AdminService error to user-facing copy AND the
-// status that error deserves. It reports false for anything unrecognized, so
-// unexpected errors still take the 500 path with their detail going to the log
-// rather than the page.
+// adminGuardMessage maps an AdminService or EmailChangeService error to
+// user-facing copy AND the status that error deserves. It reports false for
+// anything unrecognized, so unexpected errors still take the 500 path with
+// their detail going to the log rather than the page.
 //
-// The guards themselves live in AdminService (last-admin, self-lockout, role and
-// email validation) and are NOT re-implemented here: this only renders them.
+// The guards themselves live in the two services, not here: AdminService owns
+// the admin-user guards (last-admin, self-lockout, role and email validation),
+// EmailChangeService owns the email-change guards (#131: unchanged address,
+// OIDC-managed address, invalid confirmation). This function only renders
+// them, for both the admin-user pages and the account page's email-change
+// forms, which is why the copy is shared.
 //
 // The status varies, which is why it is returned rather than assumed by the
-// caller: a guard rejection is 422, a vanished target is 404, and an
-// unconfigured WebAuthn RP is 503 — that last one is a server-capability
-// problem, not something the admin typed wrong, and the design mandates 503 for
-// it specifically.
+// caller: a guard rejection is 422, a vanished target is 404, and three cases
+// are 503 as server-capability problems rather than something the user typed
+// wrong: no mailer configured (ErrMailerUnavailable), a confirmation mail that
+// could not be sent (ErrConfirmationNotSent), and an unconfigured WebAuthn RP
+// (ErrWebAuthnUnavailable). The design mandates 503 for each specifically.
 func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	switch {
 	case errors.Is(err, service.ErrLastAdmin):
@@ -168,6 +173,18 @@ func adminGuardMessage(err error) (msg string, status int, ok bool) {
 		return "Role must be either admin or user.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrInvalidEmail):
 		return "Email addresses must be plain 7-bit ASCII in user@host form, with no display name and no surrounding whitespace.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrEmailUnchanged):
+		return "That is already the account's email address.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrEmailManagedByOIDC):
+		return "This account's email address is managed by its identity provider.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrEmailChangeInvalid):
+		return "This confirmation link is invalid or has expired. Request the change again from your account page.", http.StatusUnprocessableEntity, true
+	case errors.Is(err, service.ErrMailerUnavailable):
+		// A server-capability problem, like an unconfigured WebAuthn RP: 503.
+		return "Email is not configured on this server, so an address change cannot be confirmed. Ask an administrator to change it.", http.StatusServiceUnavailable, true
+	case errors.Is(err, service.ErrConfirmationNotSent):
+		// The last sentence describes the state AFTER a retry (design §7.3).
+		return "The confirmation email could not be sent. Try again in a moment. If the account page then shows the change as already pending, cancel it and request it again.", http.StatusServiceUnavailable, true
 	case errors.Is(err, store.ErrConflict):
 		return "A user with that email address already exists.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
@@ -198,9 +215,11 @@ type adminUserNewData struct {
 // populated only on the recovery reveal.
 type adminUserData struct {
 	appData
-	Target       store.User
-	IsSelf       bool
-	Error        string
+	Target store.User
+	IsSelf bool
+	Error  string
+	// Notice is the in-response success message after an admin email change (#131), rendered through noticeBanner.
+	Notice       string
 	Link         string
 	DeliveryNote string
 	LinkWarning  string
@@ -450,7 +469,10 @@ var knownEventTypes = []string{
 	"passkey.registered", "passkey.removed", "passkey.renamed", "passkey.signcount_anomaly",
 	"retention.prune",
 	"session.revoked",
-	"user.created", "user.deleted", "user.disabled", "user.enabled",
+	"user.created", "user.deleted", "user.disabled",
+	"user.email_change_cancelled", "user.email_change_requested",
+	"user.email_changed", "user.email_changed_by_admin", "user.email_changed_by_oidc",
+	"user.enabled",
 	"user.login.oidc", "user.login.passkey", "user.logout",
 	"user.oidc.linked", "user.role_change",
 }
@@ -750,4 +772,56 @@ func oidcNote(cfg config.Server) string {
 	}
 	return fmt.Sprintf("issuer %s · client %s · scopes %s · required %t · auto-link %t · signup %t",
 		o.Issuer, o.ClientID, strings.Join(o.Scopes, " "), o.Required, o.AutoLinkByEmail, o.AllowOIDCSignup)
+}
+
+// noticeNote turns the Delivery of an admin email change's old-address notice
+// into the first sentence of the success message (design §7.2). Like
+// deliveryNote it renders a STRING, never the Delivery: Err can carry the SMTP
+// host:port. deliveryNote itself is not reused -- its copy is about a link the
+// admin must send manually, and there is no link here.
+//
+// The Suppressed case comes FIRST, for the reason deliveryNote gives: a
+// deliberate non-send must never render as "Email is not configured". Nothing
+// on the AdminSet path sets Suppressed today; the branch exists so a future
+// SuppressReason cannot fall through into a false statement.
+func noticeNote(d service.Delivery) string {
+	switch {
+	case !d.Attempted && d.Suppressed != service.SuppressNone:
+		return "Address changed. No notice was sent to the previous address."
+	case !d.Attempted:
+		return "Address changed. Email is not configured, so the previous address was not notified."
+	case d.Sent():
+		return "Address changed. The previous address was notified."
+	default:
+		return "Address changed, but the notice to the previous address could not be sent."
+	}
+}
+
+// handleAdminUserEmail sets the target's address directly (design §5.3, D3):
+// effective immediately, the previous address notified, outstanding invite
+// and recovery links deleted. It renders in-response rather than redirecting
+// so the delivery note can be shown; a browser refresh re-submits the new
+// address and gets the harmless "already the account's address" 422 (design
+// §7.2). An admin may set their own address here (D21).
+func (h *handler) handleAdminUserEmail(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	target, ok := h.adminUser(w, r, usr)
+	if !ok {
+		return
+	}
+	updated, delivery, err := h.deps.EmailChange.AdminSet(r.Context(), usr.ID, target, strings.TrimSpace(r.PostFormValue("email")))
+	if err != nil {
+		if msg, status, ok := adminGuardMessage(err); ok {
+			h.renderAdminUserError(w, r, usr, sess, target, status, msg)
+			return
+		}
+		h.logAndFail(w, r, usr, "set user email", err)
+		return
+	}
+	h.render(w, r, "admin-user", adminUserData{
+		appData: h.newAppData(usr, sess, updated.Email, "admin-users"),
+		Target:  updated,
+		IsSelf:  updated.ID == usr.ID,
+		Notice: noticeNote(delivery) +
+			" If this account has not registered a passkey yet, issue a recovery link below so the user can set one up at the new address.",
+	})
 }

@@ -36,8 +36,11 @@ var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, 
 const adminDeliveryTimeout = 12 * time.Second
 
 // auditWriteTimeout bounds an EventEmailSendFailed audit write. It is separate
-// and deliberately short: see auditSendFailure for why such a write must never
-// reuse the context the failed send ran on.
+// and deliberately short: see recordSendFailure for why such a write must
+// never reuse the context the failed send ran on. It also bounds a second,
+// unrelated detached write for the same reason: the ClearPendingEmail
+// rollback in EmailChangeService.Request's failure path
+// (email_change.go:200).
 const auditWriteTimeout = 5 * time.Second
 
 // EventEmailSendFailed is the audit event code recorded when a grant or
@@ -101,8 +104,22 @@ type Delivery struct {
 // constructed, including by an API response that serializes it.
 func (d Delivery) Sent() bool { return d.Attempted && d.Err == nil }
 
-// auditSendFailure records a failed delivery on a context guaranteed to outlive
-// the send that just failed.
+// mailDeps groups the mail-side dependencies a service holds: the mailer, the
+// audit sink, the logger and the per-send timeout. GrantService and
+// EmailChangeService each hold one (EmailChangeService reaches its audit sink
+// and logger through it for every audit write and log line, not only sends);
+// sendAdvisory and recordSendFailure are package functions over it so the
+// detach-from-cancellation, bound-with-a-timeout,
+// audit-on-a-context-that-outlives-the-failure behaviour exists once (#83).
+type mailDeps struct {
+	mailer  email.Mailer
+	audit   AuditSink
+	log     *slog.Logger
+	timeout time.Duration
+}
+
+// recordSendFailure records a failed delivery on a context guaranteed to
+// outlive the send that just failed.
 //
 // It must NEVER be handed the send's own context, and never a raw request
 // context. Both lose the row, silently:
@@ -118,39 +135,61 @@ func (d Delivery) Sent() bool { return d.Attempted && d.Err == nil }
 //
 // WithoutCancel strips deadline and cancellation while keeping values, so this
 // is correct even when ctx is already dead.
-func (s *GrantService) auditSendFailure(ctx context.Context, entry store.AuditEntry) {
+func recordSendFailure(ctx context.Context, m mailDeps, entry store.AuditEntry) {
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
-	s.audit.Log(auditCtx, entry)
+	m.audit.Log(auditCtx, entry)
 }
 
-// deliver sends body to u's address and reports the outcome, never an error.
+// sendAdvisory mails body to `to` and reports the outcome, never an error. A
+// nil or disabled mailer is a supported state and yields Delivery{}.
 //
 // The context deliberately drops cancellation (context.WithoutCancel) while
-// keeping values: if the admin's browser aborts mid-send, a request-derived
-// context would cancel the send AND lose the response, leaving a live grant with
-// nobody holding the link. Cutting cancellation means the mail still goes out
-// even when the page is lost. The timeout is re-applied on top so the detached
-// send stays bounded.
-func (s *GrantService) deliver(ctx context.Context, actorID string, u store.User, subject, body string) Delivery {
-	if s.mailer == nil || !s.mailer.Enabled() {
+// keeping values: if the caller's browser aborts mid-send, a request-derived
+// context would cancel the send AND lose the response, leaving a live grant
+// with nobody holding the link. Cutting cancellation means the mail still goes
+// out even when the page is lost. m.timeout is re-applied on top so the
+// detached send stays bounded -- which also means a caller running this in a
+// goroutine on context.Background() gets exactly that bound and no other.
+//
+// A failure is logged with targetUserID (never the address) and audited
+// email.send_failed against targetUserID, with actorID as the actor.
+func sendAdvisory(ctx context.Context, m mailDeps, actorID, targetUserID, to, subject, body string) Delivery {
+	if m.mailer == nil || !m.mailer.Enabled() {
 		return Delivery{}
 	}
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.deliveryTimeout)
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.timeout)
 	defer cancel()
 
-	d := Delivery{Attempted: true, To: u.Email}
-	if err := s.mailer.Send(sendCtx, u.Email, subject, body); err != nil {
+	d := Delivery{Attempted: true, To: to}
+	if err := m.mailer.Send(sendCtx, to, subject, body); err != nil {
 		d.Err = err
-		s.log.ErrorContext(ctx, "grant link delivery failed", "error", err, "user_id", u.ID)
-		s.auditSendFailure(ctx, store.AuditEntry{
+		m.log.ErrorContext(ctx, "email delivery failed", "error", err, "user_id", targetUserID)
+		recordSendFailure(ctx, m, store.AuditEntry{
 			ActorUserID: actorID,
 			EventType:   EventEmailSendFailed,
 			TargetType:  "user",
-			TargetID:    u.ID,
+			TargetID:    targetUserID,
 		})
 	}
 	return d
+}
+
+// mail is the mailDeps view of this service, built per call so a test that
+// shrinks s.deliveryTimeout after construction still takes effect.
+func (s *GrantService) mail() mailDeps {
+	return mailDeps{mailer: s.mailer, audit: s.audit, log: s.log, timeout: s.deliveryTimeout}
+}
+
+// auditSendFailure is recordSendFailure over this service's mailDeps.
+func (s *GrantService) auditSendFailure(ctx context.Context, entry store.AuditEntry) {
+	recordSendFailure(ctx, s.mail(), entry)
+}
+
+// deliver is sendAdvisory addressed to u's own row: u.Email, audited against
+// u.ID. Every grant link goes to the address on the row.
+func (s *GrantService) deliver(ctx context.Context, actorID string, u store.User, subject, body string) Delivery {
+	return sendAdvisory(ctx, s.mail(), actorID, u.ID, u.Email, subject, body)
 }
 
 // GrantService issues and redeems registration grants (design D10/D12/D15):

@@ -166,3 +166,31 @@ func TestPrune_SweepsExpiredAccountRecoveryTokens(t *testing.T) {
 		t.Errorf("expired recovery token survived prune(), count = %d, want 0", n)
 	}
 }
+
+func TestPrune_ClearsExpiredPendingEmails(t *testing.T) {
+	ctx := t.Context()
+	st := openTestStore(t)
+	expired, err := st.Users().Create(ctx, store.User{Email: "pe-expired@example.com", Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := st.Users().Create(ctx, store.User{Email: "pe-live@example.com", Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Users().SetPendingEmail(ctx, expired.ID, "gone@example.com", "h1", store.NowUnix()-3600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Users().SetPendingEmail(ctx, live.ID, "stays@example.com", "h2", store.NowUnix()+3600); err != nil {
+		t.Fatal(err)
+	}
+
+	prune(ctx, st, config.RetentionSection{}, discardLog())
+
+	if got, _ := st.Users().GetByID(ctx, expired.ID); got.PendingEmail != "" {
+		t.Errorf("expired pending survived prune(): %q", got.PendingEmail)
+	}
+	if got, _ := st.Users().GetByID(ctx, live.ID); got.PendingEmail != "stays@example.com" {
+		t.Errorf("live pending was cleared: %q", got.PendingEmail)
+	}
+}

@@ -162,7 +162,8 @@ func newOIDCHarness(t *testing.T, cfgOIDC config.OIDCCfg) fullHarness {
 
 	deps.Cfg.OIDC = cfgOIDC
 	deps.OIDCMgr = mgr
-	deps.OIDC = service.NewOIDCService(st, deps.Sessions, cfgOIDC, service.NewAuditWriter(st), deps.Log)
+	deps.OIDC = service.NewOIDCService(st, deps.Sessions, cfgOIDC, service.NewAuditWriter(st), deps.Log,
+		service.NewEmailChangeService(st, fakeMailer{}, "http://localhost", service.NewAuditWriter(st), deps.Log))
 
 	api.Build(mux, deps)
 

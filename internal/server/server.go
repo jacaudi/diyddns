@@ -210,8 +210,6 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 			return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: oidc required but discovery failed: %w", err)
 		}
 	}
-	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log)
-
 	// Passkey login is the default local credential and is always available
 	// unless auth.hide_local_login_ui is set — there is no separate
 	// auth.webauthn.enabled toggle (design §10). Resolving the WebAuthn
@@ -241,6 +239,12 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	sw := buildSweeper(cfg, st, fan, mailer, log)
 
 	grantSvc := service.NewGrantService(st, passkeySvc, mailer, cfg.Server.BaseURL, audit, log)
+
+	// #131: one construction site for every path that changes an address.
+	// Built after the mailer (it sends the confirmation and notices) and before
+	// oidcSvc, which needs it for the path-1 sync.
+	emailChangeSvc := service.NewEmailChangeService(st, mailer, cfg.Server.BaseURL, audit, log)
+	oidcSvc := service.NewOIDCService(st, sessions, cfg.Auth.OIDC, audit, log, emailChangeSvc)
 
 	// One construction site per service. api.Build and webui.New receive the
 	// same instances: they are two thin presentation layers over one service
@@ -283,17 +287,18 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// and this loop copies it rather than restating it. (A "/" catch-all
 	// instead would swallow unmatched /api and /agent URLs.)
 	webDeps := webui.Deps{
-		Sessions:  sessions,
-		Cfg:       cfg,
-		Log:       log,
-		Devices:   devicesSvc,
-		Enroll:    enrollSvc,
-		Admin:     adminSvc,
-		Grants:    grantSvc,
-		Notify:    notifySvc,
-		Feed:      feedSvc,
-		Info:      version.Current(),
-		StartedAt: time.Now(),
+		Sessions:    sessions,
+		Cfg:         cfg,
+		Log:         log,
+		Devices:     devicesSvc,
+		Enroll:      enrollSvc,
+		Admin:       adminSvc,
+		Grants:      grantSvc,
+		EmailChange: emailChangeSvc,
+		Notify:      notifySvc,
+		Feed:        feedSvc,
+		Info:        version.Current(),
+		StartedAt:   time.Now(),
 	}
 	webHandler, webPatterns := webui.New(webDeps)
 	for _, pattern := range webPatterns {

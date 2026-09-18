@@ -38,8 +38,12 @@ type Deps struct {
 	Enroll  *service.EnrollmentService
 	Admin   *service.AdminService
 	Grants  *service.GrantService
-	Notify  *service.NotificationService
-	Feed    *service.FeedService
+	// EmailChange owns every path that changes an account's address (#131):
+	// the account page's request/cancel/confirm flow and the admin page's
+	// direct set.
+	EmailChange *service.EmailChangeService
+	Notify      *service.NotificationService
+	Feed        *service.FeedService
 
 	Info      version.Info
 	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
@@ -78,6 +82,10 @@ func New(deps Deps) (http.Handler, []string) {
 		{"GET /login", http.HandlerFunc(h.handleLogin)},
 		{"GET /register", http.HandlerFunc(h.handleRegister)},
 		{"GET /account", h.requireSession(h.handleAccount)},
+		{"POST /account/email", h.requirePost(h.handleAccountEmailRequest)},
+		{"POST /account/email/cancel", h.requirePost(h.handleAccountEmailCancel)},
+		{"GET /account/email/confirm", h.requireSession(h.handleAccountEmailConfirmPage)},
+		{"POST /account/email/confirm", h.requirePost(h.handleAccountEmailConfirm)},
 		{"GET /devices", h.requireSession(h.handleDevices)},
 		{"GET /devices/new", h.requireSession(h.handleDeviceNewForm)},
 		{"POST /devices/new", h.requirePost(h.handleDeviceNewCreate)},
@@ -93,6 +101,7 @@ func New(deps Deps) (http.Handler, []string) {
 		{"POST /admin/users/new", h.requirePostAdmin(h.handleAdminUserInvite)},
 		{"GET /admin/users/{id}", h.requireAdmin(h.handleAdminUserEdit)},
 		{"POST /admin/users/{id}/update", h.requirePostAdmin(h.handleAdminUserUpdate)},
+		{"POST /admin/users/{id}/email", h.requirePostAdmin(h.handleAdminUserEmail)},
 		{"POST /admin/users/{id}/delete", h.requirePostAdmin(h.handleAdminUserDelete)},
 		{"POST /admin/users/{id}/recovery", h.requirePostAdmin(h.handleAdminUserRecovery)},
 		{"GET /admin/devices", h.requireAdmin(h.handleAdminDevices)},
@@ -156,4 +165,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-devices", "admin-audit", "admin-server", "admin-feed", "endpoints", "endpoint-detail", "error"}
+var appPages = []string{"account", "account-email-confirm", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-devices", "admin-audit", "admin-server", "admin-feed", "endpoints", "endpoint-detail", "error"}

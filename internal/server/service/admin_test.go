@@ -395,3 +395,29 @@ func TestAdminService_DeleteUser_EmitsRemovedBeforeCascade(t *testing.T) {
 		t.Errorf("removed = %+v, want exactly the member with its last address", n.removed)
 	}
 }
+
+// TestAdminService_CreateUserInvite_RejectsCaseVariantOfHeldAddress pins
+// design D20 at the invite site: the collision check compares canonical
+// forms case-insensitively, over stored AND pending addresses, and exempts
+// NO row -- including the acting admin's own.
+func TestAdminService_CreateUserInvite_RejectsCaseVariantOfHeldAddress(t *testing.T) {
+	st, svc := newAdminSvcWithPasskeys(t)
+	admin := seedUser(t, st, "admin@example.test", "admin")
+	seedUser(t, st, "bob@example.test", "user")
+	if err := st.Users().SetPendingEmail(t.Context(), admin.ID, "pending@example.test", "h", store.NowUnix()+3600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, held := range []string{"Bob@Example.TEST", "ADMIN@example.test", "Pending@example.test"} {
+		if _, _, _, err := svc.CreateUserInvite(t.Context(), admin.ID, held, "user"); !errors.Is(err, store.ErrConflict) {
+			t.Errorf("%q: err = %v, want store.ErrConflict", held, err)
+		}
+	}
+	users, err := st.Users().List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("users = %d after rejected invites, want 2", len(users))
+	}
+}

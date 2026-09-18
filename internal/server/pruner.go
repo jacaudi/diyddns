@@ -53,8 +53,9 @@ func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection
 }
 
 // prune sweeps replay_nonces, sessions, enrollment_codes, oidc_device_flows and
-// account_recovery_tokens for expired rows, then applies the operator's
-// retention policy to ip_history and audit_log, and logs the counts removed.
+// account_recovery_tokens for expired rows, clears expired pending email
+// changes off users (#131 D17), then applies the operator's retention policy to
+// ip_history and audit_log, and logs the counts removed.
 //
 // Each sweep runs independently — a failure in one does not block the others —
 // and failures are logged (there is no caller to report them to).
@@ -80,6 +81,10 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 	recovery, err := st.AccountRecovery().PruneExpired(ctx, now)
 	if err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "prune account_recovery_tokens failed", slog.Any("error", err))
+	}
+	pendingEmails, err := st.Users().ClearExpiredPendingEmails(ctx, now)
+	if err != nil {
+		log.LogAttrs(ctx, slog.LevelWarn, "clear expired pending email changes failed", slog.Any("error", err))
 	}
 	ipRows, auditRows, deliveryRows := pruneRetention(ctx, st, ret, log)
 	if ipRows+auditRows+deliveryRows > 0 {
@@ -107,6 +112,7 @@ func prune(ctx context.Context, st *store.Store, ret config.RetentionSection, lo
 		slog.Int("enrollment_codes", codes),
 		slog.Int("oidc_device_flows", flows),
 		slog.Int("account_recovery", recovery),
+		slog.Int("pending_email_changes", pendingEmails),
 		slog.Int("ip_history", ipRows),
 		slog.Int("audit_log", auditRows),
 		slog.Int("notification_deliveries", deliveryRows),

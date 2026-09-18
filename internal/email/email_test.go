@@ -625,3 +625,49 @@ func TestSmtpMailer_Send_MailableStillSends(t *testing.T) {
 	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com",
 		"your recovery link", "click here: https://x.test/r/abc")
 }
+
+func TestChangeConfirmBody_ContainsLinkAndSignInNote(t *testing.T) {
+	const link = "https://ddns.example.com/account/email/confirm?token=abc"
+	subject, body := email.ChangeConfirmBody(link)
+	if subject == "" {
+		t.Error("subject is empty")
+	}
+	if !strings.Contains(body, link) {
+		t.Errorf("body = %q, want to contain %q", body, link)
+	}
+	if !strings.Contains(body, "signed in") {
+		t.Errorf("body = %q, want to tell the reader they must be signed in when they open the link", body)
+	}
+}
+
+func TestChangeNoticeBody_NamesNewAddressAndHowToCancel(t *testing.T) {
+	subject, body := email.ChangeNoticeBody("new@example.com")
+	if subject == "" {
+		t.Error("subject is empty")
+	}
+	if !strings.Contains(body, "new@example.com") {
+		t.Errorf("body = %q, want to name the requested address", body)
+	}
+	if !strings.Contains(body, "cancel") || !strings.Contains(body, "administrator") {
+		t.Errorf("body = %q, want both the cancel route and the administrator route", body)
+	}
+}
+
+func TestEmailChangedBodies_DifferInWhoMadeTheChange(t *testing.T) {
+	selfSubj, selfBody := email.ChangedBody("new@example.com")
+	adminSubj, adminBody := email.AdminChangedBody("new@example.com")
+	for name, body := range map[string]string{"self": selfBody, "admin": adminBody} {
+		if !strings.Contains(body, "new@example.com") {
+			t.Errorf("%s body = %q, want to name the new address", name, body)
+		}
+	}
+	if selfSubj == "" || adminSubj == "" {
+		t.Error("a subject is empty")
+	}
+	if !strings.Contains(selfBody, "did not make this change") {
+		t.Errorf("self body = %q, want the 'if you did not make this change' line", selfBody)
+	}
+	if !strings.Contains(adminBody, "administrator") || strings.Contains(adminBody, "did not make this change") {
+		t.Errorf("admin body = %q, want to say an administrator made the change and NOT the self-service line", adminBody)
+	}
+}
