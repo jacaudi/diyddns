@@ -481,7 +481,10 @@ func TestNew_SilentWhenRetentionDisabled(t *testing.T) {
 // request had 404'd, had leaked a template, or had never reached AccessLog.
 func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log.json")
-	log, err := server.NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: path}, nil)
+	// Level debug, not info: /healthz logs at Debug (it's polled every few
+	// seconds by a liveness probe and would spam Info-level logs otherwise),
+	// and the "plain mux health" row below needs its record to exist.
+	log, err := server.NewLogger(config.LoggingSection{Level: "debug", Format: "json", Output: path}, nil)
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
