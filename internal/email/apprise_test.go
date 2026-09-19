@@ -326,11 +326,10 @@ func TestMailer_Send_SanitizesLibraryErrors(t *testing.T) {
 // url.Parse for every reserved character it might contain. This test calls
 // neither apprise.New nor .Add -- it only proves the string round-trips
 // through Go's own net/url, nothing about whether the real apprise-go
-// library would parse or accept it. This task does not wire appriseMailer
-// into email.New (Task 4 does), so the wire tests in email_test.go today
-// exercise smtpMailer only; that library-acceptance question stays
-// unverified until Task 4 switches New over and those wire tests actually
-// exercise appriseMailer end-to-end -- Task 4 must confirm it then.
+// library would parse or accept it. The library-acceptance question is
+// answered by email_test.go's wire tests, which since Task 4 wired
+// appriseMailer into email.New exercise it end-to-end against a fake SMTP
+// server.
 func TestMailer_TargetURL(t *testing.T) {
 	const password = "p@ss:w/rd%25#&=+"
 	tests := []struct {

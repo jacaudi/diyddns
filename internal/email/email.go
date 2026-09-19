@@ -1,5 +1,6 @@
 // Package email sends outbound account email (passkey recovery links, admin
-// notifications) over SMTP. It is disabled by default: New returns a no-op
+// notifications, staleness notices) over SMTP, through the mailto service of
+// github.com/unraid/apprise-go. It is disabled by default: New returns a no-op
 // Mailer unless config.EmailSection.Enabled is set, so callers can invoke
 // Send unconditionally and use Enabled() to gate email-dependent flows (e.g.
 // self-service passkey recovery) that require a working transport.
@@ -23,12 +24,12 @@ type Mailer interface {
 
 // New returns a Mailer for cfg. When cfg.Enabled is false, New returns a
 // no-op Mailer; otherwise it returns a Mailer that sends over SMTP per
-// cfg.Host/Port/TLS.
+// cfg.Host/Port/TLS through the apprise mailto service (see appriseMailer).
 func New(cfg config.EmailSection, log *slog.Logger) Mailer {
 	if !cfg.Enabled {
 		return &noopMailer{log: log}
 	}
-	return &smtpMailer{cfg: cfg, log: log, dialTimeout: defaultDialTimeout}
+	return newAppriseMailer(cfg, log)
 }
 
 // noopMailer is returned when the email subsystem is disabled. Send never

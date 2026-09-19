@@ -26,10 +26,9 @@ const grantTTL = time.Hour
 // cannot distinguish which. Maps to HTTP 401.
 var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, or already used")
 
-// adminDeliveryTimeout bounds the whole SMTP conversation for an
-// admin-initiated send. It sits above internal/email's defaultDialTimeout
-// (10s connect floor) so a slow host fails as a dial failure rather than as a
-// conversation truncated mid-envelope, and BELOW server.go's shutdownTimeout
+// adminDeliveryTimeout bounds an admin-initiated send as seen by this
+// service: internal/email returns at this deadline whatever the SMTP peer is
+// doing. It sits BELOW server.go's shutdownTimeout
 // (15s, server.go:29) so a send that begins just before SIGTERM cannot consume
 // the entire graceful-shutdown budget and turn a clean stop into
 // "shutdown: context deadline exceeded".
@@ -127,8 +126,8 @@ type mailDeps struct {
 //   - A request context may already be canceled (the admin's browser went
 //     away). auditWriter.Log uses the caller's context and SWALLOWS write
 //     errors (service/enrollment.go:54-58), so nothing surfaces.
-//   - The send's context is worse. internal/email derives the CONNECTION
-//     deadline from it, so the canonical failure — a peer that accepts and then
+//   - The send's context is worse. internal/email returns at the deadline that
+//     context carries, so the canonical failure — a peer that accepts and then
 //     stalls — returns at exactly the moment that context expires.
 //     database/sql rejects an expired context before reaching the driver, so
 //     the write is dropped precisely in the case this record exists to capture.
@@ -207,8 +206,7 @@ type GrantService struct {
 	log      *slog.Logger
 	// deliveryTimeout bounds an admin-initiated send (see adminDeliveryTimeout).
 	// It is a field rather than a bare const so a test can shrink it and prove
-	// the expired-context audit path, mirroring smtpMailer.dialTimeout, which
-	// exists for exactly the same reason (internal/email/smtp.go:43-47).
+	// the expired-context audit path.
 	//
 	// It must always be set. A zero value makes context.WithTimeout return an
 	// already-expired context, silently failing every send. NewGrantService is
@@ -367,9 +365,8 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 
 // selfServiceRecoveryTimeout bounds the detached goroutine
 // RequestSelfServiceRecovery spawns to perform its account-existence-
-// sensitive work: generous enough for a real SMTP round-trip (plus the
-// dial-timeout floor in internal/email's smtpMailer), but bounded so the
-// goroutine can never leak forever if a downstream call wedges.
+// sensitive work: generous enough for a real SMTP round-trip, but bounded so
+// the goroutine can never leak forever if a downstream call wedges.
 const selfServiceRecoveryTimeout = 30 * time.Second
 
 // RequestSelfServiceRecovery is the pre-auth "Lost your passkey?" entry
