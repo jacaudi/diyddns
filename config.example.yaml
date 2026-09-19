@@ -200,13 +200,17 @@ email:
   host: "" # e.g. "smtp.example.com"
   # 587 for starttls, 465 for implicit, 25 for none.
   port: 587
-  # Leave username empty to skip SMTP AUTH entirely. A non-empty username with
-  # tls: none is REJECTED at startup for any host other than localhost/
-  # 127.0.0.1/::1 — net/smtp refuses to send credentials over an unencrypted
-  # connection.
+  # Leave username AND password empty to skip SMTP AUTH entirely; setting only
+  # one of them is REJECTED at startup (the transport authenticates only when
+  # both are set). A non-empty username with tls: none is REJECTED at startup
+  # for any host other than localhost/127.0.0.1/::1 — credentials are never
+  # sent over an unencrypted connection. Leading or trailing whitespace on
+  # either value is also REJECTED at startup.
   username: ""
   # Prefer DIYDDNS_EMAIL_PASSWORD; never logged.
   password: ""
+  # A bare address with a dotted domain; "diyddns@localhost" is rejected at
+  # startup because the transport refuses it.
   from: "" # e.g. "diyddns@example.com"
   # One of: starttls (default), implicit, none. Any other value is rejected at
   # startup. NOTE: none + a non-empty username above is also rejected at

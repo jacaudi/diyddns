@@ -22,8 +22,6 @@ type recordingChannel struct {
 	sent []stale.Delivery
 }
 
-func (c *recordingChannel) Name() string { return "recording" }
-
 func (c *recordingChannel) Send(_ context.Context, d stale.Delivery) error {
 	c.sent = append(c.sent, d)
 	return nil

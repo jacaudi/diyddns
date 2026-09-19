@@ -4,24 +4,27 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
 
 // ErrNotASCII reports that a value carries a byte above 0x7F and therefore
-// cannot be put on the wire by this package.
+// is refused by this package.
 //
-// buildMessage declares Content-Type: text/plain; charset="utf-8" with NO
-// Content-Transfer-Encoding, which RFC 2045 defaults to 7bit, and writes From:,
-// To: and Subject: raw with no RFC 2047 encoded-word. Anything non-ASCII is
-// therefore a message that lies about its own encoding.
-//
-// This is a deliberate boundary rejection, not a limitation of net/smtp:
-// net/smtp DOES add BODY=8BITMIME and SMTPUTF8 to MAIL FROM when the peer
-// advertises them (net/smtp/smtp.go). DIYDDNS does not attempt SMTPUTF8 even
-// where the peer offers it, because doing it properly also means handling peers
-// that do not — a materially larger feature. Do not describe this as "net/smtp
-// cannot"; that claim is false.
+// This is a boundary POLICY, not a transport limitation. The net/smtp client
+// this package once carried wrote headers raw and declared a 7-bit body, so
+// non-ASCII was a message that lied about its own encoding; the transport
+// that replaced it (unraid/apprise-go's mailto service) quoted-printable-
+// encodes the body and RFC 2047-encodes the subject, and could carry UTF-8.
+// The 7-bit rule stays anyway (#80): every stored address is validated
+// against it at the boundary (NormalizeAddress), the send path applies the
+// same rule (checkSendable), and the two must agree -- widening one without
+// the other creates addresses that are accepted at creation and refused at
+// every send. Lifting the rule is its own change, taken deliberately, with
+// the SMTPUTF8 / non-ASCII-address consequences worked through; it is not
+// something the transport swap does as a side effect.
 var ErrNotASCII = errors.New("email: value is not 7-bit ASCII")
 
 // ErrAddressUnsupported reports an address whose canonical form this transport
@@ -41,24 +44,78 @@ var ErrAddressUnsupported = errors.New("email: address form is not supported by 
 
 // ErrAddressNotCanonical reports an address that parses and is ASCII but is not
 // already in bare addr-spec form — "Bob <bob@example.test>" or a
-// whitespace-padded address. Such a value goes out as
-// RCPT TO:<Bob <bob@example.test>>, which is malformed, and it is pure ASCII so
-// the charset check alone does not catch it. Rows created before the boundary
-// validations existed can carry it.
+// whitespace-padded address. It is pure ASCII, so the charset check alone
+// does not catch it, and no transport this package has used carries it
+// correctly: the net/smtp client put it on the wire verbatim as a malformed
+// RCPT TO, and the current transport splits it on its list delimiters and
+// either mangles it or drops it and mails From instead (see
+// ErrAddressUnroutable). Rows created before the boundary validations
+// existed can carry it.
 var ErrAddressNotCanonical = errors.New("email: address is not in canonical addr-spec form")
 
 // ErrHeaderInjection reports a header VALUE that carries a CR or LF. IsASCII
 // alone does not catch this — CR (0x0D) and LF (0x0A) are both 7-bit ASCII,
 // and are pinned as such by design (IsASCII's "control characters are still
 // ascii" test case), because a message BODY legitimately contains \n line
-// breaks. A header field does not: buildMessage writes
-// "Subject: %s\r\n" with no fold, so an embedded CR/LF in subject would
-// terminate that header early and let the rest of the value inject
-// additional headers or a premature blank-line body boundary. checkSendable
-// applies this to the Subject only — never to From/To (already constrained
-// to a canonical addr-spec by checkAddress, which cannot contain CR/LF) or to
-// the body (which legitimately contains \n).
+// breaks. A header field does not: a subject with an embedded CR/LF written
+// raw would terminate the Subject header early and let the rest of the value
+// inject additional headers or a premature blank-line body boundary. The
+// current transport RFC 2047-encodes the subject, which neutralises that;
+// the check stays as the transport-independent guarantee this package makes
+// about what it hands to ANY transport. checkSendable applies it to the
+// Subject only — never to From/To (already constrained to a canonical
+// addr-spec by checkAddress, which cannot contain CR/LF) or to the body
+// (which legitimately contains \n).
 var ErrHeaderInjection = errors.New("email: header value contains a CR or LF")
+
+// ErrAddressUnroutable reports an address the transport would not carry as
+// written. unraid/apprise-go filters every mailto address through
+// parseDelimitedList (split on `[\[\];,\s]+`, internal/notify/parse_helpers.go:10)
+// and then isSimpleEmail (`^[^@\s]+@[^@\s]+\.[^@\s]+$`, internal/notify/smtp2go.go:13).
+// A To that fails is NOT refused: it is dropped, and the message is sent to
+// From instead (internal/notify/mailto_target.go:129-132). The From address
+// takes a different path (parseMailtoFrom, mailto_target.go:180-217):
+// mail.ParseAddress, then isSimpleEmail, with NO delimiter split -- so a
+// domain literal such as noreply@[192.168.1.1] is a working From and an
+// unroutable To. A From that fails is refused loudly ("invalid from email")
+// before anything reaches the wire. Refuse both here, each by its own rule.
+// This is a different defect from ErrAddressUnsupported (a quoted local
+// part that cannot be canonicalised): `user@[192.168.1.1]` canonicalises
+// fine and is unroutable as a recipient, because the brackets are list
+// delimiters to the library. IsRoutable and IsRoutableFrom must stay in
+// lockstep with the pinned library version (go.mod); re-read both library
+// sites on every bump.
+var ErrAddressUnroutable = errors.New("email: address cannot be carried by the transport as written")
+
+var (
+	// libraryListDelims is the library's parseDelimitedList separator set.
+	libraryListDelims = regexp.MustCompile(`[\[\];,\s]+`)
+	// libraryRecipientRe is the library's isSimpleEmail predicate.
+	libraryRecipientRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+)
+
+// IsRoutable reports whether the transport would carry addr as a RECIPIENT
+// exactly as written: after the library splits it on its list delimiters,
+// exactly one element must survive, it must be the whole input, and it must
+// match the library's recipient predicate. It is at least as strict as the
+// library (a value the library would mangle rather than drop, such as one
+// with a trailing space, is also refused; checkAddress rejects those
+// earlier anyway). Exported for the external test package; IsRoutableFrom
+// is the one internal/config pins its duplicate against.
+func IsRoutable(addr string) bool {
+	parts := libraryListDelims.Split(addr, -1)
+	parts = slices.DeleteFunc(parts, func(p string) bool { return p == "" })
+	return len(parts) == 1 && parts[0] == addr && libraryRecipientRe.MatchString(addr)
+}
+
+// IsRoutableFrom reports whether the transport would accept addr as the
+// FROM address: the library's isSimpleEmail predicate alone, no delimiter
+// split. checkAddress has already required addr to be a canonical
+// addr-spec, so only the dotted-domain requirement can still fail here.
+// Exported for the same reason as IsRoutable.
+func IsRoutableFrom(addr string) bool {
+	return libraryRecipientRe.MatchString(addr)
+}
 
 // IsASCII reports whether s is entirely 7-bit ASCII.
 //
@@ -103,9 +160,12 @@ func NormalizeAddress(addr string) (string, error) {
 }
 
 // checkAddress applies the ADDRESS predicate to one envelope address: it must
-// parse, be 7-bit, and ALREADY be in canonical form. The last clause is what
-// catches a display-name-form value stored before the boundary validations
-// existed.
+// parse, be 7-bit, ALREADY be in canonical form, and be routable by the
+// transport under that field's own rule (IsRoutableFrom for From, IsRoutable
+// for To). The canonical clause is what catches a display-name-form value
+// stored before the boundary validations existed; the routable clause is
+// what stops the transport from silently swapping in the From address for a
+// recipient it cannot carry.
 func checkAddress(field, addr string) error {
 	normalized, err := NormalizeAddress(addr)
 	if err != nil {
@@ -114,18 +174,26 @@ func checkAddress(field, addr string) error {
 	if normalized != addr {
 		return fmt.Errorf("%w: %s header", ErrAddressNotCanonical, field)
 	}
+	routable := IsRoutable
+	if field == "From" {
+		routable = IsRoutableFrom
+	}
+	if !routable(addr) {
+		return fmt.Errorf("%w: %s header", ErrAddressUnroutable, field)
+	}
 	return nil
 }
 
-// checkSendable rejects the buildMessage arguments known to break the
-// transport. It covers ALL FOUR arguments, not just the addresses:
-// AdminNotifyBody interpolates a user-controlled email address into the BODY,
-// so a check on from/to alone passes the highest-severity vector (design
-// §5.5). It does NOT guarantee the transport can carry everything it admits —
-// IsASCII deliberately allows CR/LF (see its "control characters are still
-// ascii" test case), and the body is not CR/LF-checked at all because a
-// legitimate body contains \n line breaks; only the subject is header-folded
-// onto a single line, so only the subject is checked here.
+// checkSendable rejects the Send arguments this package refuses to hand to
+// the transport: non-ASCII anywhere, a non-canonical or unroutable address,
+// a subject with a line break. It covers ALL FOUR arguments, not just the
+// addresses: AdminNotifyBody interpolates a user-controlled email address
+// into the BODY, so a check on from/to alone passes the highest-severity
+// vector (design §5.5). It does NOT guarantee the transport can carry
+// everything it admits — IsASCII deliberately allows CR/LF (see its "control
+// characters are still ascii" test case), and the body is not CR/LF-checked
+// at all because a legitimate body contains \n line breaks; only the subject
+// is a single header value, so only the subject is checked for that.
 //
 // The offending VALUE is deliberately not included in the subject/body errors —
 // a body can carry a live one-time registration link. The field name is enough

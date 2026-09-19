@@ -54,6 +54,13 @@ an optional, generic outbound webhook, not a DNS publisher.
   devices, history, an admin console (users, audit log, server info), and
   enrollment-code minting.
 
+- **Email delivery for invite, recovery, and address-change links** *(optional)*
+
+  Off by default — a link is always shown on screen regardless. Turn it on
+  and the same link is also emailed, sent through
+  [Apprise](https://github.com/unraid/apprise-go) over SMTP. See
+  [Email](docs/email.md).
+
 - **A gateway feed** *(optional)*
 
   The current address set as a pollable REST document (plain text or JSON)
@@ -258,7 +265,7 @@ feed and feed expiry) and documented on its own. Every key also has a
 | Doc | Default | Covers |
 |---|---|---|
 | [Deployment](docs/deployment.md) | — | Containers, production Docker/Compose/Kubernetes, client credential volumes |
-| [Email](docs/email.md) | off | SMTP delivery for invite/recovery links |
+| [Email](docs/email.md) | off | Invite/recovery/address-change link delivery, via Apprise over SMTP |
 | [Notifications](docs/notifications.md) | off | Signed outbound webhooks, payload contract, verification |
 | [Feed](docs/feed.md) | **on** | REST/WebSocket gateway allow-list |
 | [Feed Expiry](docs/feed.md#feed-expiry) | **on**, 21 days | Ages out unconfirmed addresses |

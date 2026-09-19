@@ -8,24 +8,24 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// deliveryTimeout bounds the whole SMTP conversation for ONE delivery made
-// during a sweep tick -- one owner notice, or one admin's copy of the digest.
+// deliveryTimeout bounds ONE delivery made during a sweep tick -- one owner
+// notice, or one admin's copy of the digest -- as seen by this dispatcher:
+// Mailer.Send returns no later than the deadline its context carries.
 //
-// Without it, the context reaching email.smtpMailer.Send is the bare ctx
-// runPruner passes all the way down from Server.Run, which carries no
-// deadline until the process starts shutting down -- so smtpMailer.dial's
-// conn.SetDeadline call (internal/email/smtp.go) never fires, and a peer that
-// accepts the connection and then stalls hangs indefinitely. runPruner runs
-// prune() and sw.Run() in ONE goroutine, ONE loop (internal/server/pruner.go),
-// so a wedged Send there never returns control to the loop that would
-// otherwise start the next hourly tick -- every later prune() (sessions,
-// replay nonces, enrollment codes, OIDC flows, retention) starves with it, for
-// the life of the process.
+// Without it, the context reaching Mailer.Send is the bare ctx runPruner
+// passes all the way down from Server.Run, which carries no deadline until
+// the process starts shutting down -- so a peer that accepts the connection
+// and then stalls would hang the send indefinitely. runPruner runs prune()
+// and sw.Run() in ONE goroutine, ONE loop (internal/server/pruner.go), so a
+// wedged Send there never returns control to the loop that would otherwise
+// start the next hourly tick -- every later prune() (sessions, replay nonces,
+// enrollment codes, OIDC flows, retention) starves with it, for the life of
+// the process. What happens to the SMTP conversation after Send has returned
+// is the transport's concern (internal/email).
 //
 // Value matches service.adminDeliveryTimeout (internal/server/service/
-// grants.go): both bound the same SMTP conversation shape (dial + STARTTLS +
-// AUTH + envelope) against the same email.defaultDialTimeout (10s connect
-// floor). Unlike adminDeliveryTimeout, it is NOT bounded above by
+// grants.go): both bound the same conversation shape (dial + STARTTLS + AUTH
+// + envelope). Unlike adminDeliveryTimeout, it is NOT bounded above by
 // server.shutdownTimeout -- that coupling exists because an admin's send runs
 // on an HTTP handler's own request budget; this sweep is a detached
 // background goroutine with no request budget and no join at shutdown, so

@@ -9,12 +9,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"io"
 	"log/slog"
 	"math/big"
+	"mime"
+	"mime/quotedprintable"
 	"net"
+	"net/mail"
 	"net/netip"
 	"net/textproto"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -45,8 +52,9 @@ func TestNew_Disabled(t *testing.T) {
 }
 
 // fakeEnvelope captures what the fake SMTP server observed for one message.
+// auth is the AUTH command line, if the client sent one.
 type fakeEnvelope struct {
-	from, to, data string
+	from, to, data, auth string
 }
 
 // startFakeServer accepts one connection on ln, hands it to serve, and
@@ -86,6 +94,22 @@ func startFakeSMTP(t *testing.T) (host string, port int, envelopes <-chan fakeEn
 		t.Fatalf("listen: %v", err)
 	}
 	return startFakeServer(t, ln, serveFakeSMTPConn)
+}
+
+// startFakeAuthSMTP is startFakeSMTP with AUTH PLAIN advertised and accepted,
+// so a test can observe whether the client authenticated.
+func startFakeAuthSMTP(t *testing.T) (host string, port int, envelopes <-chan fakeEnvelope) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	return startFakeServer(t, ln, func(conn net.Conn, ch chan<- fakeEnvelope) {
+		tp := textproto.NewConn(conn)
+		defer func() { _ = tp.Close() }()
+		_ = tp.PrintfLine("220 fake.smtp.test ready")
+		serveEnvelopeWith(tp, ch, true)
+	})
 }
 
 // startFakeImplicitTLSSMTP starts an SMTP listener whose transport is TLS
@@ -155,6 +179,14 @@ func serveStartTLSConn(conn net.Conn, serverConf *tls.Config, envelopes chan<- f
 // is the caller's responsibility (STARTTLS re-enters this loop after the
 // upgrade, with no fresh greeting).
 func serveEnvelope(tp *textproto.Conn, envelopes chan<- fakeEnvelope) {
+	serveEnvelopeWith(tp, envelopes, false)
+}
+
+// serveEnvelopeWith is serveEnvelope with AUTH PLAIN optionally advertised
+// (and always accepted with 235 when it is). Without it, an AUTH command hits
+// the default branch's "250 ok", which net/smtp reports as a *textproto.Error
+// -- the failure the password-logging test relies on.
+func serveEnvelopeWith(tp *textproto.Conn, envelopes chan<- fakeEnvelope, advertiseAuth bool) {
 	var env fakeEnvelope
 	for {
 		line, err := tp.ReadLine()
@@ -164,7 +196,15 @@ func serveEnvelope(tp *textproto.Conn, envelopes chan<- fakeEnvelope) {
 		upper := strings.ToUpper(line)
 		switch {
 		case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
-			_ = tp.PrintfLine("250 fake.smtp.test")
+			if advertiseAuth {
+				_ = tp.PrintfLine("250-fake.smtp.test")
+				_ = tp.PrintfLine("250 AUTH PLAIN")
+			} else {
+				_ = tp.PrintfLine("250 fake.smtp.test")
+			}
+		case advertiseAuth && strings.HasPrefix(upper, "AUTH "):
+			env.auth = line
+			_ = tp.PrintfLine("235 authenticated")
 		case strings.HasPrefix(upper, "MAIL FROM:"):
 			env.from = line[len("MAIL FROM:"):]
 			_ = tp.PrintfLine("250 ok")
@@ -190,10 +230,10 @@ func serveEnvelope(tp *textproto.Conn, envelopes chan<- fakeEnvelope) {
 }
 
 // testTLSConfigs generates a self-signed cert (valid for 127.0.0.1) and
-// returns a server config that presents it and a client config that trusts
-// it via RootCAs — so the TLS handshake is genuinely verified in-test, not
-// skipped.
-func testTLSConfigs(t *testing.T) (server, client *tls.Config) {
+// returns a server config that presents it and the cert's PEM, which
+// trustCert hands to the transport as its root pool — so the TLS handshake
+// is genuinely verified in-test, not skipped.
+func testTLSConfigs(t *testing.T) (server *tls.Config, certPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -218,47 +258,90 @@ func testTLSConfigs(t *testing.T) (server, client *tls.Config) {
 	if err != nil {
 		t.Fatalf("parse cert: %v", err)
 	}
-	pool := x509.NewCertPool()
-	pool.AddCert(leaf)
-
 	server = &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}},
 		MinVersion:   tls.VersionTLS12,
 	}
-	client = &tls.Config{
-		RootCAs:    pool,
-		ServerName: "127.0.0.1",
-		MinVersion: tls.VersionTLS12,
+	return server, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// trustCert makes the transport trust certPEM for the rest of the test.
+// SSL_CERT_FILE is the only root-pool hook unraid/apprise-go exposes
+// (internal/notify/tls_helpers.go); when set it REPLACES the pool, which is
+// also what Go's own crypto/x509 does with it on Linux. t.Setenv is safe
+// here because nothing in this package calls t.Parallel.
+func trustCert(t *testing.T, certPEM []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
 	}
-	return server, client
+	t.Setenv("SSL_CERT_FILE", path)
 }
 
 // assertEnvelope waits for the captured envelope and asserts the from/to/
-// subject/body the mailer produced.
+// subject/body the mailer produced, EXACTLY, after undoing the transport's
+// encoding: the subject is always RFC 2047 Q-encoded and the body is
+// quoted-printable (unraid/apprise-go internal/notify/mailto_target.go), so
+// both are decoded before comparison. Line endings are normalised because
+// textproto.ReadDotBytes turns CRLF into LF on capture and the transport
+// trims the body's trailing whitespace before encoding (overflow.go).
 func assertEnvelope(t *testing.T, envelopes <-chan fakeEnvelope, from, to, subject, body string) {
 	t.Helper()
 	env := <-envelopes
-	if !strings.Contains(env.from, from) {
-		t.Errorf("envelope from = %q, want to contain %q", env.from, from)
+	if got, want := env.from, "<"+from+">"; got != want {
+		t.Errorf("envelope from = %q, want %q", got, want)
 	}
-	if !strings.Contains(env.to, to) {
-		t.Errorf("envelope to = %q, want to contain %q", env.to, to)
+	if got, want := env.to, "<"+to+">"; got != want {
+		t.Errorf("envelope to = %q, want %q", got, want)
 	}
-	if !strings.Contains(env.data, "Subject: "+subject) {
-		t.Errorf("envelope data missing subject %q, got: %q", subject, env.data)
+	gotSubject, gotBody := decodeMessage(t, env.data)
+	if gotSubject != subject {
+		t.Errorf("subject = %q, want %q", gotSubject, subject)
 	}
-	if !strings.Contains(env.data, body) {
-		t.Errorf("envelope data missing body %q, got: %q", body, env.data)
+	if want := normalizeBody(body); gotBody != want {
+		t.Errorf("body = %q, want %q", gotBody, want)
 	}
+}
+
+// decodeMessage parses one captured message and returns its decoded Subject
+// and quoted-printable-decoded body.
+func decodeMessage(t *testing.T, data string) (subject, body string) {
+	t.Helper()
+	msg, err := mail.ReadMessage(strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("parse captured message: %v\n%s", err, data)
+	}
+	if got := msg.Header.Get("Content-Transfer-Encoding"); got != "quoted-printable" {
+		t.Errorf("Content-Transfer-Encoding = %q, want quoted-printable", got)
+	}
+	subject, err = (&mime.WordDecoder{}).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatalf("decode subject %q: %v", msg.Header.Get("Subject"), err)
+	}
+	raw, err := io.ReadAll(quotedprintable.NewReader(msg.Body))
+	if err != nil {
+		t.Fatalf("decode quoted-printable body: %v", err)
+	}
+	return subject, normalizeBody(string(raw))
+}
+
+// normalizeBody is the line-ending and trailing-whitespace normalisation
+// assertEnvelope applies to both sides (see its doc comment).
+func normalizeBody(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n") // a lone CR also arrives as LF; none of the templates has one
+	return strings.TrimRight(s, " \t\n")
 }
 
 func debugLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-// TestSmtpMailer_Send_Success drives Send against the fake plaintext
+// TestMailer_Send_Success drives Send against the fake plaintext
 // listener with TLS "none" and asserts the observed envelope.
-func TestSmtpMailer_Send_Success(t *testing.T) {
+func TestMailer_Send_Success(t *testing.T) {
+	verifyNoLeak(t)
 	host, port, envelopes := startFakeSMTP(t)
 
 	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none"}
@@ -273,16 +356,18 @@ func TestSmtpMailer_Send_Success(t *testing.T) {
 	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com", "your recovery link", "click here: https://example.com/r/abc")
 }
 
-// TestSmtpMailer_Send_ImplicitTLS drives Send through the implicit-TLS
-// (tls.Dial) branch against a fake SMTPS listener, verifying the server's
-// self-signed cert via injected RootCAs, and asserts the envelope arrived
-// over the TLS connection.
-func TestSmtpMailer_Send_ImplicitTLS(t *testing.T) {
-	serverConf, clientConf := testTLSConfigs(t)
+// TestMailer_Send_ImplicitTLS drives Send through the implicit-TLS
+// (?mode=ssl, tls.Dial) branch against a fake SMTPS listener, verifying the
+// server's self-signed cert via the trusted root pool, and asserts the
+// envelope arrived over the TLS connection.
+func TestMailer_Send_ImplicitTLS(t *testing.T) {
+	verifyNoLeak(t)
+	serverConf, certPEM := testTLSConfigs(t)
+	trustCert(t, certPEM)
 	host, port, envelopes := startFakeImplicitTLSSMTP(t, serverConf)
 
 	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "implicit"}
-	m := email.NewSMTPForTest(cfg, debugLogger(), clientConf)
+	m := email.New(cfg, debugLogger())
 
 	if err := m.Send(t.Context(), "user@example.com", "recovery", "link: https://example.com/r/tls"); err != nil {
 		t.Fatalf("Send over implicit TLS: %v", err)
@@ -290,15 +375,18 @@ func TestSmtpMailer_Send_ImplicitTLS(t *testing.T) {
 	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com", "recovery", "link: https://example.com/r/tls")
 }
 
-// TestSmtpMailer_Send_StartTLS drives Send through the STARTTLS
-// (smtp.Client.StartTLS) branch against a fake listener that advertises and
-// performs the in-band upgrade, verifying the cert via injected RootCAs.
-func TestSmtpMailer_Send_StartTLS(t *testing.T) {
-	serverConf, clientConf := testTLSConfigs(t)
+// TestMailer_Send_StartTLS drives Send through the STARTTLS
+// (?mode=starttls, smtp.Client.StartTLS) branch against a fake listener that
+// advertises and performs the in-band upgrade, verifying the cert via the
+// trusted root pool.
+func TestMailer_Send_StartTLS(t *testing.T) {
+	verifyNoLeak(t)
+	serverConf, certPEM := testTLSConfigs(t)
+	trustCert(t, certPEM)
 	host, port, envelopes := startFakeStartTLSSMTP(t, serverConf)
 
 	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "starttls"}
-	m := email.NewSMTPForTest(cfg, debugLogger(), clientConf)
+	m := email.New(cfg, debugLogger())
 
 	if err := m.Send(t.Context(), "user@example.com", "recovery", "link: https://example.com/r/starttls"); err != nil {
 		t.Fatalf("Send over STARTTLS: %v", err)
@@ -306,11 +394,15 @@ func TestSmtpMailer_Send_StartTLS(t *testing.T) {
 	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com", "recovery", "link: https://example.com/r/starttls")
 }
 
-// TestSmtpMailer_Send_NeverLogsPassword drives an authenticated Send against
-// the fake listener (which offers no AUTH, so the send fails and an error is
-// logged) and asserts the configured SMTP password never appears in the
-// captured log output.
-func TestSmtpMailer_Send_NeverLogsPassword(t *testing.T) {
+// TestMailer_Send_NeverLogsPassword drives an authenticated Send against
+// the fake listener (whose default branch answers 250 to AUTH PLAIN, which
+// smtp.Client.Auth reports as a *textproto.Error, so the send fails and an
+// error is logged) and asserts the configured SMTP password never appears in
+// the captured log output OR in the returned error. The transport renders
+// its target URL, credentials included, into its errors; sanitize must strip
+// that on every path.
+func TestMailer_Send_NeverLogsPassword(t *testing.T) {
+	verifyNoLeak(t)
 	host, port, _ := startFakeSMTP(t)
 
 	const password = "s3cret-password-do-not-log"
@@ -327,21 +419,26 @@ func TestSmtpMailer_Send_NeverLogsPassword(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	m := email.New(cfg, log)
 
-	if err := m.Send(t.Context(), "user@example.com", "subject", "body"); err == nil {
+	err := m.Send(t.Context(), "user@example.com", "subject", "body")
+	if err == nil {
 		t.Fatal("expected Send to fail against a fake server with no AUTH support")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Errorf("returned error contains the SMTP password: %v", err)
 	}
 	if strings.Contains(buf.String(), password) {
 		t.Errorf("captured log output contains the SMTP password: %s", buf.String())
 	}
 }
 
-// TestSmtpMailer_Send_RespectsCanceledContext points Send at a real fake
+// TestMailer_Send_RespectsCanceledContext points Send at a real fake
 // listener but with an already-canceled context, and asserts the error is
 // context.Canceled and that the server observed NO connection — proving the
 // entry-guard fired rather than a dial error. Removing the ctx.Err() guard
 // from Send fails this test (the send would complete and an envelope would
 // arrive).
-func TestSmtpMailer_Send_RespectsCanceledContext(t *testing.T) {
+func TestMailer_Send_RespectsCanceledContext(t *testing.T) {
+	verifyNoLeak(t)
 	host, port, envelopes := startFakeSMTP(t)
 
 	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none"}
@@ -361,37 +458,6 @@ func TestSmtpMailer_Send_RespectsCanceledContext(t *testing.T) {
 	case env := <-envelopes:
 		t.Fatalf("guard did not fire: server observed an envelope %+v", env)
 	default:
-	}
-}
-
-// TestSmtpMailer_Send_DialTimeoutBounds drives Send with an injected dial
-// function that blocks until its context is done (simulating a hung SMTP
-// host that never completes the TCP handshake) and a short dialTimeout, and
-// asserts Send returns promptly with a wrapped context.DeadlineExceeded
-// rather than hanging indefinitely. The fake proves this file's code
-// actually threads a bounded context down to the dial step — real
-// net.Dialer/tls.Dialer connect-timeout behavior is the stdlib's own
-// responsibility, not re-tested here.
-func TestSmtpMailer_Send_DialTimeoutBounds(t *testing.T) {
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}
-	cfg := config.EmailSection{Enabled: true, Host: "unreachable.invalid", Port: 25, From: "noreply@example.com", TLS: "none"}
-	m := email.NewSMTPForTestWithDial(cfg, debugLogger(), 50*time.Millisecond, dialFunc)
-
-	start := time.Now()
-	err := m.Send(t.Context(), "user@example.com", "subject", "body")
-	elapsed := time.Since(start)
-
-	if err == nil {
-		t.Fatal("expected Send to fail when the dial never returns before dialTimeout")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", err)
-	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("Send took %v, want bounded by the 50ms dial timeout (dial never returns on its own)", elapsed)
 	}
 }
 
@@ -417,11 +483,15 @@ func TestAdminNotifyBody_ContainsEmail(t *testing.T) {
 	}
 }
 
-// TestSMTPSend_StalledServerHonorsContextDeadline proves the connection
-// deadline set in dial bounds the WHOLE conversation, not just the TCP
-// connect. The fake server accepts and then says nothing at all, so
-// smtp.NewClient's greeting read is where this hangs without the deadline.
-func TestSMTPSend_StalledServerHonorsContextDeadline(t *testing.T) {
+// TestMailer_Send_StalledServerHonorsContextDeadline proves Send returns at
+// the caller's deadline against a peer that accepts and then says nothing at
+// all -- the shape #83 describes, and the one the transport itself never
+// times out on (smtp.NewClient's greeting read has no deadline inside
+// unraid/apprise-go). The conversation is abandoned, not ended: the goroutine
+// running it finishes only when the fake server closes the connection in
+// cleanup, which is what verifyNoLeak then proves.
+func TestMailer_Send_StalledServerHonorsContextDeadline(t *testing.T) {
+	verifyNoLeak(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -437,9 +507,9 @@ func TestSMTPSend_StalledServerHonorsContextDeadline(t *testing.T) {
 	})
 	t.Cleanup(func() { close(stall) })
 
-	m := email.NewSMTPForTest(config.EmailSection{
+	m := email.New(config.EmailSection{
 		Enabled: true, Host: host, Port: port, From: "from@x.test", TLS: "none",
-	}, debugLogger(), nil)
+	}, debugLogger())
 
 	ctx, cancel := context.WithTimeout(t.Context(), 750*time.Millisecond)
 	defer cancel()
@@ -448,62 +518,11 @@ func TestSMTPSend_StalledServerHonorsContextDeadline(t *testing.T) {
 	err = m.Send(ctx, "to@x.test", "subject", "body")
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatal("Send against a stalled server returned nil, want a deadline error")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send against a stalled server: err = %v, want it to wrap context.DeadlineExceeded", err)
 	}
-	// The bound must come from the context, not from defaultDialTimeout (10s).
 	if elapsed > 5*time.Second {
 		t.Errorf("Send took %v, want it bounded by the 750ms context deadline", elapsed)
-	}
-}
-
-// deadlineErrConn is a net.Conn whose SetDeadline always fails, standing in
-// for the only way dial's SetDeadline can realistically error: a descriptor
-// already broken underneath us. Everything else delegates to the embedded
-// conn, so the SMTP conversation itself still works.
-type deadlineErrConn struct {
-	net.Conn
-}
-
-func (deadlineErrConn) SetDeadline(time.Time) error {
-	return errors.New("setdeadline: fake failure")
-}
-
-// TestSMTPSend_LogsWhenDeadlineCannotBeSet asserts that a failed SetDeadline
-// leaves a log trail instead of vanishing. Discarding the error would mean
-// the conversation is silently unbounded — the exact hang this package's
-// deadline exists to prevent — with nothing in the logs to explain it. The
-// send itself must still succeed: an unbounded connection is worse than a
-// bounded one, but far better than a refused delivery.
-func TestSMTPSend_LogsWhenDeadlineCannotBeSet(t *testing.T) {
-	host, port, envelopes := startFakeSMTP(t)
-
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	cfg := config.EmailSection{
-		Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none",
-	}
-	m := email.NewSMTPForTestWithDial(cfg, log, 10*time.Second,
-		func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return deadlineErrConn{Conn: conn}, nil
-		})
-
-	// The warn branch is only reachable when the caller supplies a deadline.
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-
-	if err := m.Send(ctx, "user@example.com", "recovery", "link: https://example.com/r/x"); err != nil {
-		t.Fatalf("Send: %v, want nil — a failed SetDeadline must not fail the send", err)
-	}
-	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com", "recovery", "link: https://example.com/r/x")
-
-	if !strings.Contains(buf.String(), "could not bound the SMTP conversation") {
-		t.Errorf("expected a warning that the deadline could not be set, got: %s", buf.String())
 	}
 }
 
@@ -540,7 +559,7 @@ func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
 	}
 }
 
-// TestSmtpMailer_Send_RejectsUnmailable proves that nothing unmailable reaches
+// TestMailer_Send_RejectsUnmailable proves that nothing unmailable reaches
 // the wire and that Send stops REPORTING SUCCESS when it would have.
 //
 // Before this, every case returned nil: the message went out declaring 7bit
@@ -555,7 +574,8 @@ func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
 //
 // The display-name case is the other one a naive charset check misses: it is
 // pure ASCII, and it is what a row stored before B1.3 looks like.
-func TestSmtpMailer_Send_RejectsUnmailable(t *testing.T) {
+func TestMailer_Send_RejectsUnmailable(t *testing.T) {
+	verifyNoLeak(t)
 	tests := []struct {
 		name          string
 		from, to      string
@@ -577,15 +597,29 @@ func TestSmtpMailer_Send_RejectsUnmailable(t *testing.T) {
 		{name: "quoted local part in to (cannot be canonicalized)", from: "noreply@example.com",
 			to: `"john doe"@example.com`, subject: "your recovery link", body: "click here",
 			wantErr: email.ErrAddressUnsupported},
-		// CR/LF is 7-bit ASCII, so IsASCII alone would admit it; buildMessage
-		// writes "Subject: %s\r\n" unfolded, so an embedded CR/LF terminates
-		// the header early and lets the rest of the value inject additional
-		// headers or a premature blank line. There is no live vector today
-		// (subjects come from four fixed templates), but the guard exists so
-		// the first dynamic subject anyone adds inherits it.
+		// CR/LF is 7-bit ASCII, so IsASCII alone would admit it. A subject
+		// written raw with an embedded CR/LF terminates the header early and
+		// lets the rest of the value inject additional headers or a premature
+		// blank line; the current transport Q-encodes the subject, but the
+		// guard is this package's promise to ANY transport. There is no live
+		// vector today (subjects come from four fixed templates), but the
+		// first dynamic subject anyone adds inherits it.
 		{name: "CR/LF in subject (header injection)", from: "noreply@example.com", to: "user@example.test",
 			subject: "your recovery link\r\nBcc: attacker@evil.test", body: "click here",
 			wantErr: email.ErrHeaderInjection},
+		// The transport drops a recipient its own predicate rejects and mails
+		// FROM instead (unraid/apprise-go mailto_target.go:129-132), reporting
+		// success. Both shapes canonicalise cleanly, so only IsRoutable stops
+		// them.
+		{name: "dot-less recipient domain (transport would mail From)", from: "noreply@example.com",
+			to: "user@localhost", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnroutable},
+		{name: "domain-literal recipient (brackets are delimiters to the transport)", from: "noreply@example.com",
+			to: "user@[192.168.1.1]", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnroutable},
+		{name: "dot-less from domain (transport refuses it)", from: "noreply@localhost",
+			to: "user@example.test", subject: "your recovery link", body: "click here",
+			wantErr: email.ErrAddressUnroutable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -611,10 +645,11 @@ func TestSmtpMailer_Send_RejectsUnmailable(t *testing.T) {
 	}
 }
 
-// TestSmtpMailer_Send_MailableStillSends is the companion that keeps the guard
+// TestMailer_Send_MailableStillSends is the companion that keeps the guard
 // honest: a fully valid message must still go out unchanged, so the rejections
 // above cannot be satisfied by breaking Send outright.
-func TestSmtpMailer_Send_MailableStillSends(t *testing.T) {
+func TestMailer_Send_MailableStillSends(t *testing.T) {
+	verifyNoLeak(t)
 	host, port, envelopes := startFakeSMTP(t)
 	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none"}
 	m := email.New(cfg, debugLogger())
@@ -624,6 +659,91 @@ func TestSmtpMailer_Send_MailableStillSends(t *testing.T) {
 	}
 	assertEnvelope(t, envelopes, "noreply@example.com", "user@example.com",
 		"your recovery link", "click here: https://x.test/r/abc")
+}
+
+// TestMailer_Send_FromDomainLiteralIsRoutable pins checkAddress's per-field
+// predicate dispatch: a From domain literal is exactly the input IsRoutableFrom
+// accepts and IsRoutable rejects (the brackets are recipient-side list
+// delimiters, not a From-side one), so this only passes if the From field is
+// actually checked against IsRoutableFrom rather than IsRoutable.
+func TestMailer_Send_FromDomainLiteralIsRoutable(t *testing.T) {
+	verifyNoLeak(t)
+	host, port, envelopes := startFakeSMTP(t)
+	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@[192.168.1.1]", TLS: "none"}
+	m := email.New(cfg, debugLogger())
+
+	if err := m.Send(t.Context(), "user@example.test", "your recovery link", "click here"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertEnvelope(t, envelopes, "noreply@[192.168.1.1]", "user@example.test", "your recovery link", "click here")
+}
+
+// TestMailer_Send_LongLinkSurvivesQuotedPrintable sends the real invite body,
+// whose registration link is longer than quoted-printable's 76-column line
+// limit, and proves it decodes back to the template's text exactly. On the
+// wire the link carries a soft line break and "=3D" for its "=", which is
+// what a mail client undoes; this pins that nothing else was changed.
+func TestMailer_Send_LongLinkSurvivesQuotedPrintable(t *testing.T) {
+	verifyNoLeak(t)
+	host, port, envelopes := startFakeSMTP(t)
+	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none"}
+	m := email.New(cfg, debugLogger())
+
+	const link = "https://ddns.example.com/register?token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+	subject, body := email.InviteLinkBody(link)
+	if err := m.Send(t.Context(), "user@example.com", subject, body); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	env := <-envelopes
+	if !strings.Contains(env.data, "token=3D") {
+		t.Errorf("expected the link's '=' to be QP-escaped on the wire, got:\n%s", env.data)
+	}
+	gotSubject, gotBody := decodeMessage(t, env.data)
+	if gotSubject != subject {
+		t.Errorf("subject = %q, want %q", gotSubject, subject)
+	}
+	if want := normalizeBody(body); gotBody != want {
+		t.Errorf("decoded body differs from the template:\n got: %q\nwant: %q", gotBody, want)
+	}
+	if !strings.Contains(gotBody, link) {
+		t.Errorf("decoded body lost the link %q:\n%s", link, gotBody)
+	}
+}
+
+// TestMailer_Send_AuthOnlyWhenBothSet pins the transport's rule that AUTH is
+// attempted only when username AND password are set. config.validateEmail
+// rejects a username without a password at startup, so the username-only
+// case is unreachable in production and not tested here.
+func TestMailer_Send_AuthOnlyWhenBothSet(t *testing.T) {
+	verifyNoLeak(t)
+	tests := []struct {
+		name               string
+		username, password string
+		wantAuth           bool
+	}{
+		{name: "both set authenticates", username: "svc", password: "s3cret", wantAuth: true},
+		{name: "neither set skips AUTH", wantAuth: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, port, envelopes := startFakeAuthSMTP(t)
+			cfg := config.EmailSection{
+				Enabled: true, Host: host, Port: port, From: "noreply@example.com", TLS: "none",
+				Username: tt.username, Password: tt.password,
+			}
+			m := email.New(cfg, debugLogger())
+			if err := m.Send(t.Context(), "user@example.com", "s", "b"); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			env := <-envelopes
+			if gotAuth := env.auth != ""; gotAuth != tt.wantAuth {
+				t.Errorf("AUTH sent = %v (%q), want %v", gotAuth, env.auth, tt.wantAuth)
+			}
+			if tt.wantAuth && strings.Contains(env.auth, tt.password) {
+				t.Errorf("AUTH line carries the password in clear: %q", env.auth)
+			}
+		})
+	}
 }
 
 func TestChangeConfirmBody_ContainsLinkAndSignInNote(t *testing.T) {
