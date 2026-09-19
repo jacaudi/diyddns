@@ -12,14 +12,15 @@ type Delivery struct {
 
 // Channel delivers a Delivery.
 //
-// smtpChannel is the ONLY implementation today, so this interface is not
-// earned by two implementors. It ships because the maintainer required
-// explicitly that apprise-go be a later drop-in rather than a rewrite (D15).
-// That is a stated requirement, not a SOLID inference, and this code does not
-// dress it up as one. Adding apprise is apprise.go plus one line in
-// NewSMTPChannel's caller.
+// mailChannel is the only production implementation. The interface is earned
+// by the two test doubles that stand in for delivery (fakeChannel in
+// dispatch_test.go, recordingChannel in internal/server/sweep_test.go), not
+// by a second transport: #127's D15 shipped this seam so that an apprise
+// library could be a drop-in, and #129 then adopted that library BELOW the
+// Mailer instead (internal/email), which left this seam exactly as it was.
+// A Name method once lived here for log lines that were never written; with
+// one implementation there is nothing to distinguish, so it is gone.
 type Channel interface {
-	Name() string
 	Send(ctx context.Context, d Delivery) error
 }
 

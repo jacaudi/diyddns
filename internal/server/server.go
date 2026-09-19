@@ -362,7 +362,7 @@ func buildSweeper(cfg config.Server, st *store.Store, fan *fanout, mailer email.
 	var sw *sweeper
 	if cfg.Feed.ExpiryEnabled() && fan != nil {
 		dispatcher := stale.NewDispatcher(
-			stale.NewSMTPChannel(mailer),
+			stale.NewMailChannel(mailer),
 			func(ctx context.Context) ([]store.User, error) {
 				// Same rule as the admin fan-out in
 				// GrantService.notifyAdminsOfSelfServiceRecovery

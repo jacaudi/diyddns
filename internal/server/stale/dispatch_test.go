@@ -21,8 +21,6 @@ type fakeChannel struct {
 	err  error
 }
 
-func (c *fakeChannel) Name() string { return "fake" }
-
 func (c *fakeChannel) Send(_ context.Context, d stale.Delivery) error {
 	if c.err != nil {
 		return c.err
@@ -61,11 +59,11 @@ func adminLister(t *testing.T, emails ...string) stale.AdminLister {
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // fakeMailer records the context it was called with, so a test can inspect
-// exactly what reaches email.smtpMailer.Send in production -- the layer
-// whose own SetDeadline call (internal/email/smtp.go) only fires when
-// ctx.Deadline() is set. Wired in via stale.NewSMTPChannel (not a fakeChannel)
-// so these tests exercise the real Dispatcher -> Channel -> Mailer path,
-// proving the bound survives the hop through smtpChannel.Send unchanged.
+// exactly what reaches email.Mailer.Send in production -- the layer that
+// returns at the deadline ctx carries, and only then. Wired in via
+// stale.NewMailChannel (not a fakeChannel) so these tests exercise the real
+// Dispatcher -> Channel -> Mailer path, proving the bound survives the hop
+// through mailChannel.Send unchanged.
 type fakeMailer struct {
 	gotCtx context.Context
 }
@@ -86,7 +84,7 @@ func (m *fakeMailer) Send(ctx context.Context, _, _, _ string) error {
 // paths, regardless of whether the caller's own context had one.
 func TestDispatcher_SendOwner_BoundsTheDeliveryContext(t *testing.T) {
 	fm := &fakeMailer{}
-	d := stale.NewDispatcher(stale.NewSMTPChannel(fm), adminLister(t), discardLogger())
+	d := stale.NewDispatcher(stale.NewMailChannel(fm), adminLister(t), discardLogger())
 
 	d.SendOwner(context.Background(), stale.Notice{
 		Owner: store.User{Email: "o@example.test"},
@@ -102,7 +100,7 @@ func TestDispatcher_SendOwner_BoundsTheDeliveryContext(t *testing.T) {
 
 func TestDispatcher_SendAdminDigest_BoundsTheDeliveryContext(t *testing.T) {
 	fm := &fakeMailer{}
-	d := stale.NewDispatcher(stale.NewSMTPChannel(fm), adminLister(t, "a@example.test"), discardLogger())
+	d := stale.NewDispatcher(stale.NewMailChannel(fm), adminLister(t, "a@example.test"), discardLogger())
 
 	d.SendAdminDigest(context.Background(), []stale.Notice{
 		{Owner: store.User{Email: "o@example.test"}},
