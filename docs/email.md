@@ -80,11 +80,17 @@ address from `/admin/users/{id}`.
 emailed to it. Nothing about the account changes until they open that link while signed in
 and confirm — the old address stays authoritative until then. The old address gets a
 heads-up notice when the change is requested, and a change notice once it's confirmed. A
-pending change can be cancelled from `/account` at any time before confirmation.
+pending change can be cancelled from `/account` at any time before confirmation. If the new
+address is one [the transport can't carry](#addresses-the-transport-cant-carry), the
+confirmation send fails, the change is rolled back, and the user sees a generic
+delivery-failure error rather than one naming the address as invalid.
 
 **Admin-set** (`/admin/users/{id}`): an administrator can set a user's address directly,
 effective immediately, with no confirmation step. The previous address is notified of the
-change.
+change. This works even when the new address is one the transport can't carry — useful for
+repairing an account stuck on an unroutable address — but the account is then stuck the same
+way again until it's changed to a routable one, and the previous address's change notice
+fails silently in the same case.
 
 **OIDC-linked accounts**: a user who signs in through an external identity provider has
 their stored address follow the identity provider's `email` claim at every sign-in, so
