@@ -661,6 +661,23 @@ func TestMailer_Send_MailableStillSends(t *testing.T) {
 		"your recovery link", "click here: https://x.test/r/abc")
 }
 
+// TestMailer_Send_FromDomainLiteralIsRoutable pins checkAddress's per-field
+// predicate dispatch: a From domain literal is exactly the input IsRoutableFrom
+// accepts and IsRoutable rejects (the brackets are recipient-side list
+// delimiters, not a From-side one), so this only passes if the From field is
+// actually checked against IsRoutableFrom rather than IsRoutable.
+func TestMailer_Send_FromDomainLiteralIsRoutable(t *testing.T) {
+	verifyNoLeak(t)
+	host, port, envelopes := startFakeSMTP(t)
+	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "noreply@[192.168.1.1]", TLS: "none"}
+	m := email.New(cfg, debugLogger())
+
+	if err := m.Send(t.Context(), "user@example.test", "your recovery link", "click here"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertEnvelope(t, envelopes, "noreply@[192.168.1.1]", "user@example.test", "your recovery link", "click here")
+}
+
 // TestMailer_Send_LongLinkSurvivesQuotedPrintable sends the real invite body,
 // whose registration link is longer than quoted-printable's 76-column line
 // limit, and proves it decodes back to the template's text exactly. On the
@@ -726,5 +743,51 @@ func TestMailer_Send_AuthOnlyWhenBothSet(t *testing.T) {
 				t.Errorf("AUTH line carries the password in clear: %q", env.auth)
 			}
 		})
+	}
+}
+
+func TestChangeConfirmBody_ContainsLinkAndSignInNote(t *testing.T) {
+	const link = "https://ddns.example.com/account/email/confirm?token=abc"
+	subject, body := email.ChangeConfirmBody(link)
+	if subject == "" {
+		t.Error("subject is empty")
+	}
+	if !strings.Contains(body, link) {
+		t.Errorf("body = %q, want to contain %q", body, link)
+	}
+	if !strings.Contains(body, "signed in") {
+		t.Errorf("body = %q, want to tell the reader they must be signed in when they open the link", body)
+	}
+}
+
+func TestChangeNoticeBody_NamesNewAddressAndHowToCancel(t *testing.T) {
+	subject, body := email.ChangeNoticeBody("new@example.com")
+	if subject == "" {
+		t.Error("subject is empty")
+	}
+	if !strings.Contains(body, "new@example.com") {
+		t.Errorf("body = %q, want to name the requested address", body)
+	}
+	if !strings.Contains(body, "cancel") || !strings.Contains(body, "administrator") {
+		t.Errorf("body = %q, want both the cancel route and the administrator route", body)
+	}
+}
+
+func TestEmailChangedBodies_DifferInWhoMadeTheChange(t *testing.T) {
+	selfSubj, selfBody := email.ChangedBody("new@example.com")
+	adminSubj, adminBody := email.AdminChangedBody("new@example.com")
+	for name, body := range map[string]string{"self": selfBody, "admin": adminBody} {
+		if !strings.Contains(body, "new@example.com") {
+			t.Errorf("%s body = %q, want to name the new address", name, body)
+		}
+	}
+	if selfSubj == "" || adminSubj == "" {
+		t.Error("a subject is empty")
+	}
+	if !strings.Contains(selfBody, "did not make this change") {
+		t.Errorf("self body = %q, want the 'if you did not make this change' line", selfBody)
+	}
+	if !strings.Contains(adminBody, "administrator") || strings.Contains(adminBody, "did not make this change") {
+		t.Errorf("admin body = %q, want to say an administrator made the change and NOT the self-service line", adminBody)
 	}
 }
