@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/jacaudi/diyddns/compare/v0.5.0...v0.6.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **email:** send email through Apprise instead of net/smtp ([#142](https://github.com/jacaudi/diyddns/issues/142))
+* **config:** feed.enabled now defaults to true. A deployment that never set it explicitly gains the /feed/v1 routes and the /admin/feed page on upgrade. Set feed.enabled: false to keep the previous behaviour.
+
+### Features
+
+* **config:** enable the gateway feed by default ([5cb91ac](https://github.com/jacaudi/diyddns/commit/5cb91ac412fe8a0e94a7cd76a102ccaca3938ae9))
+* **email:** send email through Apprise instead of net/smtp ([#142](https://github.com/jacaudi/diyddns/issues/142)) ([dfd31bf](https://github.com/jacaudi/diyddns/commit/dfd31bfdf87bb91efe75e00da4dce5bc23eab5ef))
+
+
+### Bug Fixes
+
+* **server:** log health-check requests at debug, not info ([3de00e9](https://github.com/jacaudi/diyddns/commit/3de00e9509b144dee0eb2c1d4a1f5ee25d0e273b))
+
 ## [0.5.0](https://github.com/jacaudi/diyddns/compare/v0.4.0...v0.5.0) (2026-09-18)
 
 
