@@ -153,6 +153,55 @@ func TestAccessLog_LogsRouteNotPath(t *testing.T) {
 	}
 }
 
+// TestAccessLog_HealthRoutesLogAtDebug: /healthz and /readyz are hit by a
+// liveness/readiness probe every few seconds, so logging them at Info spams
+// every deployment's default-level logs with synthetic traffic that carries
+// no operational signal. They still log -- an operator debugging probe
+// behavior can turn on logging.level: debug -- but at Info (the default,
+// config.go "logging.level": "info") they must be silent.
+func TestAccessLog_HealthRoutesLogAtDebug(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /devices", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	for _, tt := range []struct {
+		target    string
+		wantLevel string
+	}{
+		{"/healthz", "DEBUG"},
+		{"/readyz", "DEBUG"},
+		{"/devices", "INFO"},
+	} {
+		t.Run(tt.target, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			h := middleware.AccessLog(log)(mux)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, tt.target, nil))
+
+			var line map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+				t.Fatalf("log not JSON: %v (%s)", err, buf.String())
+			}
+			if got := line["level"]; got != tt.wantLevel {
+				t.Errorf("level = %v, want %s", got, tt.wantLevel)
+			}
+		})
+	}
+
+	t.Run("silent at the default info level", func(t *testing.T) {
+		for _, target := range []string{"/healthz", "/readyz"} {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&buf, nil)) // nil options = Info, the config default
+			h := middleware.AccessLog(log)(mux)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
+			if buf.Len() != 0 {
+				t.Errorf("%s logged at the default Info level, want silent: %s", target, buf.String())
+			}
+		}
+	})
+}
+
 // Both empty-route cases: 404 (no pattern matched) and 405 (path matched,
 // method did not). ServeMux exposes no pattern for either, so status is what
 // distinguishes them.

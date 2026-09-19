@@ -261,9 +261,12 @@ notifications:
 # Tokens are minted by an admin at /admin/feed. When disabled, none of those
 # routes exists.
 feed:
-  # Default false. Left live for the same nil-section reason as
-  # notifications.enabled above.
-  enabled: false
+  # Default true -- the feed is the application's core purpose, serving
+  # current device addresses to gateways/consumers. Reading it still
+  # requires an admin-minted token (see docs/feed.md), so a fresh
+  # deployment discloses nothing until an admin acts. Set to false to
+  # remove the /feed/v1 routes and the /admin/feed page entirely.
+  enabled: true
 
   # How many days an address may go unconfirmed before it is cleared from the
   # device and therefore from the feed. Default 21. 0 disables the policy.

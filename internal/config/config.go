@@ -248,7 +248,7 @@ var keyDefaults = map[string]any{
 	"notifications.allowed_private_cidrs":    []string{},
 	"notifications.timeout":                  "10s",
 	"notifications.max_attempts":             8,
-	"feed.enabled":                           false,
+	"feed.enabled":                           true,
 	"feed.expire_after_days":                 21,
 	"retention.ip_history_days":              0,
 	"retention.ip_history_per_device_max":    0,

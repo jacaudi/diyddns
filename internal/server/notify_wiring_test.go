@@ -9,14 +9,15 @@ import (
 
 // TestBuildMux_NotificationsDisabledWiresNopNotifier is the regression guard
 // for the #65 fix-wave finding M40: with notifications.enabled AND
-// feed.enabled left at their default false, buildMux must wire the nop
+// feed.enabled both explicitly off, buildMux must wire the nop
 // notifiers into the check-in path — otherwise a device's IP-changed event
 // would enqueue an outbound delivery for a subsystem the operator never
 // turned on. It drives the real wiring through buildMux and a real
 // CheckinService.Checkin call rather than asserting on an unexported field.
 func TestBuildMux_NotificationsDisabledWiresNopNotifier(t *testing.T) {
 	ctx := t.Context()
-	cfg := routesTestConfig(t) // notifications.enabled and feed.enabled left at their default: false
+	cfg := routesTestConfig(t) // notifications.enabled defaults to false
+	cfg.Feed.Enabled = false   // feed.enabled now defaults to true; disable explicitly for this "both off" case
 	st := openTestStore(t)
 
 	usr, err := st.Users().Create(ctx, store.User{Email: "notify-wiring@example.com", Role: "user"})

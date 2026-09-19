@@ -1056,16 +1056,32 @@ func TestLoad_AcceptsShippedExampleConfig(t *testing.T) {
 	}
 }
 
-// TestLoad_FeedDefaultsOff: the gateway feed is opt-in, and its key must be
-// in keyDefaults or neither the default nor the env var exists.
-func TestLoad_FeedDefaultsOff(t *testing.T) {
+// TestLoad_FeedDefaultsOn: the gateway feed is the application's core
+// purpose (serving current device addresses to gateways/consumers), so it
+// is on by default; reading the feed still requires an admin-minted token
+// (docs/feed.md), so a fresh deployment discloses nothing until an admin
+// acts. Its key must be in keyDefaults or neither the default nor the env
+// var exists.
+func TestLoad_FeedDefaultsOn(t *testing.T) {
 	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
 	cfg, err := config.Load(viper.New(), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if !cfg.Feed.Enabled {
+		t.Error("feed.enabled should default to true")
+	}
+}
+
+func TestLoad_FeedDisabledFromEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_DATABASE_PATH", "/tmp/x.db")
+	t.Setenv("DIYDDNS_FEED_ENABLED", "false")
+	cfg, err := config.Load(viper.New(), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if cfg.Feed.Enabled {
-		t.Error("feed.enabled should default to false")
+		t.Error("DIYDDNS_FEED_ENABLED=false did not clear feed.enabled")
 	}
 }
 
