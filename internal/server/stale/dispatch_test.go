@@ -60,7 +60,7 @@ func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // fakeMailer records the context it was called with, so a test can inspect
 // exactly what reaches email.Mailer.Send in production -- the layer that
-// returns at the deadline ctx carries, and only then. Wired in via
+// returns no later than the deadline ctx carries. Wired in via
 // stale.NewMailChannel (not a fakeChannel) so these tests exercise the real
 // Dispatcher -> Channel -> Mailer path, proving the bound survives the hop
 // through mailChannel.Send unchanged.

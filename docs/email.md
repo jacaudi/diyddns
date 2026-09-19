@@ -11,8 +11,10 @@ an admin is shown each link once on screen and delivers it out of band. Air-gapp
 and SMTP-less deployments need nothing further.
 
 Turning it on also emails the link to the user. The link is still shown on screen
-either way, and the admin is told whether delivery succeeded, so a mail failure
-never costs them the link.
+either way, so a mail failure never costs them the link — though the delivery
+status the admin is shown reflects what was known by the time the send gave up,
+not necessarily the final outcome (see
+[When a mail server misbehaves](#when-a-mail-server-misbehaves)).
 
 | Key | Env var | Notes |
 |---|---|---|
@@ -44,6 +46,30 @@ and STARTTLS/implicit TLS to a public-CA mail relay fails until you append the p
 the same bundle.
 
 Feed expiry warnings also route through this — see [Feed](feed.md#feed-expiry).
+
+## Addresses the transport can't carry
+
+Some syntactically valid recipient addresses cannot be carried by the transport as
+written and are now refused before a send is even attempted, rather than being
+silently accepted and attempted as they used to be. This affects an address on a
+domain with no dot (`user@localhost`) and a bracketed IP literal
+(`user@[192.168.1.1]`) — both parse as valid addresses, but the transport cannot
+route either one as written. Use a domain with at least one dot, or accept that a
+user at such an address won't receive mail from this system; the link is still
+shown on screen either way.
+
+## When a mail server misbehaves
+
+At most 32 email sends are in flight at once. If a peer mail server accepts the
+connection and then goes quiet — wedged, slow, or otherwise unresponsive — the
+slot it holds stays occupied until that conversation ends. Once all 32 slots are
+occupied, a new send fails immediately with a loud `ERROR`-level log rather than
+queuing or blocking behind the stuck ones.
+
+A send this system reports as failed because its deadline passed can still
+complete afterward and deliver the message — including a single-use registration
+link — even though the caller was already told it failed. Re-issuing the link
+does not revoke the one already sent.
 
 ## Changing an Account's Email Address
 

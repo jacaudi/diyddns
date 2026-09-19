@@ -29,7 +29,7 @@ var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, 
 // adminDeliveryTimeout bounds an admin-initiated send as seen by this
 // service: internal/email returns at this deadline whatever the SMTP peer is
 // doing. It sits BELOW server.go's shutdownTimeout
-// (15s, server.go:29) so a send that begins just before SIGTERM cannot consume
+// (15s, server.go:41) so a send that begins just before SIGTERM cannot consume
 // the entire graceful-shutdown budget and turn a clean stop into
 // "shutdown: context deadline exceeded".
 const adminDeliveryTimeout = 12 * time.Second

@@ -10,7 +10,7 @@ import (
 
 // deliveryTimeout bounds ONE delivery made during a sweep tick -- one owner
 // notice, or one admin's copy of the digest -- as seen by this dispatcher:
-// Mailer.Send returns at the deadline its context carries, and only then.
+// Mailer.Send returns no later than the deadline its context carries.
 //
 // Without it, the context reaching Mailer.Send is the bare ctx runPruner
 // passes all the way down from Server.Run, which carries no deadline until

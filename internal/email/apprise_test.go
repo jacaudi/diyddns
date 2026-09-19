@@ -360,6 +360,11 @@ func TestMailer_TargetURL(t *testing.T) {
 			q := u.Query()
 			for key, want := range map[string]string{
 				"mode": tt.wantMode, "format": "text", "from": "noreply@example.test", "to": "user+tag@example.test",
+				// verify is never set by targetURL, so its absence means "verify,
+				// the library's default" -- the opposite of verify=no, which would
+				// disable TLS certificate verification. Asserted so a future
+				// regression that starts emitting verify=no is caught here.
+				"verify": "",
 			} {
 				if got := q.Get(key); got != want {
 					t.Errorf("query %s = %q, want %q", key, got, want)

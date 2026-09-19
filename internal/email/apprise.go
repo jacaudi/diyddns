@@ -151,9 +151,8 @@ func (m *appriseMailer) Send(ctx context.Context, to, subject, body string) erro
 			// into.
 			//
 			// The message text below ("...gave up on it") is not literally
-			// true in that duplicate case -- the caller's own re-check
-			// already recovered the real result, so it gave up waiting, then
-			// recovered the real result from the re-check. Left unchanged:
+			// true in that duplicate case -- the caller gave up waiting, then
+			// recovered the real result from its own re-check. Left unchanged:
 			// it is accurate in the overwhelming majority of cases (the case
 			// this line exists for), every test asserting this substring
 			// would need updating for no clarity gain, and a duplicate log
