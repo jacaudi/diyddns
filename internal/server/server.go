@@ -202,11 +202,11 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 	// notifyAPISvc is nil unless notifications.enabled, so api.Build's own
 	// nil-tolerant gate (#152, mirrors Passkey/Grants) keeps the REST
-	// endpoint/delivery ops off the mux exactly when webui.New's own route
-	// table (webui.go:117-126) leaves the HTML routes off it too.
-	// notifySvc itself stays unconditional above: webDeps.Notify below needs
-	// it regardless, matching webui's own always-construct/gate-at-registration
-	// pattern.
+	// endpoint/delivery ops off the mux exactly when the `if
+	// deps.Cfg.Notifications.Enabled` block in webui.New leaves the HTML
+	// routes off it too. notifySvc itself stays unconditional above:
+	// webDeps.Notify below needs it regardless, matching webui's own
+	// always-construct/gate-at-registration pattern.
 	var notifyAPISvc *service.NotificationService
 	if cfg.Notifications.Enabled {
 		notifyAPISvc = notifySvc

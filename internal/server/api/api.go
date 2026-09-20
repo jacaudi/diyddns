@@ -80,8 +80,8 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	}
 	// deps.Notify is nil whenever notifications.enabled is false (#152) —
 	// same nil-tolerant gate as Passkey/Grants above, so a disabled feature
-	// has no REST surface at all, matching webui.go's own conditional route
-	// table instead of merely 403/404ing per request.
+	// has no REST surface at all, matching the `if deps.Cfg.Notifications.Enabled`
+	// block in webui.New instead of merely 403/404ing per request.
 	if deps.Notify != nil {
 		registerNotificationOps(apiAPI, deps)
 	}

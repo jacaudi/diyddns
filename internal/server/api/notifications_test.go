@@ -89,11 +89,10 @@ func seedNotificationDelivery(t *testing.T, st *store.Store, endpointID, status 
 // ---------- conditional registration (#152) ----------
 
 // TestNotificationRoutes_AbsentWhenDisabled proves the whole feature is
-// absent — not just guarded — when notifications are off, mirroring
-// webui.go's own conditional route table (webui.go:117-126): the harness's
-// default ServerDeps carries a nil Notify, so api.Build must not register
-// any of the seven operations, and the admin gate never even gets a chance
-// to run.
+// absent — not just guarded — when notifications are off, mirroring the `if
+// deps.Cfg.Notifications.Enabled` block in webui.New: the harness's default
+// ServerDeps carries a nil Notify, so api.Build must not register any of the
+// seven operations, and the admin gate never even gets a chance to run.
 func TestNotificationRoutes_AbsentWhenDisabled(t *testing.T) {
 	h := newFullHarness(t)
 	seedUser(t, h.st, "admin-notif-off@example.com", "admin")
@@ -260,7 +259,15 @@ func TestPatchEndpoint_TogglesEnabled(t *testing.T) {
 	adminCookie, csrf := sessionFor(t, h, "admin-patch@example.com")
 	ep := seedNotificationEndpoint(t, h.st, "hook", "https://example.com/hook", true)
 
+	// No CSRF -> 403.
 	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID, map[string]any{
+		"enabled": false,
+	}, adminCookie, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("no csrf: status = %d, want 403, body=%s", status, body)
+	}
+
+	status, _, body = doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID, map[string]any{
 		"enabled": false,
 	}, adminCookie, csrf)
 	if status != http.StatusOK {
@@ -285,6 +292,39 @@ func TestPatchEndpoint_TogglesEnabled(t *testing.T) {
 	}
 }
 
+// TestPatchEndpoint_RejectsExtraFields pins patchEndpointInput's body as
+// enabled-only: label and url are documented as immutable after creation
+// (notifications.go's patchEndpointInput doc), enforced today only by huma's
+// AllowAdditionalPropertiesByDefault=false default rejecting unknown body
+// fields with 422 — not by any check this package writes itself. If that
+// huma default ever changed, PATCH would silently start accepting (and
+// presumably ignoring, since patchEndpointInput has no Label/URL fields to
+// bind them into) label/url edits with no test failure to catch it. This
+// pins the 422 AND that the stored values are actually untouched.
+func TestPatchEndpoint_RejectsExtraFields(t *testing.T) {
+	h := newNotificationHarness(t)
+	seedUser(t, h.st, "admin-patch-extra@example.com", "admin")
+	adminCookie, csrf := sessionFor(t, h, "admin-patch-extra@example.com")
+	ep := seedNotificationEndpoint(t, h.st, "hook", "https://example.com/hook", true)
+
+	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID, map[string]any{
+		"enabled": false,
+		"label":   "sneaky-rename",
+		"url":     "https://evil.example.com/hook",
+	}, adminCookie, csrf)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", status, body)
+	}
+
+	stored, err := h.st.NotificationEndpoints().Get(t.Context(), ep.ID)
+	if err != nil {
+		t.Fatalf("Get after rejected patch: %v", err)
+	}
+	if stored.Label != "hook" || stored.URL != "https://example.com/hook" || !stored.Enabled {
+		t.Fatalf("stored = %+v, want unchanged (label=hook url=https://example.com/hook enabled=true)", stored)
+	}
+}
+
 // ---------- DELETE /api/v1/admin/endpoints/{id} ----------
 
 func TestDeleteEndpoint_Returns204AndRemoves(t *testing.T) {
@@ -293,7 +333,13 @@ func TestDeleteEndpoint_Returns204AndRemoves(t *testing.T) {
 	adminCookie, csrf := sessionFor(t, h, "admin-del@example.com")
 	ep := seedNotificationEndpoint(t, h.st, "hook", "https://example.com/hook", true)
 
-	status, _, body := doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID, nil, adminCookie, csrf)
+	// No CSRF -> 403.
+	status, _, body := doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID, nil, adminCookie, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("no csrf: status = %d, want 403, body=%s", status, body)
+	}
+
+	status, _, body = doJSON(t, http.MethodDelete, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID, nil, adminCookie, csrf)
 	if status != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204, body=%s", status, body)
 	}
@@ -311,7 +357,13 @@ func TestTestEndpoint_SendsAndRefusesWhenDisabled(t *testing.T) {
 	enabledEP := seedNotificationEndpoint(t, h.st, "enabled-hook", "https://example.com/enabled", true)
 	disabledEP := seedNotificationEndpoint(t, h.st, "disabled-hook", "https://example.com/disabled", false)
 
-	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/endpoints/"+enabledEP.ID+"/test", nil, adminCookie, csrf)
+	// No CSRF -> 403.
+	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/endpoints/"+enabledEP.ID+"/test", nil, adminCookie, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("no csrf: status = %d, want 403, body=%s", status, body)
+	}
+
+	status, _, body = doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/endpoints/"+enabledEP.ID+"/test", nil, adminCookie, csrf)
 	if status != http.StatusOK {
 		t.Fatalf("enabled endpoint: status = %d, want 200, body=%s", status, body)
 	}
@@ -334,6 +386,37 @@ func TestTestEndpoint_SendsAndRefusesWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestTestEndpoint_DeletedEndpointReturns404NotConflict pins the
+// Test-before-Get ordering: notifications.go's POST .../test handler must
+// not conclude "disabled" (409) for an endpoint that no longer exists at
+// all. A deleted endpoint's id reaches this handler exactly like a
+// never-existed one — deps.Notify.Test's atomic INSERT refuses identically
+// for both (store.NotificationDeliveryRepo.InsertUserTest's doc: "the
+// endpoint does not exist or is disabled") — so this and the
+// "does-not-exist" case above exercise the same refused-because-gone path
+// the handler must classify as 404. The genuine mid-request race this fix
+// targets (a concurrent delete landing between the handler's own Test call
+// and its classifying Get) is not independently reproducible here without a
+// flaky timing-dependent test or a test-only instrumentation seam in
+// production code; this test instead pins the observable outcome the fix
+// guarantees for every "gone" endpoint, deleted-before-request or
+// deleted-mid-request alike.
+func TestTestEndpoint_DeletedEndpointReturns404NotConflict(t *testing.T) {
+	h := newNotificationHarness(t)
+	seedUser(t, h.st, "admin-test-deleted@example.com", "admin")
+	adminCookie, csrf := sessionFor(t, h, "admin-test-deleted@example.com")
+	ep := seedNotificationEndpoint(t, h.st, "hook", "https://example.com/hook", true)
+
+	if err := h.st.NotificationEndpoints().Delete(t.Context(), ep.ID); err != nil {
+		t.Fatalf("delete endpoint: %v", err)
+	}
+
+	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/admin/endpoints/"+ep.ID+"/test", nil, adminCookie, csrf)
+	if status != http.StatusNotFound {
+		t.Fatalf("deleted endpoint: status = %d, want 404 (not 409 — the endpoint is gone, not disabled), body=%s", status, body)
+	}
+}
+
 // ---------- POST /api/v1/admin/deliveries/{id}/redeliver ----------
 
 func TestRedeliverDelivery_SuccessAndRefusalCases(t *testing.T) {
@@ -344,7 +427,14 @@ func TestRedeliverDelivery_SuccessAndRefusalCases(t *testing.T) {
 	terminal := seedNotificationDelivery(t, h.st, ep.ID, store.DeliveryFailed)
 	pending := seedNotificationDelivery(t, h.st, ep.ID, store.DeliveryPending)
 
+	// No CSRF -> 403.
 	status, _, body := doJSON(t, http.MethodPost,
+		h.srv.URL+"/api/v1/admin/deliveries/"+idStr(terminal.ID)+"/redeliver", nil, adminCookie, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("no csrf: status = %d, want 403, body=%s", status, body)
+	}
+
+	status, _, body = doJSON(t, http.MethodPost,
 		h.srv.URL+"/api/v1/admin/deliveries/"+idStr(terminal.ID)+"/redeliver", nil, adminCookie, csrf)
 	if status != http.StatusOK {
 		t.Fatalf("terminal delivery: status = %d, want 200, body=%s", status, body)
@@ -369,6 +459,23 @@ func TestRedeliverDelivery_SuccessAndRefusalCases(t *testing.T) {
 		h.srv.URL+"/api/v1/admin/deliveries/99999/redeliver", nil, adminCookie, csrf)
 	if status != http.StatusNotFound {
 		t.Fatalf("missing delivery: status = %d, want 404, body=%s", status, body)
+	}
+}
+
+// TestRedeliverDelivery_MalformedIDReturns422 pins redeliverInput's
+// documented divergence from webui's handleDeliveryRedeliver (notifications.go's
+// redeliverInput doc): an id that doesn't parse as an int64 fails huma's own
+// path-parameter binding with 422 before this operation's function ever
+// runs, rather than the 404 a hand-parsed id would produce.
+func TestRedeliverDelivery_MalformedIDReturns422(t *testing.T) {
+	h := newNotificationHarness(t)
+	seedUser(t, h.st, "admin-redeliver-badid@example.com", "admin")
+	adminCookie, csrf := sessionFor(t, h, "admin-redeliver-badid@example.com")
+
+	status, _, body := doJSON(t, http.MethodPost,
+		h.srv.URL+"/api/v1/admin/deliveries/not-an-integer/redeliver", nil, adminCookie, csrf)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("malformed id: status = %d, want 422, body=%s", status, body)
 	}
 }
 

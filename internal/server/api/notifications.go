@@ -54,8 +54,12 @@ type createEndpointResponse struct {
 }
 type createEndpointOutput struct{ Body createEndpointResponse }
 
-// getEndpointInput carries the {id} path parameter shared by GET, PATCH's
-// response shape, DELETE, and POST .../test.
+// getEndpointInput carries the {id} path parameter shared by GET and POST
+// .../test — the two operations whose input is nothing but an endpoint id.
+// PATCH and DELETE each have their own distinct {id}-only input type
+// (patchEndpointInput, deleteEndpointInput) rather than reusing this one, so
+// each op's input shape stays free to diverge; PATCH's RESPONSE shape
+// (getEndpointOutput, not this type) is what it shares with GET.
 type getEndpointInput struct {
 	ID string `path:"id"`
 }
@@ -107,28 +111,14 @@ type redeliverOutput struct{}
 // registerNotificationOps registers the outbound-webhook admin operations
 // (#152): notification-endpoint list/create/get/enable-disable/delete, a
 // one-off test delivery, and delivery redeliver. Every op is session + admin
-// gated; mutations additionally require CSRF — the same adminRead/adminWrite
-// convention registerAdminOps uses. Callers register this group only when
-// deps.Notify is non-nil (see Build).
+// gated via adminReadMW/adminWriteMW (authmw.go) — the same helpers
+// registerAdminOps uses. Callers register this group only when deps.Notify is
+// non-nil (see Build).
 func registerNotificationOps(a huma.API, deps ServerDeps) {
-	adminRead := func() huma.Middlewares {
-		return huma.Middlewares{
-			sessionMW(a, deps),
-			adminMW(a, deps),
-		}
-	}
-	adminWrite := func() huma.Middlewares {
-		return huma.Middlewares{
-			sessionMW(a, deps),
-			adminMW(a, deps),
-			csrfMW(a, deps),
-		}
-	}
-
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/admin/endpoints",
-		Middlewares: adminRead(),
+		Middlewares: adminReadMW(a, deps),
 		Summary:     "List notification endpoints",
 		Description: "Lists every admin-configured outbound webhook endpoint (#106). Endpoints are server-global, not per-user.",
 	}, func(ctx context.Context, _ *struct{}) (*listEndpointsOutput, error) {
@@ -147,7 +137,7 @@ func registerNotificationOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/admin/endpoints",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   adminWrite(),
+		Middlewares:   adminWriteMW(a, deps),
 		Summary:       "Create a notification endpoint",
 		Description:   "Creates a new outbound webhook endpoint and mints its signing secret. The secret is shown exactly once in this response and cannot be retrieved again.",
 	}, func(ctx context.Context, in *createEndpointInput) (*createEndpointOutput, error) {
@@ -168,7 +158,7 @@ func registerNotificationOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/admin/endpoints/{id}",
-		Middlewares: adminRead(),
+		Middlewares: adminReadMW(a, deps),
 		Summary:     "Get a notification endpoint",
 	}, func(ctx context.Context, in *getEndpointInput) (*getEndpointOutput, error) {
 		ep, err := deps.Notify.Get(ctx, in.ID)
@@ -181,7 +171,7 @@ func registerNotificationOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodPatch,
 		Path:        "/api/v1/admin/endpoints/{id}",
-		Middlewares: adminWrite(),
+		Middlewares: adminWriteMW(a, deps),
 		Summary:     "Enable or disable a notification endpoint",
 		Description: "Toggles whether the endpoint receives outbound deliveries. Label and URL are immutable after creation and are not settable here.",
 	}, func(ctx context.Context, in *patchEndpointInput) (*getEndpointOutput, error) {
@@ -202,9 +192,9 @@ func registerNotificationOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodDelete,
 		Path:          "/api/v1/admin/endpoints/{id}",
 		DefaultStatus: http.StatusNoContent,
-		Middlewares:   adminWrite(),
+		Middlewares:   adminWriteMW(a, deps),
 		Summary:       "Delete a notification endpoint",
-		Description:   "Deletes the endpoint; its delivery history cascades per the schema foreign key.",
+		Description:   "Deletes the endpoint and also removes its delivery history.",
 	}, func(ctx context.Context, in *deleteEndpointInput) (*deleteEndpointOutput, error) {
 		actor := UserFrom(ctx)
 		if err := deps.Notify.Delete(ctx, actor.ID, in.ID); err != nil {
@@ -217,25 +207,32 @@ func registerNotificationOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/admin/endpoints/{id}/test",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   adminWrite(),
+		Middlewares:   adminWriteMW(a, deps),
 		Summary:       "Send a test delivery",
 		Description:   "Enqueues one on-demand endpoint.test delivery attempt against the endpoint. Fails with 409 when the endpoint is disabled.",
 	}, func(ctx context.Context, in *getEndpointInput) (*testEndpointOutput, error) {
 		actor := UserFrom(ctx)
-		if _, err := deps.Notify.Get(ctx, in.ID); err != nil {
-			return nil, notifyErr(ctx, deps, "send notification test", err)
-		}
 		sent, err := deps.Notify.Test(ctx, actor.ID, in.ID)
 		if err != nil {
 			return nil, notifyErr(ctx, deps, "send notification test", err)
 		}
 		if !sent {
-			// The Get above already ruled out "does not exist"; the only
-			// refusal Test's atomic INSERT can still report is "disabled" —
-			// the same one-refusal collapse webui/endpoints.go's
-			// endpointActionRefusedMessage documents, narrowed to the one
-			// remaining cause because this surface already confirmed
-			// existence.
+			// Test's atomic INSERT refuses for one of two reasons, collapsed
+			// into a single false — the same one-refusal collapse
+			// webui/endpoints.go's endpointActionRefusedMessage documents:
+			// the endpoint does not exist, or it exists but is disabled
+			// (store.NotificationDeliveryRepo.InsertUserTest's doc). A
+			// follow-up Get classifies WHICH one only now, after the
+			// refusal — never before it: calling Get first (and trusting it)
+			// would let the endpoint be deleted in the gap between that Get
+			// and this Test, misreporting a gone endpoint as merely
+			// "disabled" (409) instead of 404. Classifying after Test
+			// instead reads the endpoint's state no earlier than Test's own
+			// atomic check did, so the two calls can never disagree about
+			// whether the endpoint still exists.
+			if _, err := deps.Notify.Get(ctx, in.ID); err != nil {
+				return nil, notifyErr(ctx, deps, "send notification test", err)
+			}
 			return nil, huma.Error409Conflict("notification endpoint is disabled")
 		}
 		return &testEndpointOutput{}, nil
@@ -245,7 +242,7 @@ func registerNotificationOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/admin/deliveries/{id}/redeliver",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   adminWrite(),
+		Middlewares:   adminWriteMW(a, deps),
 		Summary:       "Redeliver a notification delivery",
 		Description:   "Re-arms a terminal (failed or delivered) delivery as a new attempt, preserving the original row's history.",
 	}, func(ctx context.Context, in *redeliverInput) (*redeliverOutput, error) {

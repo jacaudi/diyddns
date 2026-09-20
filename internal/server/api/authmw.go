@@ -75,6 +75,28 @@ func adminMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context))
 	return adminMiddleware(a, deps.Log)
 }
 
+// adminReadMW is the middleware chain for an admin-role read: session +
+// admin. Shared by registerAdminOps and registerNotificationOps — both
+// defined this exact chain as a local closure before it was hoisted here
+// (the same "argument list repeated verbatim across register*Ops functions"
+// hmacMW/sessionMW/csrfMW/adminMW above already exist to avoid).
+func adminReadMW(a huma.API, deps ServerDeps) huma.Middlewares {
+	return huma.Middlewares{
+		sessionMW(a, deps),
+		adminMW(a, deps),
+	}
+}
+
+// adminWriteMW is the middleware chain for an admin-role mutation: session +
+// admin + CSRF. See adminReadMW.
+func adminWriteMW(a huma.API, deps ServerDeps) huma.Middlewares {
+	return huma.Middlewares{
+		sessionMW(a, deps),
+		adminMW(a, deps),
+		csrfMW(a, deps),
+	}
+}
+
 // hmacMiddleware verifies the HMAC request-signing envelope for agent
 // operations. It bounds the body read to maxBody (pre-auth DoS defense),
 // restores the body afterward so huma's own input binding can still parse it,
