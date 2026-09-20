@@ -28,6 +28,12 @@
                   with Copy pinned to the trailing edge -- every pill on a
                   screen the same object. In a table cell it stays an inline
                   pill. Never size one by hand.
+   code (bare)    A short literal embedded in running text or a label -- a
+                  device/endpoint name in a delete/rotate confirm sentence, a
+                  file path, a config key. Styled by the bare `code {}` rule
+                  below, no wrapper needed. NOT for a value the reader is
+                  expected to copy -- that's .copy, whose own button is the
+                  thing that tells them copying is the point.
    .btn-row       A form's actions, directly after the last .field; it takes
                   24px from that field (.field + .btn-row). A lone .btn after
                   a .field takes 16px. Never pad the field to make the gap.
@@ -185,6 +191,39 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+/* A bare <code> — a device or endpoint name in a delete/rotate confirm
+   label, a file path, a raw value in running text — rendered as plain text
+   with no box: no rule in this file touched a bare code element, only the
+   code INSIDE a .copy pill (below), whose OWN background/border/padding
+   supplied the box. Giving a bare one the same subtle tint and radius marks
+   it as literal, exact text the same way .copy already does.
+
+   font-family is the one property here with a side effect beyond this rule:
+   before it existed, code inside a .copy pill fell through to the browser's
+   default monospace. .copy code (below) resets background/border/padding/
+   radius but not font-family, so every existing .copy pill now renders in
+   --mono too. Intentional (a designed stack beats the UA default) and worth
+   naming so it doesn't read as a missed reset.
+
+   overflow-wrap/box-decoration-break: these values are operator- or
+   user-supplied (device labels, emails) with no length cap enforced above
+   this layer, so they can run past the confirm dialog's width. Same problem
+   and same fix as .kv > dd below: `anywhere` gives the box a break
+   opportunity so it shrinks instead of overflowing its container. `clone`
+   (not the `slice` default) keeps a wrapped chip's left/right edges on every
+   line fragment instead of only the chip's overall first/last edge. Safari
+   only implements the -webkit- prefixed property, so both are set. */
+code {
+  font-family: var(--mono);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 .wrap {
   max-width: 420px;
   margin: 0 auto;
@@ -246,6 +285,14 @@ a:hover { text-decoration: underline; }
 .card h2 { font-size: var(--type-5); margin: 0 0 var(--space-4); }
 
 .muted { color: var(--text-muted); font-size: var(--type-2); }
+/* A boxed <code class="muted"> (mutedCodeOrDash) sits next to a boxed plain
+   <code> (codeOrDash) in the same table row -- device-history's IPv4/IPv6
+   columns, devices/admin-devices -- and every use of the pattern is inside
+   table.grid-table (--type-3). .muted's own font-size would shrink only the
+   muted one to --type-2, which reads as a size mismatch now that both are
+   chips, not just a color difference. Keep the color distinction, match the
+   table's own size for the other. */
+.muted code { font-size: var(--type-3); }
 .center { text-align: center; }
 
 .field { margin-bottom: var(--space-4); }
@@ -643,7 +690,13 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); max-width: 100%;
 }
-.copy code { color: var(--text); overflow: auto; white-space: nowrap; }
+/* .copy already boxes its own code in the pill shell above (background,
+   border, padding, radius) -- the bare `code` rule near the top of this
+   file would box it a second time, one chip inside another. */
+.copy code {
+  color: var(--text); overflow: auto; white-space: nowrap;
+  background: none; border: none; padding: 0; border-radius: 0;
+}
 /* A copy pill that spans a full-width row (a .kv value, a field, a callout,
    a disclosure) has room to grow downward, so its code wraps instead of
    scrolling sideways. A pill sitting inline in running content (a table
@@ -761,6 +814,15 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 .callout:last-child { margin-bottom: 0; }
 .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
 .callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
+/* A bare <code>'s fixed --surface-2 fill (neutral gray) sits on .warn's warm
+   tint or .info's blue tint and reads as a mismatched patch, not a chip --
+   different from a plain .callout, where --surface-2 matches the callout's
+   own background and the chip is legitimately border-only (a known, accepted
+   look, not this problem). Drop the fill here and keep the border, now in
+   --border-strong so it still reads against the tint; cheaper than computing
+   a tint-matched fill for two banner colors. */
+.callout.warn code,
+.callout.info code { background: none; border-color: var(--border-strong); }
 .callout strong { display: block; margin-bottom: var(--space-1); }
 /* Body rhythm on the spacing scale. Without these the UA's 1em paragraph
    margins apply, so gaps land off-scale and the last paragraph's margin does
