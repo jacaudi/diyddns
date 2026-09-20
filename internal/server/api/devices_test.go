@@ -16,6 +16,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/oidc"
 	"github.com/jacaudi/diyddns/internal/server/api"
+	"github.com/jacaudi/diyddns/internal/server/feed"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -100,6 +101,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log)
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
 	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
+	feedSvc := service.NewFeedService(st, feed.New(), discardAgentAudit{})
 
 	return st, api.ServerDeps{
 		Log:       log,
@@ -118,6 +120,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Cfg:       cfg,
 		Info:      version.Info{Version: "v1.2.3"},
 		HMACKey:   key,
+		Feed:      feedSvc,
 	}
 }
 

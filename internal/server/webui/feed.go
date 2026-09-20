@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -74,7 +75,10 @@ func (h *handler) handleAdminFeed(w http.ResponseWriter, r *http.Request, usr st
 }
 
 // handleFeedTokenMint mints a token and reveals it in this response — never a
-// redirect, since the plaintext is shown exactly once.
+// redirect, since the plaintext is shown exactly once. Label validation
+// (non-empty after trim) lives in service.FeedService.MintToken, not here —
+// ErrInvalidLabel and store.ErrConflict are the only two mint failures this
+// handler renders as a field error rather than a 500.
 func (h *handler) handleFeedTokenMint(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 	label := strings.TrimSpace(r.PostFormValue("label"))
 	data, err := h.newAdminFeedData(r, usr, sess)
@@ -83,21 +87,22 @@ func (h *handler) handleFeedTokenMint(w http.ResponseWriter, r *http.Request, us
 		return
 	}
 	data.Label = label
-	if label == "" {
-		data.FieldErr = "Give the token a label."
-		h.renderStatus(w, r, http.StatusUnprocessableEntity, "admin-feed", data)
-		return
-	}
 
 	tok, plaintext, err := h.deps.Feed.MintToken(r.Context(), usr.ID, label)
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
+		switch {
+		case errors.Is(err, service.ErrInvalidLabel):
+			data.FieldErr = "Give the token a label."
+			h.renderStatus(w, r, http.StatusUnprocessableEntity, "admin-feed", data)
+			return
+		case errors.Is(err, store.ErrConflict):
 			data.FieldErr = "A token with that label already exists."
 			h.renderStatus(w, r, http.StatusUnprocessableEntity, "admin-feed", data)
 			return
+		default:
+			h.logAndFail(w, r, usr, "mint feed token", err)
+			return
 		}
-		h.logAndFail(w, r, usr, "mint feed token", err)
-		return
 	}
 
 	refreshed, err := h.newAdminFeedData(r, usr, sess)

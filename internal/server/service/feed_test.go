@@ -200,6 +200,50 @@ func TestFeedService_MintAuthenticateRevoke(t *testing.T) {
 	}
 }
 
+// TestFeedService_MintToken_RejectsEmptyLabel proves MintToken rejects a
+// blank label (and a whitespace-only one, which is blank after trimming) with
+// ErrInvalidLabel rather than minting an unlabeled row -- the DB schema's
+// NOT NULL UNIQUE constraint on label accepts "" just fine, so this guard
+// must live in the service, not the schema.
+func TestFeedService_MintToken_RejectsEmptyLabel(t *testing.T) {
+	st := openTestStore(t)
+	admin := seedUser(t, st, "admin@x", "admin")
+	svc := NewFeedService(st, &recordingCloser{}, discardAudit{})
+	ctx := t.Context()
+
+	for _, label := range []string{"", "   "} {
+		if _, _, err := svc.MintToken(ctx, admin.ID, label); !errors.Is(err, ErrInvalidLabel) {
+			t.Errorf("MintToken(%q) err = %v, want ErrInvalidLabel", label, err)
+		}
+	}
+
+	toks, err := st.FeedTokens().List(ctx)
+	if err != nil {
+		t.Fatalf("FeedTokens().List: %v", err)
+	}
+	if len(toks) != 0 {
+		t.Errorf("FeedTokens().List = %+v, want no rows after two rejected mints", toks)
+	}
+}
+
+// TestFeedService_MintToken_TrimsLabel proves a label surrounded by
+// whitespace is stored trimmed, so "envoy" and " envoy " cannot become two
+// visually-identical but distinct tokens.
+func TestFeedService_MintToken_TrimsLabel(t *testing.T) {
+	st := openTestStore(t)
+	admin := seedUser(t, st, "admin@x", "admin")
+	svc := NewFeedService(st, &recordingCloser{}, discardAudit{})
+	ctx := t.Context()
+
+	tok, _, err := svc.MintToken(ctx, admin.ID, "  envoy  ")
+	if err != nil {
+		t.Fatalf("MintToken: %v", err)
+	}
+	if tok.Label != "envoy" {
+		t.Errorf("stored label = %q, want %q (trimmed)", tok.Label, "envoy")
+	}
+}
+
 // TestFeedService_LastUsedIsThrottled: Authenticate writes last_used_at at
 // most once per 60 s per token, so a 5-second poller does not turn every
 // read into a write on the single SQLite connection.

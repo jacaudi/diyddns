@@ -200,4 +200,29 @@ func TestFeedTokens_DuplicateLabelReRendersWithMessage(t *testing.T) {
 	if rec := postForm(t, h, cookie, "/admin/feed/tokens", url.Values{"csrf": {sess.CSRFToken}, "label": {""}}); rec.Code != http.StatusUnprocessableEntity {
 		t.Errorf("empty label = %d, want 422", rec.Code)
 	}
+	if rec := postForm(t, h, cookie, "/admin/feed/tokens", url.Values{"csrf": {sess.CSRFToken}, "label": {"   "}}); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("whitespace-only label = %d, want 422", rec.Code)
+	}
+}
+
+// TestFeedTokens_MintTrimsLabel proves a label surrounded by whitespace is
+// stored trimmed, matching service.FeedService.MintToken's contract -- the
+// webui pre-trims for its own re-render, but the stored row must agree.
+func TestFeedTokens_MintTrimsLabel(t *testing.T) {
+	deps, st := testDeps(t)
+	enableFeed(&deps)
+	h, _ := New(deps)
+	cookie, sess := adminSession(t, deps, st, "admin@example.com")
+
+	rec := postForm(t, h, cookie, "/admin/feed/tokens", url.Values{"csrf": {sess.CSRFToken}, "label": {"  envoy  "}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mint status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	toks, err := st.FeedTokens().List(t.Context())
+	if err != nil || len(toks) != 1 {
+		t.Fatalf("tokens = %v, %v; want one", toks, err)
+	}
+	if toks[0].Label != "envoy" {
+		t.Errorf("stored label = %q, want %q (trimmed)", toks[0].Label, "envoy")
+	}
 }

@@ -7,11 +7,11 @@ device addresses: a bearer-token REST snapshot to poll, and a WebSocket stream f
 It lists **every enabled device of every enabled user** that has an address.
 
 It is **enabled by default** — reading it still requires a token an admin mints at `/admin/feed`
-(below), so a fresh deployment discloses nothing until an admin acts.
+or via the REST API (below), so a fresh deployment discloses nothing until an admin acts.
 
 | Key | Env var | Notes |
 |---|---|---|
-| `feed.enabled` | `DIYDDNS_FEED_ENABLED` | `true` by default; when off, none of the routes below nor `/admin/feed` exists |
+| `feed.enabled` | `DIYDDNS_FEED_ENABLED` | `true` by default; when off, none of the routes below nor `/admin/feed` nor the REST endpoints exist |
 
 ## Tokens
 
@@ -19,6 +19,12 @@ An admin mints tokens at `/admin/feed`, one per consumer. The token is shown **o
 with `ddf_`, and is stored only as a hash. Revoke it from the same page: the row is deleted and
 any open stream authenticated with it is closed with code `4001`. Rotate by minting a new token,
 reconfiguring the consumer, then revoking the old one.
+
+The same management (mint, list, revoke) is also available over REST at
+`/api/v1/admin/feed/tokens` — session + admin gated, with mint and revoke additionally requiring
+a CSRF token, matching every other admin-write endpoint. This is a second interface onto the same
+`service.FeedService`, not a separate token store: a token minted from one surface is visible and
+revocable from the other.
 
 Present it on every request as `Authorization: Bearer ddf_…`. That is the **only** accepted form:
 there is no query-string or basic-auth variant (a fetcher that cannot set a header, such as

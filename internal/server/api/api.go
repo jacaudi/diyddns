@@ -44,6 +44,9 @@ type ServerDeps struct {
 	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
 	Cfg       config.Auth
 	Info      version.Info
+
+	Feed        *service.FeedService
+	FeedEnabled bool // mirrors cfg.Feed.Enabled; the feed-token REST ops are absent, not just guarded, when off — see Build (issue #153, mirrors webui.go's own feed.enabled gate)
 }
 
 // Build registers both huma APIs, their operations, and the health handlers
@@ -67,6 +70,12 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	// nil-tolerant pattern for their own passkey-dependent paths.
 	if deps.Passkey != nil && deps.Grants != nil {
 		registerPasskeyOps(apiAPI, deps)
+	}
+	// The feed-token management routes are absent, not just guarded, when the
+	// feed feature is off (design #106 §8.1's route-absence convention,
+	// mirrored from webui.go's own deps.Cfg.Feed.Enabled gate).
+	if deps.FeedEnabled {
+		registerFeedTokenOps(apiAPI, deps)
 	}
 
 	RegisterHealth(mux, deps.Log, deps.Store)

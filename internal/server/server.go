@@ -274,6 +274,9 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		HMACKey:   key,
 		Cfg:       cfg.Auth,
 		Info:      version.Current(),
+
+		Feed:        feedSvc,
+		FeedEnabled: cfg.Feed.Enabled,
 	}
 	api.Build(mux, apiDeps)
 
