@@ -415,7 +415,8 @@ func adminSetUserEmailHandler(deps ServerDeps) func(context.Context, *patchUserE
 	}
 }
 
-// adminErr maps an AdminService error to the right huma response.
+// adminErr maps an AdminService or EmailChangeService error to the right
+// huma response.
 func adminErr(ctx context.Context, deps ServerDeps, action string, err error) error {
 	switch {
 	case errors.Is(err, store.ErrNotFound):

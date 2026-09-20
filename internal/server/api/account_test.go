@@ -140,6 +140,40 @@ func TestAccountEmailRequest_ConflictingAddress(t *testing.T) {
 	}
 }
 
+func TestAccountEmailRequest_MailerFails(t *testing.T) {
+	h := newEmailChangeHarness(t, failingMailer{})
+	seedUser(t, h.st, "change-mailfail@example.com", "user")
+	cookie, csrf := sessionFor(t, h, "change-mailfail@example.com")
+
+	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/account/email", map[string]string{
+		"email": "new-mailfail@example.com",
+	}, cookie, csrf)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body=%s", status, body)
+	}
+
+	u, err := h.st.Users().GetByEmail(t.Context(), "change-mailfail@example.com")
+	if err != nil {
+		t.Fatalf("GetByEmail: %v", err)
+	}
+	if u.PendingEmail != "" {
+		t.Errorf("PendingEmail = %q, want rolled back to empty after a failed send (email_change.go:193-218)", u.PendingEmail)
+	}
+}
+
+func TestAccountEmailRequest_InvalidEmail(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "change-invalidaddr@example.com", "user")
+	cookie, csrf := sessionFor(t, h, "change-invalidaddr@example.com")
+
+	status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/account/email", map[string]string{
+		"email": "not-an-email",
+	}, cookie, csrf)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", status, body)
+	}
+}
+
 func TestAccountEmailRequest_Unauthenticated(t *testing.T) {
 	h := newFullHarness(t)
 
