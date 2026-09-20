@@ -39,45 +39,36 @@ func TestParseAddr(t *testing.T) {
 func TestDedupeAddrs(t *testing.T) {
 	tests := []struct {
 		name  string
-		pairs []AddrPair
+		addrs []netip.Addr
 		want  []string
 	}{
 		{
 			name:  "empty input yields empty output",
-			pairs: nil,
+			addrs: nil,
 			want:  nil,
 		},
 		{
 			name: "duplicate address across two devices collapses to one",
-			pairs: []AddrPair{
-				{IPv4: "203.0.113.9"},
-				{IPv4: "203.0.113.9"},
-			},
-			want: []string{"203.0.113.9"},
-		},
-		{
-			name: "invalid and absent addresses are dropped",
-			pairs: []AddrPair{
-				{IPv4: "", IPv6: ""},
-				{IPv4: "not-an-ip"},
-				{IPv4: "203.0.113.9"},
+			addrs: []netip.Addr{
+				netip.MustParseAddr("203.0.113.9"),
+				netip.MustParseAddr("203.0.113.9"),
 			},
 			want: []string{"203.0.113.9"},
 		},
 		{
 			name: "IPv4 sorts before IPv6, each numeric",
-			pairs: []AddrPair{
-				{IPv6: "2001:db8::2"},
-				{IPv4: "203.0.113.9"},
-				{IPv6: "2001:db8::1"},
-				{IPv4: "198.51.100.1"},
+			addrs: []netip.Addr{
+				netip.MustParseAddr("2001:db8::2"),
+				netip.MustParseAddr("203.0.113.9"),
+				netip.MustParseAddr("2001:db8::1"),
+				netip.MustParseAddr("198.51.100.1"),
 			},
 			want: []string{"198.51.100.1", "203.0.113.9", "2001:db8::1", "2001:db8::2"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DedupeAddrs(tt.pairs)
+			got := DedupeAddrs(tt.addrs)
 			if len(got) != len(tt.want) {
 				t.Fatalf("DedupeAddrs() = %v, want %v", got, tt.want)
 			}

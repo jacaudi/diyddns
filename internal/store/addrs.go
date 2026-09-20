@@ -5,16 +5,6 @@ import (
 	"slices"
 )
 
-// AddrPair is the raw IPv4/IPv6 address strings one device row carries -- ""
-// when a family has never been reported (the same NULL-as-empty-string
-// convention this package's scan helpers apply when reading these columns).
-// It is the minimal shape DedupeAddrs needs, so both FeedDevice and Device
-// rows can be adapted to it without either type depending on the other.
-type AddrPair struct {
-	IPv4 string
-	IPv6 string
-}
-
 // ParseAddr normalises a stored address: Unmap so a 4-in-6 form and the bare
 // form are one entry, WithZone("") so a zoned IPv6 can never render as an
 // invalid CIDR. ok is false for "" or an unparseable value.
@@ -29,24 +19,18 @@ func ParseAddr(s string) (netip.Addr, bool) {
 	return a.Unmap().WithZone(""), true
 }
 
-// DedupeAddrs collects every valid address across pairs into one sorted,
-// deduplicated set (IPv4 before IPv6, then numeric) -- the gateway feed's
-// dedup semantics (design #106), reused by any caller that needs the same
-// "unique currently-known address" set rather than a per-device listing
-// (#150). A corrupt or absent address is dropped, never an error: one bad
-// row must not fail the whole set.
-func DedupeAddrs(pairs []AddrPair) []netip.Addr {
-	addrs := make([]netip.Addr, 0, 2*len(pairs))
-	for _, p := range pairs {
-		if a, ok := ParseAddr(p.IPv4); ok {
-			addrs = append(addrs, a)
-		}
-		if a, ok := ParseAddr(p.IPv6); ok {
-			addrs = append(addrs, a)
-		}
-	}
-	slices.SortFunc(addrs, netip.Addr.Compare)
-	return slices.Compact(addrs)
+// DedupeAddrs collects addrs into one sorted, deduplicated set (IPv4 before
+// IPv6, then numeric) -- the gateway feed's dedup semantics (design #106),
+// reused by any caller that needs the same "unique currently-known address"
+// set rather than a per-device listing (#150). Callers parse each stored
+// address with ParseAddr themselves and pass only the valid ones -- a corrupt
+// or absent address is a caller's problem to drop, not this function's,
+// since callers already need ParseAddr's ok result for their own per-device
+// output (the feed's JSON device entries; see feed.Render).
+func DedupeAddrs(addrs []netip.Addr) []netip.Addr {
+	out := slices.Clone(addrs)
+	slices.SortFunc(out, netip.Addr.Compare)
+	return slices.Compact(out)
 }
 
 // CIDRString renders a deduplicated address as a single-address CIDR (/32 for

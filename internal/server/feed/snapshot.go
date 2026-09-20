@@ -70,15 +70,21 @@ func nullable(a netip.Addr, ok bool) *string {
 // rather than failing the whole feed: a 500 would make a consumer keep a
 // stale list for one bad row. The dedup itself (sorted, IPv4 before IPv6,
 // two devices behind one NAT sharing an address) is store.DedupeAddrs -- the
-// same core the admin IP-list endpoint uses over every device rather than
-// just the feed's membership-scoped subset (#150).
+// same core the admin IP-list endpoint uses over the SAME feed-membership
+// query (store.ListFeed), so the two audiences squash and scope addresses
+// identically (#150).
 func Render(devices []store.FeedDevice) (Snapshot, error) {
-	pairs := make([]store.AddrPair, len(devices))
+	rawAddrs := make([]netip.Addr, 0, 2*len(devices))
 	jdevs := make([]jsonDevice, 0, len(devices))
-	for i, d := range devices {
-		pairs[i] = store.AddrPair{IPv4: d.IPv4, IPv6: d.IPv6}
+	for _, d := range devices {
 		v4, ok4 := store.ParseAddr(d.IPv4)
 		v6, ok6 := store.ParseAddr(d.IPv6)
+		if ok4 {
+			rawAddrs = append(rawAddrs, v4)
+		}
+		if ok6 {
+			rawAddrs = append(rawAddrs, v6)
+		}
 		var seen *string
 		if d.LastSeenAt != 0 {
 			s := time.Unix(d.LastSeenAt, 0).UTC().Format(time.RFC3339)
@@ -90,7 +96,7 @@ func Render(devices []store.FeedDevice) (Snapshot, error) {
 			LastSeenAt: seen,
 		})
 	}
-	addrs := store.DedupeAddrs(pairs)
+	addrs := store.DedupeAddrs(rawAddrs)
 
 	cidrs := make([]string, 0, len(addrs))
 	var text bytes.Buffer
