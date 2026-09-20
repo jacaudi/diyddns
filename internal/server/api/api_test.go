@@ -73,8 +73,8 @@ func TestCapabilities_Response(t *testing.T) {
 
 func TestOpenAPIDocs_TwoSeparateDocuments(t *testing.T) {
 	srv := newAPIServer(t)
-	agentDoc := getBody(t, srv.URL+"/agent/openapi.json")
-	apiDoc := getBody(t, srv.URL+"/api/openapi.json")
+	agentDoc := getBody(t, srv.URL+"/agent/v1/openapi.json")
+	apiDoc := getBody(t, srv.URL+"/api/v1/openapi.json")
 
 	// Structural check: both documents decode as JSON objects with the
 	// required OpenAPI 3.1 top-level fields, using only encoding/json (no new
@@ -118,10 +118,32 @@ func assertOpenAPIShape(t *testing.T, label, doc string) {
 
 func TestScalarDocs_BothGroups(t *testing.T) {
 	srv := newAPIServer(t)
-	for _, path := range []string{"/agent/docs", "/api/docs"} {
+	for _, path := range []string{"/agent/v1/docs", "/api/v1/docs"} {
 		body := getBody(t, srv.URL+path)
 		if !strings.Contains(strings.ToLower(body), "scalar") {
 			t.Errorf("%s did not render Scalar docs", path)
+		}
+	}
+}
+
+// TestMetaPaths_OldUnversionedGone pins issue #148: the OpenAPI, docs, and
+// schemas meta paths must carry the same /v1 segment as every real operation.
+// The pre-fix unversioned paths (/agent/openapi.json, /api/docs, etc.) must
+// no longer resolve to anything.
+func TestMetaPaths_OldUnversionedGone(t *testing.T) {
+	srv := newAPIServer(t)
+	for _, path := range []string{
+		"/agent/openapi.json", "/api/openapi.json",
+		"/agent/docs", "/api/docs",
+		"/agent/schemas/foo.json", "/api/schemas/foo.json",
+	} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s status = %d, want 404 (unversioned meta path must be gone)", path, resp.StatusCode)
 		}
 	}
 }
