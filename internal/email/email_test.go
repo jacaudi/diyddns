@@ -791,3 +791,53 @@ func TestEmailChangedBodies_DifferInWhoMadeTheChange(t *testing.T) {
 		t.Errorf("admin body = %q, want to say an administrator made the change and NOT the self-service line", adminBody)
 	}
 }
+
+// TestDeviceStateChangedByAdminBody: the subject is FIXED and never embeds
+// the label (checkSendable rejects CR/LF and non-ASCII in a Subject header);
+// the body carries the folded label and the device id (always ASCII, a
+// UUIDv7) so the owner can identify the device even when the label folds
+// badly (#132 design §7).
+func TestDeviceStateChangedByAdminBody(t *testing.T) {
+	const id = "0192b7c0-0000-7000-8000-000000000001"
+	const hostile = "Büro-Pi\r\nBcc: attacker@example.test"
+
+	subject, body := email.DeviceStateChangedByAdminBody(hostile, id, true)
+	if subject != "An administrator disabled one of your DIYDDNS devices" {
+		t.Errorf("disabled subject = %q", subject)
+	}
+	if strings.Contains(subject, "Pi") {
+		t.Error("the subject embeds the label; it must be the fixed string")
+	}
+	if !email.IsASCII(subject) || strings.ContainsAny(subject, "\r\n") {
+		t.Errorf("subject is not sendable: %q", subject)
+	}
+	if !email.IsASCII(body) {
+		t.Errorf("body is not 7-bit ASCII:\n%s", body)
+	}
+	if !strings.Contains(body, "B?ro-Pi??Bcc: attacker@example.test") {
+		t.Errorf("body does not carry the folded label:\n%s", body)
+	}
+	if !strings.Contains(body, id) {
+		t.Errorf("body does not carry the device id:\n%s", body)
+	}
+	if !strings.HasSuffix(body, "\r\n") {
+		t.Errorf("body does not end with CRLF like every other template:\n%q", body)
+	}
+	if !strings.Contains(strings.ToLower(body), "rejected") {
+		t.Errorf("disabled body must say the device is rejected at check-in:\n%s", body)
+	}
+
+	subject, body = email.DeviceStateChangedByAdminBody("plain", id, false)
+	if subject != "An administrator enabled one of your DIYDDNS devices" {
+		t.Errorf("enabled subject = %q", subject)
+	}
+	if !strings.Contains(body, "plain") || !strings.Contains(body, id) {
+		t.Errorf("enabled body does not name the device:\n%s", body)
+	}
+	if !strings.Contains(strings.ToLower(body), "accepted") {
+		t.Errorf("enabled body must say the device is accepted at check-in again:\n%s", body)
+	}
+	if strings.Contains(strings.ToLower(body), "rejected") {
+		t.Errorf("enabled body must not say rejected:\n%s", body)
+	}
+}

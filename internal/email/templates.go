@@ -6,11 +6,12 @@ import (
 )
 
 // recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl,
-// emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl and
+// emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl,
 // adminEmailChangedTmpl (#131, via ChangeConfirmBody, ChangeNoticeBody,
-// ChangedBody and AdminChangedBody) are fixed, package-level templates
-// validated at init time via template.Must. Their data is always a single
-// plain-string field (no user-supplied templates, no functions that could
+// ChangedBody and AdminChangedBody) and the two device-state templates (#132,
+// via DeviceStateChangedByAdminBody) are fixed, package-level templates
+// validated at init time via template.Must. Their data is always one or two
+// plain-string fields (no user-supplied templates, no functions that could
 // error), so renderTemplate's error path below is unreachable in practice —
 // it exists only as a safe fallback, not a documented failure mode.
 //
@@ -141,6 +142,39 @@ func ChangedBody(newEmail string) (subject, body string) {
 // things.
 func AdminChangedBody(newEmail string) (subject, body string) {
 	return renderTemplate(adminEmailChangedTmpl, "Your DIYDDNS email address was changed by an administrator", struct{ NewEmail string }{NewEmail: newEmail})
+}
+
+// deviceDisabledByAdminTmpl and deviceEnabledByAdminTmpl are the owner
+// notices for the one admin action on someone else's device (#132 D4, D10).
+// The label arrives already folded to ASCII (DeviceStateChangedByAdminBody);
+// the id is a UUIDv7 and always ASCII. Neither template's SUBJECT embeds the
+// label: checkSendable rejects CR/LF and non-ASCII in a header, and a label
+// has no charset rule.
+var deviceDisabledByAdminTmpl = template.Must(template.New("device-disabled-by-admin").Parse(
+	"An administrator has disabled your DIYDDNS device \"{{.Label}}\" (id {{.ID}}).\r\n\r\n" +
+		"The device is now rejected when it checks in, so its address is no longer\r\n" +
+		"recorded or published. Its history is kept.\r\n\r\n" +
+		"Sign in to see the device's state. If you were not expecting this, contact\r\n" +
+		"your administrator.\r\n",
+))
+
+var deviceEnabledByAdminTmpl = template.Must(template.New("device-enabled-by-admin").Parse(
+	"An administrator has enabled your DIYDDNS device \"{{.Label}}\" (id {{.ID}}).\r\n\r\n" +
+		"The device is accepted when it checks in again.\r\n\r\n" +
+		"Sign in to see the device's state.\r\n",
+))
+
+// DeviceStateChangedByAdminBody renders the mail sent to a device's owner
+// when an administrator disables (disabled=true) or re-enables their device.
+// label is folded to 7-bit ASCII before rendering (see ASCIIFold); id is the
+// device's UUID and is embedded verbatim. The subject is fixed and never
+// carries the label.
+func DeviceStateChangedByAdminBody(label, id string, disabled bool) (subject, body string) {
+	data := struct{ Label, ID string }{Label: ASCIIFold(label), ID: id}
+	if disabled {
+		return renderTemplate(deviceDisabledByAdminTmpl, "An administrator disabled one of your DIYDDNS devices", data)
+	}
+	return renderTemplate(deviceEnabledByAdminTmpl, "An administrator enabled one of your DIYDDNS devices", data)
 }
 
 // renderTemplate executes tmpl against data and returns (subject, body). If
