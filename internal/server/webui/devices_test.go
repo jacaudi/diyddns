@@ -494,3 +494,37 @@ func TestDeviceDetail_FallsBackBeyondFivePreviewRows(t *testing.T) {
 		t.Errorf("device page missing last-known IPv4 beyond the 5-row preview:\n%s", body)
 	}
 }
+
+// TestDeviceDetail_OwnerPageLinksItsOwnHistoryAndPlainOwner pins what no
+// earlier test did: the owner page's two history links point at
+// /devices/{id}/history (they are now data, deviceDetailData.HistoryURL, and
+// Go templates render an unset string as "" without error), and its Owner
+// row is plain text, never a link into /admin (#132 design §8.2, gate B1).
+func TestDeviceDetail_OwnerPageLinksItsOwnHistoryAndPlainOwner(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "owner@example.com", "user")
+	dev := seedDevice(t, st, usr.ID, "home-pi")
+
+	rec := getPage(t, h, signIn(t, deps, usr), "/devices/"+dev.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	want := `href="/devices/` + dev.ID + `/history"`
+	if n := strings.Count(body, want); n != 2 {
+		t.Errorf("%d occurrences of %s, want 2 (page-head button and history card)", n, want)
+	}
+	if strings.Contains(body, `href=""`) {
+		t.Error("an empty href rendered; a URL field was left unset")
+	}
+	if !strings.Contains(body, "<dt>Owner</dt><dd>owner@example.com</dd>") {
+		t.Error("the Owner row is not plain text on the owner's own page")
+	}
+	if strings.Contains(body, `href="/admin/users/`) {
+		t.Error("the owner page links into /admin")
+	}
+	if !strings.Contains(body, `<a href="/devices">Devices</a>`) {
+		t.Error("breadcrumb does not link the owner's list")
+	}
+}
