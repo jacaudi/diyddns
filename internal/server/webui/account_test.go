@@ -100,9 +100,9 @@ func TestAccount_EmailCard_States(t *testing.T) {
 // which previously showed no role information at all.
 func TestAccount_RoleIndicator(t *testing.T) {
 	// "Role: " is the new indicator's own label text -- distinct from the
-	// bare role-badge <span> app.html's userchip carries today, so this can't
-	// pass by accidentally matching the userchip the account page still shares
-	// the app shell with.
+	// bare role-badge <span> app.html's userchip used to carry before #146
+	// moved it here, so this can't pass by accidentally matching a leftover
+	// badge the account page still shares the app shell with.
 	t.Run("admin sees the admin role", func(t *testing.T) {
 		h, _, _, _, cookie, _ := accountHarness(t, "a@example.com", "admin")
 		body := getPage(t, h, cookie, "/account").Body.String()

@@ -23,7 +23,7 @@
            Feed, Server, Users. Each item keeps the per-item conditional it had
            as a flat link -- only the container collapsed. */}}
       <details class="nav-menu">
-        <summary>Admin</summary>
+        <summary class="{{if .AdminNav}}active{{end}}">Admin</summary>
         <div class="nav-menu-panel">
           <a class="{{if eq .Nav "admin-devices"}}active{{end}}" href="/admin/devices">All Devices</a>
           <a class="{{if eq .Nav "admin-audit"}}active{{end}}" href="/admin/audit">Audit</a>

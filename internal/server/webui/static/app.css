@@ -445,6 +445,12 @@ a:hover { text-decoration: underline; }
 .nav-menu > summary::-webkit-details-marker { display: none; }
 .nav-menu > summary:hover { background: var(--neutral-soft); color: var(--text); }
 .nav-menu[open] > summary { background: var(--accent-soft); color: var(--accent); }
+/* The current-page highlight for the six pages nested inside the dropdown
+   (#145 review, Significant): every server render emits <details> closed, so
+   .nav a.active on the nested anchors is invisible until a visitor manually
+   expands it. The trigger carries its own active state -- same tokens as
+   .nav a.active above -- whenever the current page is any of the six. */
+.nav-menu > summary.active { background: var(--accent-soft); color: var(--accent); }
 /* The panel IS reached by .nav a above (a descendant selector, not a direct-
    child one) -- every anchor inside it already gets the same padding, hover
    and .active treatment as a top-level nav link, so only the panel's own
@@ -938,6 +944,13 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
          flex-direction: column; background: var(--surface); border-bottom: 1px solid var(--border); padding: var(--space-2); }
   .nav.open { display: flex; }
   .menu-toggle { display: inline-block; }
+  /* The dropdown panel is positioned absolute for the desktop topbar
+     (nav-menu-panel above), which at this width hangs it beneath the
+     hamburger drawer's bottom edge instead of folding into the drawer's own
+     column -- a "drawer within a drawer". Folded inline here instead, with
+     the surface/border/shadow chrome stripped since the drawer itself
+     already provides that framing. */
+  .nav-menu-panel { position: static; border: 0; box-shadow: none; padding: 0 0 0 var(--space-3); }
   /* This used to be `.userchip .email { display: none }`, leaving the compact
      avatar as the chip's mobile form. #146 removed the avatar -- the chip's
      only content now IS the email -- so hiding just the email left an empty
