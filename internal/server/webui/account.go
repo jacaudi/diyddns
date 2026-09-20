@@ -24,14 +24,18 @@ type accountData struct {
 	// PendingNotice is the pending card's sentence, rendered through the
 	// noticeBanner partial. Built here so the template holds one spelling.
 	PendingNotice string
-	// Link, DeliveryNote, and LinkWarning populate the shown-once reveal after
-	// a Request whose confirmation could not be mailed (#144: no mailer
-	// configured) -- the same fields and copy admin-user-new.html's invite
-	// reveal uses (deliveryNote, h.grantLink), zero otherwise.
-	Link         string
-	DeliveryNote string
-	LinkWarning  string
-	Error        string
+	// Link and LinkExpiresIn populate the shown-once reveal after a Request
+	// whose confirmation could not be mailed (#144: no mailer configured),
+	// zero otherwise. Link reuses h.grantLink's URL-completion logic (the same
+	// helper admin-user-new.html's invite reveal uses), but not its second
+	// return value: that is an instruction to an OPERATOR ("Set
+	// server.base_url"), wrong audience for this self-service page, so it is
+	// deliberately discarded here (#144 review). LinkExpiresIn is built the
+	// same way PendingNotice is, from the staged change's actual expiry, so
+	// the on-screen TTL cannot drift from emailChangeTTL.
+	Link          string
+	LinkExpiresIn string
+	Error         string
 }
 
 func (h *handler) accountData(usr store.User, sess store.Session, errMsg string) accountData {
@@ -80,9 +84,12 @@ func (h *handler) renderAccountError(w http.ResponseWriter, r *http.Request, usr
 // §5.1). #144: when the confirmation could not be mailed (no mailer
 // configured), the link is shown once on this response instead -- the same
 // shown-once pattern handleAdminUserInvite/handleAdminUserRecovery use, so
-// this cannot redirect in that case.
+// this cannot redirect in that case. Request's own contract (service/
+// email_change.go) makes link != "" alone sufficient to decide that: a
+// configured mailer that carried the link successfully already comes back
+// with link == "".
 func (h *handler) handleAccountEmailRequest(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	link, delivery, err := h.deps.EmailChange.Request(r.Context(), usr, strings.TrimSpace(r.PostFormValue("email")))
+	link, _, expiresAt, err := h.deps.EmailChange.Request(r.Context(), usr, strings.TrimSpace(r.PostFormValue("email")))
 	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			h.renderAccountError(w, r, usr, sess, status, msg)
@@ -91,10 +98,13 @@ func (h *handler) handleAccountEmailRequest(w http.ResponseWriter, r *http.Reque
 		h.logAndFail(w, r, usr, "request email change", err)
 		return
 	}
-	if link != "" && !delivery.Attempted {
+	if link != "" {
 		data := h.accountData(usr, sess, "")
-		data.Link, data.LinkWarning = h.grantLink(r, link)
-		data.DeliveryNote = deliveryNote(delivery)
+		// grantLink's second return value is operator-facing config advice
+		// ("Set server.base_url") -- deliberately discarded here; see
+		// accountData.LinkExpiresIn's doc comment.
+		data.Link, _ = h.grantLink(r, link)
+		data.LinkExpiresIn = relExpiry(expiresAt, time.Now())
 		h.render(w, r, "account", data)
 		return
 	}

@@ -40,14 +40,12 @@
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
       This confirmation link is displayed a single time because this server has no mail delivery
-      configured. Copy it now; it expires in one hour and can be used once.
+      configured. Copy it now; it expires in {{.LinkExpiresIn}} and can be used once.
     </div>
-    {{template "errorBanner" .LinkWarning}}
     <div class="field">
       <label>Confirmation link</label>
       {{template "copyValue" .Link}}
     </div>
-    {{if .DeliveryNote}}<p class="muted">{{.DeliveryNote}}</p>{{end}}
     <p class="muted">Open it now, or come back and open it later while signed in here. Nothing changes until you do; this address keeps working until then.</p>
     {{else if .PendingEmail}}
     {{template "noticeBanner" .PendingNotice}}

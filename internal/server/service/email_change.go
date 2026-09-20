@@ -144,39 +144,43 @@ func (s *EmailChangeService) validateRequest(ctx context.Context, u store.User, 
 // until Confirm redeems the token; the old address stays authoritative.
 //
 // A repeat request for the address already pending (case-insensitively) and
-// not yet expired returns ("", Delivery{}, nil) without minting or mailing
+// not yet expired returns ("", Delivery{}, 0, nil) without minting or mailing
 // again (D12) -- there is no new link to show; a request for a different
 // address replaces the pending one.
 //
-// The returned link is the same confirmation link that was (or would have
-// been) mailed to the new address. #144: unlike IssueInvite/IssueRecovery,
-// which the caller must always present regardless of Delivery, here the link
-// is only for the caller to show when Delivery.Attempted is false -- a
-// configured mailer already carries it to the right mailbox, and self-service
-// change deliberately does not otherwise reveal a confirmation link on
-// screen. A nil error always means the link (when non-empty) is valid.
+// The single rule governing the returned link: it is non-empty if and only if
+// the caller must show it on screen. #144: when the confirmation could not be
+// mailed (no mailer configured, or the mailer is disabled), the link is the
+// caller's only way to hand it to the user -- the same shown-once fallback
+// IssueInvite/IssueRecovery use. When a configured mailer carried it
+// successfully (Delivery.Sent()), the link is cleared: self-service change
+// deliberately does not otherwise reveal a confirmation link on screen, and a
+// caller need not separately check Delivery to know whether to reveal it. A
+// nil error always means the link (when non-empty) is valid. expiresAt is the
+// staged change's actual expiry (0 when nothing was staged), so the caller can
+// format an on-screen countdown without restating emailChangeTTL.
 //
 // If the confirmation mail cannot be sent (attempted but failed), the staged
 // change is rolled back and ErrConfirmationNotSent is returned: a pending
 // change whose link never arrived would block retries under D12. The
 // requested audit row is written before the send and survives the rollback --
 // the event log records what was asked for, not what stuck.
-func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail string) (string, Delivery, error) {
+func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail string) (string, Delivery, int64, error) {
 	now := store.NowUnix()
 	normalized, err := s.validateRequest(ctx, u, newEmail, now)
 	if err != nil {
-		return "", Delivery{}, fmt.Errorf("service.Request: %w", err)
+		return "", Delivery{}, 0, fmt.Errorf("service.Request: %w", err)
 	}
 	if strings.EqualFold(u.PendingEmail, normalized) && u.PendingEmailExpiresAt > now {
-		return "", Delivery{}, nil
+		return "", Delivery{}, 0, nil
 	}
 	token, err := auth.RandToken(emailChangeTokenBytes)
 	if err != nil {
-		return "", Delivery{}, fmt.Errorf("service.Request: %w", err)
+		return "", Delivery{}, 0, fmt.Errorf("service.Request: %w", err)
 	}
 	expiresAt := now + int64(emailChangeTTL.Seconds())
 	if err := s.st.Users().SetPendingEmail(ctx, u.ID, normalized, auth.HashToken(token), expiresAt); err != nil {
-		return "", Delivery{}, fmt.Errorf("service.Request: %w", err)
+		return "", Delivery{}, 0, fmt.Errorf("service.Request: %w", err)
 	}
 	s.mail.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: u.ID, EventType: "user.email_change_requested",
@@ -210,11 +214,18 @@ func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail
 			s.mail.log.ErrorContext(ctx, "email change: rollback of an unsent pending change failed; the pruner clears it within the hour",
 				"error", cerr, "user_id", u.ID)
 		}
-		return "", Delivery{}, fmt.Errorf("service.Request: %w", ErrConfirmationNotSent)
+		return "", Delivery{}, 0, fmt.Errorf("service.Request: %w", ErrConfirmationNotSent)
 	}
 	subject, body = emailpkg.ChangeNoticeBody(normalized)
 	sendAdvisory(ctx, s.mail, u.ID, u.ID, u.Email, subject, body)
-	return link, d, nil
+	if d.Attempted {
+		// A configured mailer carried the link to normalized; it is not this
+		// caller's to show. See the doc comment above for the single rule this
+		// enforces: link != "" alone is sufficient for a caller to know to
+		// reveal it.
+		link = ""
+	}
+	return link, d, expiresAt, nil
 }
 
 // Cancel discards u's pending change, if any, and audits

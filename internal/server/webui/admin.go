@@ -259,12 +259,19 @@ func deliveryNote(d service.Delivery) string {
 	}
 }
 
-// grantLink makes a GrantService link presentable.
+// grantLink makes a GrantService link presentable. It also completes an
+// EmailChangeService confirmation link (webui/account.go's self-service
+// reveal, #144): both services build links the same way, so one function
+// covers both callers.
 //
-// GrantService builds links as baseURL + "/register?token=…" from
-// cfg.Server.BaseURL, which defaults to empty — so an unset base_url yields a
-// bare path rather than a URL. Prefix the derived base and tell the operator to
-// set base_url, rather than handing them something unusable.
+// GrantService and EmailChangeService both build links as baseURL +
+// "/…?token=…" from cfg.Server.BaseURL, which defaults to empty — so an unset
+// base_url yields a bare path rather than a URL. Prefix the derived base and
+// tell the operator to set base_url, rather than handing them something
+// unusable. The second return value is that operator instruction: an admin
+// caller shows it as-is; account.go's self-service caller discards it, since
+// telling a non-admin user to edit server config is the wrong audience for
+// it (#144 review).
 func (h *handler) grantLink(r *http.Request, link string) (string, string) {
 	if !strings.HasPrefix(link, "/") {
 		return link, ""
