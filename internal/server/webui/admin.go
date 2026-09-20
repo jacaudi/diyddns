@@ -158,11 +158,13 @@ func (h *handler) handleAdminUserSetEnabled(w http.ResponseWriter, r *http.Reque
 // forms, which is why the copy is shared.
 //
 // The status varies, which is why it is returned rather than assumed by the
-// caller: a guard rejection is 422, a vanished target is 404, and three cases
+// caller: a guard rejection is 422, a vanished target is 404, and two cases
 // are 503 as server-capability problems rather than something the user typed
-// wrong: no mailer configured (ErrMailerUnavailable), a confirmation mail that
-// could not be sent (ErrConfirmationNotSent), and an unconfigured WebAuthn RP
-// (ErrWebAuthnUnavailable). The design mandates 503 for each specifically.
+// wrong: a confirmation mail that could not be sent (ErrConfirmationNotSent),
+// and an unconfigured WebAuthn RP (ErrWebAuthnUnavailable). The design
+// mandates 503 for each specifically. #144: a self-service email change no
+// longer has a mailer-configured guard -- Request shows the confirmation link
+// on screen instead of refusing, mirroring AdminSet, which never had one.
 func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	switch {
 	case errors.Is(err, service.ErrLastAdmin):
@@ -179,9 +181,6 @@ func adminGuardMessage(err error) (msg string, status int, ok bool) {
 		return "This account's email address is managed by its identity provider.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrEmailChangeInvalid):
 		return "This confirmation link is invalid or has expired. Request the change again from your account page.", http.StatusUnprocessableEntity, true
-	case errors.Is(err, service.ErrMailerUnavailable):
-		// A server-capability problem, like an unconfigured WebAuthn RP: 503.
-		return "Email is not configured on this server, so an address change cannot be confirmed. Ask an administrator to change it.", http.StatusServiceUnavailable, true
 	case errors.Is(err, service.ErrConfirmationNotSent):
 		// The last sentence describes the state AFTER a retry (design §7.3).
 		return "The confirmation email could not be sent. Try again in a moment. If the account page then shows the change as already pending, cancel it and request it again.", http.StatusServiceUnavailable, true

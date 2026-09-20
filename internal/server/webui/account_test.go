@@ -58,13 +58,16 @@ func TestAccount_EmailCard_States(t *testing.T) {
 			t.Errorf("account page missing the change form:\n%s", body)
 		}
 	})
-	t.Run("no form when email is disabled", func(t *testing.T) {
+	t.Run("form still shown when email is disabled (#144)", func(t *testing.T) {
 		deps, st := testDeps(t)
 		h, _ := New(deps)
 		usr := seedUser(t, st, "u@example.com", "user")
 		body := getPage(t, h, signIn(t, deps, usr), "/account").Body.String()
-		if strings.Contains(body, `action="/account/email"`) || !strings.Contains(body, "Ask an administrator") {
-			t.Errorf("email disabled: want the ask-an-administrator copy and no form:\n%s", body)
+		if !strings.Contains(body, `action="/account/email"`) || !strings.Contains(body, `name="email"`) {
+			t.Errorf("email disabled: the form must still be offered, not blocked:\n%s", body)
+		}
+		if strings.Contains(body, "Ask an administrator") {
+			t.Errorf("email disabled: the old hard-block copy must be gone:\n%s", body)
 		}
 	})
 	t.Run("managed copy for an OIDC-linked account", func(t *testing.T) {
@@ -130,7 +133,7 @@ func TestAccountEmail_Request(t *testing.T) {
 			t.Errorf("status = %d, want 422 with the unchanged copy; body=%s", rec.Code, rec.Body.String())
 		}
 	})
-	t.Run("email disabled is 503", func(t *testing.T) {
+	t.Run("email disabled shows the confirmation link on screen instead of blocking (#144)", func(t *testing.T) {
 		deps, st := testDeps(t)
 		deps.EmailChange = service.NewEmailChangeService(st, nil, deps.Cfg.Server.BaseURL, service.NewAuditWriter(st), deps.Log)
 		h, _ := New(deps)
@@ -138,8 +141,31 @@ func TestAccountEmail_Request(t *testing.T) {
 		cookie := signIn(t, deps, usr)
 		sess := sessionFor(t, deps, cookie)
 		rec := postForm(t, h, cookie, "/account/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"next@example.com"}})
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (shown once, cannot redirect); body=%s", rec.Code, body)
+		}
+		if !strings.Contains(body, "Shown once") || !strings.Contains(body, "/account/email/confirm?token=") {
+			t.Errorf("response missing the shown-once confirmation link:\n%s", body)
+		}
+		m := tokenRE.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("no token in the on-screen link: %q", body)
+		}
+		got, err := st.Users().GetByID(t.Context(), usr.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.PendingEmail != "next@example.com" {
+			t.Fatalf("PendingEmail = %q, want next@example.com", got.PendingEmail)
+		}
+		// The link works end to end, the same as an emailed one would.
+		rec = postForm(t, h, cookie, "/account/email/confirm", url.Values{"csrf": {sess.CSRFToken}, "token": {m[1]}})
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account" {
+			t.Fatalf("confirm: status = %d, Location = %q; want 303 to /account; body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+		}
+		if got, _ := st.Users().GetByID(t.Context(), usr.ID); got.Email != "next@example.com" {
+			t.Errorf("Email = %q after confirm, want next@example.com", got.Email)
 		}
 	})
 }

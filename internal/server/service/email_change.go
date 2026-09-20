@@ -43,9 +43,6 @@ var (
 	// failure -- wrong token, expired, nothing pending -- so callers cannot
 	// distinguish which.
 	ErrEmailChangeInvalid = errors.New("service: email change confirmation invalid, expired, or already used")
-	// ErrMailerUnavailable is returned when a self-service change is requested
-	// and no mailer is configured: there is nothing to confirm with.
-	ErrMailerUnavailable = errors.New("service: email delivery is not configured")
 	// ErrConfirmationNotSent is returned when the confirmation mail could not
 	// be delivered; the staged change has been rolled back (or, if that
 	// rollback also failed, is left for the pruner and the user's Cancel).
@@ -64,10 +61,12 @@ type EmailChangeService struct {
 }
 
 // NewEmailChangeService constructs an EmailChangeService. mailer may be nil
-// (the same supported state GrantService accepts): self-service requests then
-// refuse with ErrMailerUnavailable and every notice is skipped. baseURL is
-// prefixed to the confirmation link. mail.timeout is always set here; a zero
-// value would make every send fail silently (see GrantService.deliveryTimeout).
+// (the same supported state GrantService accepts): Request then mints and
+// stages the change exactly as usual and returns the confirmation link
+// un-mailed (#144), the same shown-once fallback IssueInvite/IssueRecovery
+// use, and every advisory notice is skipped. baseURL is prefixed to the
+// confirmation link. mail.timeout is always set here; a zero value would make
+// every send fail silently (see GrantService.deliveryTimeout).
 func NewEmailChangeService(st *store.Store, mailer emailpkg.Mailer, baseURL string, audit AuditSink, log *slog.Logger) *EmailChangeService {
 	return &EmailChangeService{
 		st:      st,
@@ -111,17 +110,13 @@ func emailChangeDetails(oldEmail, newEmail string) string {
 	return string(details)
 }
 
-func (s *EmailChangeService) mailerEnabled() bool {
-	return s.mail.mailer != nil && s.mail.mailer.Enabled()
-}
-
 // validateRequest runs Request's guards in design order (§5.1 steps 1-5) and
 // returns the canonical new address. Extracted so Request stays under the
-// gocyclo ceiling, as normalizeClaim was.
+// gocyclo ceiling, as normalizeClaim was. #144: there is deliberately no
+// mailer-configured guard here -- AdminSet never had one either, and Request
+// now covers an unconfigured mailer the same way IssueInvite/IssueRecovery
+// do, by handing the caller the link to show instead of emailing it.
 func (s *EmailChangeService) validateRequest(ctx context.Context, u store.User, newEmail string, now int64) (string, error) {
-	if !s.mailerEnabled() {
-		return "", ErrMailerUnavailable
-	}
 	if u.OIDCSubject != "" {
 		return "", ErrEmailManagedByOIDC
 	}
@@ -149,38 +144,49 @@ func (s *EmailChangeService) validateRequest(ctx context.Context, u store.User, 
 // until Confirm redeems the token; the old address stays authoritative.
 //
 // A repeat request for the address already pending (case-insensitively) and
-// not yet expired returns nil without minting or mailing again (D12); a
-// request for a different address replaces the pending one.
+// not yet expired returns ("", Delivery{}, nil) without minting or mailing
+// again (D12) -- there is no new link to show; a request for a different
+// address replaces the pending one.
 //
-// If the confirmation mail cannot be sent, the staged change is rolled back
-// and ErrConfirmationNotSent is returned: a pending change whose link never
-// arrived would block retries under D12. The requested audit row is written
-// before the send and survives the rollback -- the event log records what was
-// asked for, not what stuck.
-func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail string) error {
+// The returned link is the same confirmation link that was (or would have
+// been) mailed to the new address. #144: unlike IssueInvite/IssueRecovery,
+// which the caller must always present regardless of Delivery, here the link
+// is only for the caller to show when Delivery.Attempted is false -- a
+// configured mailer already carries it to the right mailbox, and self-service
+// change deliberately does not otherwise reveal a confirmation link on
+// screen. A nil error always means the link (when non-empty) is valid.
+//
+// If the confirmation mail cannot be sent (attempted but failed), the staged
+// change is rolled back and ErrConfirmationNotSent is returned: a pending
+// change whose link never arrived would block retries under D12. The
+// requested audit row is written before the send and survives the rollback --
+// the event log records what was asked for, not what stuck.
+func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail string) (string, Delivery, error) {
 	now := store.NowUnix()
 	normalized, err := s.validateRequest(ctx, u, newEmail, now)
 	if err != nil {
-		return fmt.Errorf("service.Request: %w", err)
+		return "", Delivery{}, fmt.Errorf("service.Request: %w", err)
 	}
 	if strings.EqualFold(u.PendingEmail, normalized) && u.PendingEmailExpiresAt > now {
-		return nil
+		return "", Delivery{}, nil
 	}
 	token, err := auth.RandToken(emailChangeTokenBytes)
 	if err != nil {
-		return fmt.Errorf("service.Request: %w", err)
+		return "", Delivery{}, fmt.Errorf("service.Request: %w", err)
 	}
 	expiresAt := now + int64(emailChangeTTL.Seconds())
 	if err := s.st.Users().SetPendingEmail(ctx, u.ID, normalized, auth.HashToken(token), expiresAt); err != nil {
-		return fmt.Errorf("service.Request: %w", err)
+		return "", Delivery{}, fmt.Errorf("service.Request: %w", err)
 	}
 	s.mail.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: u.ID, EventType: "user.email_change_requested",
 		TargetType: "user", TargetID: u.ID, DetailsJSON: emailChangeDetails(u.Email, normalized),
 	})
 
-	subject, body := emailpkg.ChangeConfirmBody(s.baseURL + "/account/email/confirm?token=" + token)
-	if d := sendAdvisory(ctx, s.mail, u.ID, u.ID, normalized, subject, body); d.Err != nil {
+	link := s.baseURL + "/account/email/confirm?token=" + token
+	subject, body := emailpkg.ChangeConfirmBody(link)
+	d := sendAdvisory(ctx, s.mail, u.ID, u.ID, normalized, subject, body)
+	if d.Err != nil {
 		// context.WithoutCancel: sendAdvisory detaches the send from
 		// cancellation for exactly this reason -- a slow SMTP peer can outlive
 		// a client disconnect -- so a send that fails after the request
@@ -204,11 +210,11 @@ func (s *EmailChangeService) Request(ctx context.Context, u store.User, newEmail
 			s.mail.log.ErrorContext(ctx, "email change: rollback of an unsent pending change failed; the pruner clears it within the hour",
 				"error", cerr, "user_id", u.ID)
 		}
-		return fmt.Errorf("service.Request: %w", ErrConfirmationNotSent)
+		return "", Delivery{}, fmt.Errorf("service.Request: %w", ErrConfirmationNotSent)
 	}
 	subject, body = emailpkg.ChangeNoticeBody(normalized)
 	sendAdvisory(ctx, s.mail, u.ID, u.ID, u.Email, subject, body)
-	return nil
+	return link, d, nil
 }
 
 // Cancel discards u's pending change, if any, and audits

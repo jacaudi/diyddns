@@ -9,8 +9,11 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// accountData is account.html's template data. Exactly one of the email card's
-// four states renders: managed-by-IdP, email-disabled, pending, or the form.
+// accountData is account.html's template data. Exactly one of the email
+// card's four states renders: managed-by-IdP, the shown-once link reveal,
+// pending, or the form. #144 removed the fifth (blocking) state that used to
+// hide the form outright whenever EmailEnabled was false; EmailEnabled now
+// only adjusts copy.
 type accountData struct {
 	appData
 	OIDCLinked   bool
@@ -21,7 +24,14 @@ type accountData struct {
 	// PendingNotice is the pending card's sentence, rendered through the
 	// noticeBanner partial. Built here so the template holds one spelling.
 	PendingNotice string
-	Error         string
+	// Link, DeliveryNote, and LinkWarning populate the shown-once reveal after
+	// a Request whose confirmation could not be mailed (#144: no mailer
+	// configured) -- the same fields and copy admin-user-new.html's invite
+	// reveal uses (deliveryNote, h.grantLink), zero otherwise.
+	Link         string
+	DeliveryNote string
+	LinkWarning  string
+	Error        string
 }
 
 func (h *handler) accountData(usr store.User, sess store.Session, errMsg string) accountData {
@@ -34,9 +44,18 @@ func (h *handler) accountData(usr store.User, sess store.Session, errMsg string)
 	now := time.Now()
 	if usr.PendingEmail != "" && usr.PendingEmailExpiresAt > now.Unix() {
 		data.PendingEmail = usr.PendingEmail
-		data.PendingNotice = fmt.Sprintf(
-			"A change to %s is waiting for confirmation. Open the link sent to that address; you need to be signed in here when you do. It expires in %s. Did not get it? Cancel and request the change again.",
-			usr.PendingEmail, relExpiry(usr.PendingEmailExpiresAt, now))
+		if data.EmailEnabled {
+			data.PendingNotice = fmt.Sprintf(
+				"A change to %s is waiting for confirmation. Open the link sent to that address; you need to be signed in here when you do. It expires in %s. Did not get it? Cancel and request the change again.",
+				usr.PendingEmail, relExpiry(usr.PendingEmailExpiresAt, now))
+		} else {
+			// #144: with no mailer configured, the confirmation link was shown
+			// once on the response to the request that staged this -- there is
+			// nothing to "check" on this later, plain GET of /account.
+			data.PendingNotice = fmt.Sprintf(
+				"A change to %s is waiting for confirmation. You were shown its confirmation link once, when you requested it; open it while signed in here. It expires in %s. Lost it? Cancel and request the change again.",
+				usr.PendingEmail, relExpiry(usr.PendingEmailExpiresAt, now))
+		}
 	}
 	return data
 }
@@ -57,14 +76,26 @@ func (h *handler) renderAccountError(w http.ResponseWriter, r *http.Request, usr
 	h.renderStatus(w, r, status, "account", h.accountData(usr, sess, msg))
 }
 
-// handleAccountEmailRequest stages a self-service address change (design §5.1).
+// handleAccountEmailRequest stages a self-service address change (design
+// §5.1). #144: when the confirmation could not be mailed (no mailer
+// configured), the link is shown once on this response instead -- the same
+// shown-once pattern handleAdminUserInvite/handleAdminUserRecovery use, so
+// this cannot redirect in that case.
 func (h *handler) handleAccountEmailRequest(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	if err := h.deps.EmailChange.Request(r.Context(), usr, strings.TrimSpace(r.PostFormValue("email"))); err != nil {
+	link, delivery, err := h.deps.EmailChange.Request(r.Context(), usr, strings.TrimSpace(r.PostFormValue("email")))
+	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			h.renderAccountError(w, r, usr, sess, status, msg)
 			return
 		}
 		h.logAndFail(w, r, usr, "request email change", err)
+		return
+	}
+	if link != "" && !delivery.Attempted {
+		data := h.accountData(usr, sess, "")
+		data.Link, data.LinkWarning = h.grantLink(r, link)
+		data.DeliveryNote = deliveryNote(delivery)
+		h.render(w, r, "account", data)
 		return
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)

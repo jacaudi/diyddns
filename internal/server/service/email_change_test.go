@@ -66,27 +66,13 @@ func TestAddressHeld(t *testing.T) {
 }
 
 func TestEmailChange_Request_Guards(t *testing.T) {
-	t.Run("mailer disabled", func(t *testing.T) {
-		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: false})
-		u := seedUser(t, st, "a@example.com", "user")
-		if err := svc.Request(t.Context(), u, "b@example.com"); !errors.Is(err, ErrMailerUnavailable) {
-			t.Fatalf("err = %v, want ErrMailerUnavailable", err)
-		}
-	})
-	t.Run("nil mailer", func(t *testing.T) {
-		st, svc := newEmailChangeSvc(t, nil)
-		u := seedUser(t, st, "a@example.com", "user")
-		if err := svc.Request(t.Context(), u, "b@example.com"); !errors.Is(err, ErrMailerUnavailable) {
-			t.Fatalf("err = %v, want ErrMailerUnavailable", err)
-		}
-	})
 	t.Run("oidc-linked account", func(t *testing.T) {
 		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
 		u, err := st.Users().Create(t.Context(), store.User{Email: "a@example.com", Role: "user", OIDCProvider: "https://idp.example.com", OIDCSubject: "s1"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := svc.Request(t.Context(), u, "b@example.com"); !errors.Is(err, ErrEmailManagedByOIDC) {
+		if _, _, err := svc.Request(t.Context(), u, "b@example.com"); !errors.Is(err, ErrEmailManagedByOIDC) {
 			t.Fatalf("err = %v, want ErrEmailManagedByOIDC", err)
 		}
 	})
@@ -97,7 +83,7 @@ func TestEmailChange_Request_Guards(t *testing.T) {
 		// "Bob <bob@x>" input is accepted as bob@x), so that is not an invalid
 		// case; a quoted local part is (ErrAddressUnsupported), as is non-ASCII.
 		for _, bad := range []string{"not-an-email", `"john doe"@example.com`, "josé@example.com"} {
-			if err := svc.Request(t.Context(), u, bad); !errors.Is(err, ErrInvalidEmail) {
+			if _, _, err := svc.Request(t.Context(), u, bad); !errors.Is(err, ErrInvalidEmail) {
 				t.Errorf("%q: err = %v, want ErrInvalidEmail", bad, err)
 			}
 		}
@@ -106,7 +92,7 @@ func TestEmailChange_Request_Guards(t *testing.T) {
 		st, svc := newEmailChangeSvc(t, &fakeMailer{enabled: true})
 		u := seedUser(t, st, "a@example.com", "user")
 		for _, same := range []string{"a@example.com", "A@Example.COM"} {
-			if err := svc.Request(t.Context(), u, same); !errors.Is(err, ErrEmailUnchanged) {
+			if _, _, err := svc.Request(t.Context(), u, same); !errors.Is(err, ErrEmailUnchanged) {
 				t.Errorf("%q: err = %v, want ErrEmailUnchanged", same, err)
 			}
 		}
@@ -116,11 +102,11 @@ func TestEmailChange_Request_Guards(t *testing.T) {
 		u := seedUser(t, st, "a@example.com", "user")
 		seedUser(t, st, "taken@example.com", "user")
 		other := seedUser(t, st, "c@example.com", "user")
-		if err := svc.Request(t.Context(), other, "pending-elsewhere@example.com"); err != nil {
+		if _, _, err := svc.Request(t.Context(), other, "pending-elsewhere@example.com"); err != nil {
 			t.Fatalf("seed a pending change on another row: %v", err)
 		}
 		for _, held := range []string{"taken@example.com", "TAKEN@example.com", "Pending-Elsewhere@example.com"} {
-			if err := svc.Request(t.Context(), u, held); !errors.Is(err, store.ErrConflict) {
+			if _, _, err := svc.Request(t.Context(), u, held); !errors.Is(err, store.ErrConflict) {
 				t.Errorf("%q: err = %v, want store.ErrConflict", held, err)
 			}
 		}
@@ -131,12 +117,88 @@ func TestEmailChange_Request_Guards(t *testing.T) {
 	})
 }
 
+// TestEmailChange_Request_WithoutMailerRevealsLink is #144: a self-service
+// change is no longer blocked when no mailer is configured (neither a nil
+// mailer nor one with Enabled() == false). Instead Request mints the same
+// token it would otherwise email, stages the pending change exactly as
+// usual, and returns the confirmation link for the caller to show on screen
+// once -- mirroring the invite/recovery precedent (grants.go IssueInvite /
+// IssueRecovery) -- with a not-Attempted Delivery so the caller knows to
+// show it. AdminSet is untouched: it never had this restriction.
+func TestEmailChange_Request_WithoutMailerRevealsLink(t *testing.T) {
+	t.Run("nil mailer: the link works end-to-end", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, nil)
+		u := seedUser(t, st, "a@example.com", "user")
+
+		link, delivery, err := svc.Request(t.Context(), u, "b@example.com")
+		if err != nil {
+			t.Fatalf("Request: %v", err)
+		}
+		if delivery.Attempted {
+			t.Errorf("Delivery = %+v, want not Attempted with no mailer", delivery)
+		}
+		if !strings.Contains(link, "https://ddns.example.com/account/email/confirm?token=") {
+			t.Fatalf("link = %q, want a confirm link", link)
+		}
+
+		got, _ := st.Users().GetByID(t.Context(), u.ID)
+		if got.PendingEmail != "b@example.com" {
+			t.Fatalf("PendingEmail = %q, want b@example.com", got.PendingEmail)
+		}
+
+		if err := svc.Confirm(t.Context(), got, extractToken(t, link)); err != nil {
+			t.Fatalf("Confirm with the on-screen token: %v", err)
+		}
+		confirmed, _ := st.Users().GetByID(t.Context(), u.ID)
+		if confirmed.Email != "b@example.com" {
+			t.Errorf("Email = %q after confirm, want b@example.com", confirmed.Email)
+		}
+	})
+
+	t.Run("disabled mailer: same as nil, and nothing is mailed", func(t *testing.T) {
+		mailer := &fakeMailer{enabled: false}
+		st, svc := newEmailChangeSvc(t, mailer)
+		u := seedUser(t, st, "a@example.com", "user")
+
+		link, delivery, err := svc.Request(t.Context(), u, "b@example.com")
+		if err != nil {
+			t.Fatalf("Request: %v", err)
+		}
+		if delivery.Attempted {
+			t.Errorf("Delivery = %+v, want not Attempted with a disabled mailer", delivery)
+		}
+		if link == "" {
+			t.Fatal("link is empty, want a confirm link to show on screen")
+		}
+		if n := len(mailer.Sent()); n != 0 {
+			t.Errorf("sent %d mails with a disabled mailer, want 0", n)
+		}
+	})
+
+	t.Run("a repeat request to the same pending address mints nothing new (D12)", func(t *testing.T) {
+		st, svc := newEmailChangeSvc(t, nil)
+		u := seedUser(t, st, "a@example.com", "user")
+		if _, _, err := svc.Request(t.Context(), u, "b@example.com"); err != nil {
+			t.Fatal(err)
+		}
+		u, _ = st.Users().GetByID(t.Context(), u.ID)
+
+		link, delivery, err := svc.Request(t.Context(), u, "B@example.com")
+		if err != nil {
+			t.Fatalf("repeat request: %v, want nil", err)
+		}
+		if link != "" || delivery.Attempted {
+			t.Errorf("link = %q, delivery = %+v; want both empty/zero on a D12 repeat", link, delivery)
+		}
+	})
+}
+
 func TestEmailChange_Request_StagesMailsAndAudits(t *testing.T) {
 	mailer := &fakeMailer{enabled: true}
 	st, svc := newEmailChangeSvc(t, mailer)
 	u := seedUser(t, st, "old@example.com", "user")
 
-	if err := svc.Request(t.Context(), u, "New@Example.com"); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, "New@Example.com"); err != nil {
 		t.Fatalf("Request: %v", err)
 	}
 
@@ -178,12 +240,12 @@ func TestEmailChange_Request_SameAddressDoesNotResend(t *testing.T) {
 	mailer := &fakeMailer{enabled: true}
 	st, svc := newEmailChangeSvc(t, mailer)
 	u := seedUser(t, st, "old@example.com", "user")
-	if err := svc.Request(t.Context(), u, "new@example.com"); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, "new@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	u, _ = st.Users().GetByID(t.Context(), u.ID) // now carries the pending change
 
-	if err := svc.Request(t.Context(), u, "NEW@example.com"); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, "NEW@example.com"); err != nil {
 		t.Fatalf("repeat request: %v, want nil", err)
 	}
 	if n := len(mailer.Sent()); n != 2 {
@@ -198,11 +260,11 @@ func TestEmailChange_Request_DifferentAddressReplaces(t *testing.T) {
 	mailer := &fakeMailer{enabled: true}
 	st, svc := newEmailChangeSvc(t, mailer)
 	u := seedUser(t, st, "old@example.com", "user")
-	if err := svc.Request(t.Context(), u, "first@example.com"); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, "first@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	u, _ = st.Users().GetByID(t.Context(), u.ID)
-	if err := svc.Request(t.Context(), u, "second@example.com"); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, "second@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.Users().GetByID(t.Context(), u.ID)
@@ -219,7 +281,7 @@ func TestEmailChange_Request_FailedConfirmationSendRollsBack(t *testing.T) {
 	st, svc := newEmailChangeSvc(t, mailer)
 	u := seedUser(t, st, "old@example.com", "user")
 
-	err := svc.Request(t.Context(), u, "new@example.com")
+	_, _, err := svc.Request(t.Context(), u, "new@example.com")
 	if !errors.Is(err, ErrConfirmationNotSent) {
 		t.Fatalf("err = %v, want ErrConfirmationNotSent", err)
 	}
@@ -251,7 +313,7 @@ func TestEmailChange_Cancel(t *testing.T) {
 		t.Fatalf("cancelled rows = %d after a no-op cancel, want 0", n)
 	}
 
-	if err := svc.Request(t.Context(), u, "new@example.com"); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, "new@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	u, _ = st.Users().GetByID(t.Context(), u.ID)
@@ -273,7 +335,7 @@ func TestEmailChange_Cancel(t *testing.T) {
 // pending change on it.
 func requestAndToken(t *testing.T, st *store.Store, svc *EmailChangeService, mailer *fakeMailer, u store.User, newEmail string) (store.User, string) {
 	t.Helper()
-	if err := svc.Request(t.Context(), u, newEmail); err != nil {
+	if _, _, err := svc.Request(t.Context(), u, newEmail); err != nil {
 		t.Fatalf("Request: %v", err)
 	}
 	sent := mailer.Sent()
@@ -676,7 +738,7 @@ func TestEmailChange_Request_RollbackSurvivesCanceledRequestContext(t *testing.T
 	st, svc := newEmailChangeSvc(t, mailer)
 	u := seedUser(t, st, "old@example.com", "user")
 
-	err := svc.Request(ctx, u, "new@example.com")
+	_, _, err := svc.Request(ctx, u, "new@example.com")
 	if !errors.Is(err, ErrConfirmationNotSent) {
 		t.Fatalf("err = %v, want ErrConfirmationNotSent", err)
 	}
