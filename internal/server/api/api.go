@@ -49,11 +49,11 @@ type ServerDeps struct {
 // Build registers both huma APIs, their operations, and the health handlers
 // onto mux.
 func Build(mux *http.ServeMux, deps ServerDeps) {
-	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent", deps.Info.Version))
+	agentAPI := humago.New(mux, groupConfig("DIYDDNS Agent API", "/agent/v1", deps.Info.Version))
 	registerCapabilities(agentAPI, deps)
 	registerAgentOps(agentAPI, deps)
 
-	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api", deps.Info.Version))
+	apiAPI := humago.New(mux, groupConfig("DIYDDNS UI API", "/api/v1", deps.Info.Version))
 	registerAuthOps(apiAPI, deps)
 	registerDeviceOps(apiAPI, deps)
 	registerDeviceMgmtOps(apiAPI, deps)
@@ -82,9 +82,13 @@ func registerAgentOps(a huma.API, deps ServerDeps) {
 }
 
 // groupConfig returns a huma.Config whose OpenAPI, Docs, and Schemas paths are
-// all prefixed under prefix. Distinct SchemasPath per group is REQUIRED: both
-// APIs share one ServeMux, and two APIs left at the default "/schemas" would
-// register the same route twice and panic the mux.
+// all prefixed under prefix. prefix carries its own /v1 segment (e.g.
+// "/api/v1") so these meta paths stay versioned in step with every real
+// operation (issue #148) — it is used only here, never to derive an
+// operation's own Path, which is a hardcoded literal that already includes
+// /v1 in its own registration. Distinct SchemasPath per group is REQUIRED:
+// both APIs share one ServeMux, and two APIs left at the default "/schemas"
+// would register the same route twice and panic the mux.
 func groupConfig(title, prefix, ver string) huma.Config {
 	cfg := huma.DefaultConfig(title, ver)
 	cfg.OpenAPIPath = prefix + "/openapi"

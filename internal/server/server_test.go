@@ -109,10 +109,10 @@ func TestServer_AllEndpoints(t *testing.T) {
 		{"/healthz", 200, "ok"},
 		{"/readyz", 200, "ready"},
 		{"/agent/v1/capabilities", 200, "server_version"},
-		{"/agent/openapi.json", 200, "openapi"},
-		{"/api/openapi.json", 200, "openapi"},
-		{"/agent/docs", 200, "scalar"},
-		{"/api/docs", 200, "scalar"},
+		{"/agent/v1/openapi.json", 200, "openapi"},
+		{"/api/v1/openapi.json", 200, "openapi"},
+		{"/agent/v1/docs", 200, "scalar"},
+		{"/api/v1/docs", 200, "scalar"},
 	}
 	for _, c := range cases {
 		t.Run(c.path, func(t *testing.T) {
