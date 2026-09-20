@@ -271,6 +271,64 @@ try {
     }
   }
 
+  // Regression guard for a real defect (#147 review round 2): the first fix
+  // capped every .grid-table page's shell at a single guessed 1600px. That
+  // guess was simultaneously too small for a genuinely wide row (still
+  // overflowed 1600 and scrolled inside its own box) and too generous for a
+  // small one (a page whose table needs only a few hundred pixels still got
+  // stretched all the way to 1600, for nothing). app.css now sizes .main to
+  // the table's own content (max-width: fit-content) with a floor at the
+  // original 1080px baseline (min-width: min(100%, 1080px)) instead of a
+  // fixed number either way. A stylesheet-text assertion can prove the rule
+  // changed from a constant to fit-content; only a browser can prove .main
+  // actually tracks each page's real content rather than a guessed number in
+  // either direction -- and that table.grid-table's own width: 100% still
+  // resolves to the table's natural size against a fit-content parent
+  // instead of some indefinite or broken value.
+  step("a small .grid-table page (admin/users) is not stretched to a guessed width");
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(`${BASE_URL}/admin/users`, { waitUntil: "domcontentloaded" });
+  const usersGeom = await page.evaluate(() => {
+    const main = document.querySelector(".main");
+    const wrap = document.querySelector(".table-wrap");
+    return {
+      mainWidth: main?.getBoundingClientRect().width,
+      wrapClientWidth: wrap?.clientWidth,
+      wrapScrollWidth: wrap?.scrollWidth,
+    };
+  });
+  console.log(`    admin/users .main width=${usersGeom.mainWidth}px`);
+  if (usersGeom.mainWidth > 1090) {
+    fail(`admin/users .main is ${usersGeom.mainWidth}px wide -- its table is small enough to sit at the ` +
+      `1080px baseline, not be stretched out by a fixed guess (see app.css .main:has(.grid-table))`);
+  }
+  if (usersGeom.wrapScrollWidth > usersGeom.wrapClientWidth + 0.5) {
+    fail(`admin/users' table scrolls internally at 1920px wide (scrollWidth=${usersGeom.wrapScrollWidth}, ` +
+      `clientWidth=${usersGeom.wrapClientWidth}) even though it fits comfortably inside 1080px`);
+  }
+
+  step("a wide .grid-table page (admin/audit) grows past the 1080px baseline to fit its content");
+  await page.goto(`${BASE_URL}/admin/audit`, { waitUntil: "domcontentloaded" });
+  const auditGeom = await page.evaluate(() => {
+    const main = document.querySelector(".main");
+    const wrap = document.querySelector(".table-wrap");
+    return {
+      mainWidth: main?.getBoundingClientRect().width,
+      wrapClientWidth: wrap?.clientWidth,
+      wrapScrollWidth: wrap?.scrollWidth,
+    };
+  });
+  console.log(`    admin/audit .main width=${auditGeom.mainWidth}px`);
+  if (auditGeom.mainWidth <= 1080) {
+    fail(`admin/audit .main is only ${auditGeom.mainWidth}px wide -- the audit rows' actor, event and ` +
+      `webauthn_credential target columns need more than the 1080px baseline (see app.css .main:has(.grid-table))`);
+  }
+  if (auditGeom.wrapScrollWidth > auditGeom.wrapClientWidth + 0.5) {
+    fail(`admin/audit's table still scrolls inside its own box at 1920px wide (scrollWidth=${auditGeom.wrapScrollWidth}, ` +
+      `clientWidth=${auditGeom.wrapClientWidth}) after .main grew to fit it`);
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+
   // Phone-width geometry, asserted here because neither property is decidable
   // from the stylesheet text. A `1fr` grid track and a 4px-padded `.btn.sm`
   // both read as fine in the CSS; only a layout engine knows that the first
