@@ -48,6 +48,45 @@ func TestAdminListUsers_RequiresAdmin(t *testing.T) {
 	}
 }
 
+// ---------- GET /api/v1/admin/users/{id} ----------
+
+func TestAdminGetUser_HappyPathNotFoundAndGuard(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-getuser@example.com", "admin")
+	target := seedUser(t, h.st, "target-getuser@example.com", "user")
+	adminCookie, _ := sessionFor(t, h, "admin-getuser@example.com")
+
+	// Admin -> 200 with the target's view.
+	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/users/"+target.ID, nil, adminCookie, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	var got struct {
+		ID    string `json:"id"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, body)
+	}
+	if got.ID != target.ID || got.Email != target.Email {
+		t.Fatalf("got = %+v, want id=%q email=%q", got, target.ID, target.Email)
+	}
+
+	// Unknown id -> 404.
+	status, _, body = doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/users/does-not-exist", nil, adminCookie, "")
+	if status != http.StatusNotFound {
+		t.Fatalf("unknown id: status = %d, want 404, body=%s", status, body)
+	}
+
+	// Non-admin -> 403 (matches TestAdminListUsers_RequiresAdmin's assertion
+	// for the same case).
+	userCookie, _ := sessionFor(t, h, target.Email)
+	status, _, body = doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/users/"+target.ID, nil, userCookie, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("non-admin: status = %d, want 403, body=%s", status, body)
+	}
+}
+
 // ---------- POST /api/v1/admin/users ----------
 
 func TestAdminCreateUser_RequiresCSRF(t *testing.T) {
@@ -152,6 +191,92 @@ func TestAdminUpdateUser_LastAdmin_Conflict(t *testing.T) {
 	}, adminCookie, csrf)
 	if status != http.StatusConflict {
 		t.Fatalf("status = %d, want 409, body=%s", status, body)
+	}
+}
+
+// ---------- PATCH /api/v1/admin/users/{id}/email ----------
+
+func TestAdminSetUserEmail_HappyPath(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-setemail@example.com", "admin")
+	target := seedUser(t, h.st, "target-setemail@example.com", "user")
+	adminCookie, csrf := sessionFor(t, h, "admin-setemail@example.com")
+
+	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/users/"+target.ID+"/email", map[string]string{
+		"email": "new-setemail@example.com",
+	}, adminCookie, csrf)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	var got struct {
+		User struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		} `json:"user"`
+		Delivery struct {
+			Attempted bool   `json:"attempted"`
+			Sent      bool   `json:"sent"`
+			To        string `json:"to"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, body)
+	}
+	if got.User.ID != target.ID || got.User.Email != "new-setemail@example.com" {
+		t.Fatalf("user = %+v, want id=%q email=new-setemail@example.com", got.User, target.ID)
+	}
+	if !got.Delivery.Sent || got.Delivery.To != target.Email {
+		t.Errorf("Delivery = %+v, want sent=true to the OLD address %q", got.Delivery, target.Email)
+	}
+
+	stored, err := h.st.Users().GetByID(t.Context(), target.ID)
+	if err != nil {
+		t.Fatalf("GetByID after patch: %v", err)
+	}
+	if stored.Email != "new-setemail@example.com" {
+		t.Fatalf("stored email = %q, want new-setemail@example.com", stored.Email)
+	}
+}
+
+func TestAdminSetUserEmail_Unchanged(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-setemail-unchanged@example.com", "admin")
+	target := seedUser(t, h.st, "target-setemail-unchanged@example.com", "user")
+	adminCookie, csrf := sessionFor(t, h, "admin-setemail-unchanged@example.com")
+
+	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/users/"+target.ID+"/email", map[string]string{
+		"email": target.Email,
+	}, adminCookie, csrf)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", status, body)
+	}
+}
+
+func TestAdminSetUserEmail_Conflict(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-setemail-conflict@example.com", "admin")
+	target := seedUser(t, h.st, "target-setemail-conflict@example.com", "user")
+	seedUser(t, h.st, "taken-setemail@example.com", "user")
+	adminCookie, csrf := sessionFor(t, h, "admin-setemail-conflict@example.com")
+
+	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/users/"+target.ID+"/email", map[string]string{
+		"email": "taken-setemail@example.com",
+	}, adminCookie, csrf)
+	if status != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body=%s", status, body)
+	}
+}
+
+func TestAdminSetUserEmail_UnknownID(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-setemail-unknown@example.com", "admin")
+	adminCookie, csrf := sessionFor(t, h, "admin-setemail-unknown@example.com")
+
+	status, _, body := doJSON(t, http.MethodPatch, h.srv.URL+"/api/v1/admin/users/does-not-exist/email", map[string]string{
+		"email": "whoever@example.com",
+	}, adminCookie, csrf)
+	if status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", status, body)
 	}
 }
 

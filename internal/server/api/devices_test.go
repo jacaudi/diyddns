@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -48,6 +49,17 @@ type fakeMailer struct{}
 
 func (fakeMailer) Send(context.Context, string, string, string) error { return nil }
 func (fakeMailer) Enabled() bool                                      { return true }
+
+// failingMailer is the failing-transport counterpart to fakeMailer: Enabled
+// reports true (so the mailer-configured path is taken) but Send always
+// errors, exercising accountEmailErr's ErrConfirmationNotSent -> 503 branch
+// (account.go) and the rollback it guards (email_change.go:193-218).
+type failingMailer struct{}
+
+func (failingMailer) Send(context.Context, string, string, string) error {
+	return errors.New("failingMailer: send always fails")
+}
+func (failingMailer) Enabled() bool { return true }
 
 // buildServerDeps assembles every ServerDeps field common to the full-server
 // harness (agent HMAC surface, browser auth surface, device management,
@@ -102,25 +114,33 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
 	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
 	feedSvc := service.NewFeedService(st, feed.New(), discardAgentAudit{})
+	// EmailChangeService is unconditionally constructed in production
+	// (server.go), unlike Passkey/Grants/Notify's nil-tolerant gates — see
+	// registerAccountEmailOps's own doc comment (account.go). Every harness
+	// built from buildServerDeps therefore carries a working one by default;
+	// account_test.go's no-mailer-configured case builds its own with a nil
+	// mailer instead (see newEmailChangeHarness).
+	emailChangeSvc := service.NewEmailChangeService(st, mailer, "http://localhost", discardAgentAudit{}, log)
 
 	return st, api.ServerDeps{
-		Log:       log,
-		Store:     st,
-		Verifier:  verifier,
-		Sessions:  sessions,
-		Enroll:    enroll,
-		Devices:   devicesSvc,
-		Checkin:   checkinSvc,
-		Auth:      authSvc,
-		Bootstrap: bootstrapSvc,
-		Admin:     adminSvc,
-		Passkey:   passkeySvc,
-		Grants:    grantsSvc,
-		Mailer:    mailer,
-		Cfg:       cfg,
-		Info:      version.Info{Version: "v1.2.3"},
-		HMACKey:   key,
-		Feed:      feedSvc,
+		Log:         log,
+		Store:       st,
+		Verifier:    verifier,
+		Sessions:    sessions,
+		Enroll:      enroll,
+		Devices:     devicesSvc,
+		Checkin:     checkinSvc,
+		Auth:        authSvc,
+		Bootstrap:   bootstrapSvc,
+		Admin:       adminSvc,
+		EmailChange: emailChangeSvc,
+		Passkey:     passkeySvc,
+		Grants:      grantsSvc,
+		Mailer:      mailer,
+		Cfg:         cfg,
+		Info:        version.Info{Version: "v1.2.3"},
+		HMACKey:     key,
+		Feed:        feedSvc,
 	}
 }
 
