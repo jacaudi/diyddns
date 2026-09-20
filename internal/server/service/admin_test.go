@@ -302,6 +302,43 @@ func TestAdminService_ListAllDevices_ReturnsAll(t *testing.T) {
 	}
 }
 
+// TestAdminService_ListAllDeviceIPs_Deduplicates pins #150's core
+// requirement: the address set is squashed across every device -- including
+// two different owners' devices sharing an address (e.g. two hosts behind
+// one NAT) -- not a per-device listing, and scoped by ListFeed's
+// feed-membership predicate (D18), the same query devices.json uses: a
+// disabled device's address, and a device whose owner is disabled, must be
+// EXCLUDED. Both are frozen forever once disabled (HMAC auth rejects the
+// device outright, so it can never check in again, and the staleness sweep's
+// candidate query excludes disabled devices/owners too) -- including them
+// here would silently mix that unbounded staleness into a response the feed
+// itself bounds.
+func TestAdminService_ListAllDeviceIPs_Deduplicates(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	ctx := t.Context()
+	ownerA := seedUser(t, st, "owner-a@x", "user")
+	ownerB := seedUser(t, st, "owner-b@x", "user")
+	disabledOwner := seedUserWithDisabled(t, ctx, st, true)
+	seedDeviceWith(t, ctx, st, ownerA.ID, "phone", "203.0.113.9", "", false)
+	seedDeviceWith(t, ctx, st, ownerB.ID, "router", "203.0.113.9", "2001:db8::1", false)
+	seedDeviceWith(t, ctx, st, ownerA.ID, "disabled-device", "198.51.100.7", "", true)
+	seedDeviceWith(t, ctx, st, disabledOwner.ID, "disabled-owner-device", "198.51.100.8", "", false)
+
+	addrs, err := svc.ListAllDeviceIPs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("len(addrs) = %d, want 2 (disabled device and disabled-owner device excluded): %v", len(addrs), addrs)
+	}
+	if got := addrs[0].String(); got != "203.0.113.9" {
+		t.Errorf("addrs[0] = %q, want 203.0.113.9", got)
+	}
+	if got := addrs[1].String(); got != "2001:db8::1" {
+		t.Errorf("addrs[1] = %q, want 2001:db8::1", got)
+	}
+}
+
 // TestAdminService_ListAllDevicesWithExpiry_ReturnsLatestAddress pins that the
 // admin list's counterpart to ListAllDevices reports a device's last-recorded
 // address even after the sweep has cleared current_ipv4 -- the whole point of

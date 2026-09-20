@@ -127,6 +127,27 @@ type adminDeviceView struct {
 }
 type listAllDevicesOutput struct{ Body []adminDeviceView }
 
+// listAllDeviceIPsResponse is the deduplicated, current IP address set
+// across every device CURRENTLY IN THE GATEWAY FEED (#150) -- squashed to
+// unique addresses, not a per-device listing, and scoped by the exact same
+// membership predicate as /feed/v1/devices.json's cidrs field (store's
+// ListFeed: enabled device, enabled owner, at least one address -- design
+// #106 D18). A disabled device (or one whose owner is disabled) is excluded
+// here exactly as it is from devices.json, not merely omitted by coincidence:
+// its stored address is frozen forever once disabled (HMAC auth rejects it
+// outright, and the staleness sweep skips disabled devices/owners too), so
+// including it would mix an unbounded staleness guarantee into a response
+// whose whole point is devices.json's data without needing a feed token.
+// Field name and CIDR format (/32, /128) deliberately mirror devices.json's
+// cidrs field: same conceptual data, a different transport and audience
+// (session-authed admin REST here vs the feed's bearer-token REST for
+// firewalls/WAFs). Both render an address through store.CIDRString, so the
+// two can never diverge on format.
+type listAllDeviceIPsResponse struct {
+	CIDRs []string `json:"cidrs"`
+}
+type listAllDeviceIPsOutput struct{ Body listAllDeviceIPsResponse }
+
 // ---- audit DTOs ----
 
 type auditInput struct {
@@ -179,7 +200,9 @@ type serverInfoResponse struct {
 type serverInfoOutput struct{ Body serverInfoResponse }
 
 // registerAdminOps registers the admin-role operations onto apiAPI: user
-// management (list/create/update/delete), a cross-user device list, the
+// management (list/create/update/delete), a cross-user device list, a
+// deduplicated IP list scoped to the gateway feed's membership (#150, mirrors
+// /feed/v1/devices.json's cidrs field -- see listAllDeviceIPsResponse), the
 // audit log, and non-secret server info. Every op is session + admin gated;
 // mutations additionally require CSRF.
 func registerAdminOps(a huma.API, deps ServerDeps) {
@@ -279,6 +302,20 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			views[i] = adminDeviceView{deviceView: newDeviceView(d), UserID: d.UserID}
 		}
 		return &listAllDevicesOutput{Body: views}, nil
+	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodGet, Path: "/api/v1/admin/devices/ips", Middlewares: adminRead(),
+	}, func(ctx context.Context, _ *struct{}) (*listAllDeviceIPsOutput, error) {
+		addrs, err := deps.Admin.ListAllDeviceIPs(ctx)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "list device ips", err)
+		}
+		cidrs := make([]string, len(addrs))
+		for i, a := range addrs {
+			cidrs[i] = store.CIDRString(a)
+		}
+		return &listAllDeviceIPsOutput{Body: listAllDeviceIPsResponse{CIDRs: cidrs}}, nil
 	})
 
 	huma.Register(a, huma.Operation{

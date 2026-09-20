@@ -202,6 +202,90 @@ func TestAdminListDevices_IncludesUserID(t *testing.T) {
 	}
 }
 
+// ---------- GET /api/v1/admin/devices/ips ----------
+
+// TestAdminListDeviceIPs_Deduplicates seeds two owners whose devices share an
+// address (two hosts behind one NAT) plus a third, distinct address, and
+// asserts the response is the squashed set -- three devices, two addresses --
+// not a per-device listing (#150). It also seeds a disabled device and a
+// device owned by a disabled user, and asserts BOTH addresses are excluded:
+// the endpoint mirrors devices.json's feed-membership scoping (D18), not
+// ListAllDevices' unscoped view, because a disabled device's address is
+// frozen forever (HMAC auth rejects it, so it can never check in again, and
+// the staleness sweep skips disabled devices/owners too).
+func TestAdminListDeviceIPs_Deduplicates(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-ips@example.com", "admin")
+	ownerA := seedUser(t, h.st, "owner-ips-a@example.com", "user")
+	ownerB := seedUser(t, h.st, "owner-ips-b@example.com", "user")
+	disabledOwner, err := h.st.Users().Create(t.Context(), store.User{Email: "owner-ips-disabled@example.com", Role: "user", Disabled: true})
+	if err != nil {
+		t.Fatalf("seed disabled owner: %v", err)
+	}
+	if _, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: ownerA.ID, Label: "phone", CurrentIPv4: "203.0.113.9",
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: ownerB.ID, Label: "router", CurrentIPv4: "203.0.113.9", CurrentIPv6: "2001:db8::1",
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: ownerA.ID, Label: "disabled-device", CurrentIPv4: "198.51.100.7", Disabled: true,
+	}); err != nil {
+		t.Fatalf("seed disabled device: %v", err)
+	}
+	if _, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: disabledOwner.ID, Label: "disabled-owner-device", CurrentIPv4: "198.51.100.8",
+	}); err != nil {
+		t.Fatalf("seed disabled-owner device: %v", err)
+	}
+	adminCookie, _ := sessionFor(t, h, "admin-ips@example.com")
+
+	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/devices/ips", nil, adminCookie, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	var got struct {
+		CIDRs []string `json:"cidrs"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, body)
+	}
+	want := []string{"203.0.113.9/32", "2001:db8::1/128"}
+	if len(got.CIDRs) != len(want) {
+		t.Fatalf("cidrs = %v, want %v (disabled device and disabled-owner device must be excluded)", got.CIDRs, want)
+	}
+	for i, c := range want {
+		if got.CIDRs[i] != c {
+			t.Errorf("cidrs[%d] = %q, want %q", i, got.CIDRs[i], c)
+		}
+	}
+}
+
+// TestAdminListDeviceIPs_EmptyIsEmptyArrayNotNull pins the empty-response
+// shape: with no devices seeded, cidrs must marshal as [] so a strict JSON
+// consumer that does not special-case null never breaks. Mirrors the feed
+// package's TestRender_EmptyFeedIsNonEmptyBody for devices.json's cidrs field.
+func TestAdminListDeviceIPs_EmptyIsEmptyArrayNotNull(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-ips-empty@example.com", "admin")
+	adminCookie, _ := sessionFor(t, h, "admin-ips-empty@example.com")
+
+	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/devices/ips", nil, adminCookie, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	// Substring, not exact match: huma prefixes the body with a $schema field
+	// (see devices_manage_test.go for the same pattern). The assertion that
+	// matters is "cidrs":[], never "cidrs":null.
+	if want := `"cidrs":[]`; !strings.Contains(string(body), want) {
+		t.Errorf("body = %s, want it to contain %s", body, want)
+	}
+}
+
 // ---------- GET /api/v1/admin/audit ----------
 
 func TestAdminAudit_Paginated(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 
 	// Aliased: this file has a parameter named `email`, and revive's
 	// import-shadowing rule (enabled repo-wide, and NOT excluded for any file)
@@ -319,6 +320,37 @@ func (s *AdminService) ListAllDevices(ctx context.Context) ([]store.Device, erro
 		return nil, fmt.Errorf("service.ListAllDevices: %w", err)
 	}
 	return devices, nil
+}
+
+// ListAllDeviceIPs returns the deduplicated, currently-known IP address set
+// across every device CURRENTLY IN THE FEED (#150): squashed to unique
+// addresses, not a per-device listing, and scoped by ListFeed's
+// feed-membership predicate (D18) -- the same query devices.json uses --
+// rather than ListAll. This is deliberate, not merely consistent with
+// ListAllDevices: a disabled device (or a device whose owner is disabled) is
+// rejected at HMAC auth, so it can never check in again, and its stored
+// address is then frozen forever -- the staleness sweep's candidate query
+// excludes disabled devices/owners too, so nothing ever expires it either.
+// Sourcing from ListAll would mix that unbounded staleness into a response
+// whose whole point (#150) is parity with devices.json's bounded set. Reuses
+// store.DedupeAddrs, the same core the feed's Render uses for devices.json's
+// cidrs field, so the two audiences squash addresses identically without
+// duplicating that logic.
+func (s *AdminService) ListAllDeviceIPs(ctx context.Context) ([]netip.Addr, error) {
+	devices, err := s.st.Devices().ListFeed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListAllDeviceIPs: %w", err)
+	}
+	addrs := make([]netip.Addr, 0, 2*len(devices))
+	for _, d := range devices {
+		if a, ok := store.ParseAddr(d.IPv4); ok {
+			addrs = append(addrs, a)
+		}
+		if a, ok := store.ParseAddr(d.IPv6); ok {
+			addrs = append(addrs, a)
+		}
+	}
+	return store.DedupeAddrs(addrs), nil
 }
 
 // ListAllDevicesWithExpiry is ListAllDevices's counterpart for the admin

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"slices"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/store"
@@ -58,20 +57,6 @@ type jsonDoc struct {
 	Devices []jsonDevice `json:"devices"`
 }
 
-// parseAddr normalises a stored address: Unmap so a 4-in-6 form and the bare
-// form are one entry, WithZone("") so a zoned IPv6 can never render as an
-// invalid CIDR. ok is false for "" or an unparseable value.
-func parseAddr(s string) (netip.Addr, bool) {
-	if s == "" {
-		return netip.Addr{}, false
-	}
-	a, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return a.Unmap().WithZone(""), true
-}
-
 func nullable(a netip.Addr, ok bool) *string {
 	if !ok {
 		return nil
@@ -83,18 +68,22 @@ func nullable(a netip.Addr, ok bool) *string {
 // Render builds both documents from the member devices (already ordered by
 // id, as store.ListFeed returns them). A corrupt stored address is dropped
 // rather than failing the whole feed: a 500 would make a consumer keep a
-// stale list for one bad row.
+// stale list for one bad row. The dedup itself (sorted, IPv4 before IPv6,
+// two devices behind one NAT sharing an address) is store.DedupeAddrs -- the
+// same core the admin IP-list endpoint uses over the SAME feed-membership
+// query (store.ListFeed), so the two audiences squash and scope addresses
+// identically (#150).
 func Render(devices []store.FeedDevice) (Snapshot, error) {
-	addrs := make([]netip.Addr, 0, 2*len(devices))
+	rawAddrs := make([]netip.Addr, 0, 2*len(devices))
 	jdevs := make([]jsonDevice, 0, len(devices))
 	for _, d := range devices {
-		v4, ok4 := parseAddr(d.IPv4)
-		v6, ok6 := parseAddr(d.IPv6)
+		v4, ok4 := store.ParseAddr(d.IPv4)
+		v6, ok6 := store.ParseAddr(d.IPv6)
 		if ok4 {
-			addrs = append(addrs, v4)
+			rawAddrs = append(rawAddrs, v4)
 		}
 		if ok6 {
-			addrs = append(addrs, v6)
+			rawAddrs = append(rawAddrs, v6)
 		}
 		var seen *string
 		if d.LastSeenAt != 0 {
@@ -107,14 +96,13 @@ func Render(devices []store.FeedDevice) (Snapshot, error) {
 			LastSeenAt: seen,
 		})
 	}
-	slices.SortFunc(addrs, netip.Addr.Compare) // IPv4 before IPv6, then numeric
-	addrs = slices.Compact(addrs)              // two devices behind one NAT share an address
+	addrs := store.DedupeAddrs(rawAddrs)
 
 	cidrs := make([]string, 0, len(addrs))
 	var text bytes.Buffer
 	text.WriteString(headerLine)
 	for _, a := range addrs {
-		c := netip.PrefixFrom(a, a.BitLen()).String()
+		c := store.CIDRString(a)
 		cidrs = append(cidrs, c)
 		text.WriteString(c)
 		text.WriteByte('\n')
