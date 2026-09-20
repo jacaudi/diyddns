@@ -302,6 +302,33 @@ func TestAdminService_ListAllDevices_ReturnsAll(t *testing.T) {
 	}
 }
 
+// TestAdminService_ListAllDeviceIPs_Deduplicates pins #150's core
+// requirement: the address set is squashed across every device -- including
+// two different owners' devices sharing an address (e.g. two hosts behind
+// one NAT) -- not a per-device listing, and unscoped by ListAll rather than
+// ListFeed's feed-membership predicate.
+func TestAdminService_ListAllDeviceIPs_Deduplicates(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	ownerA := seedUser(t, st, "owner-a@x", "user")
+	ownerB := seedUser(t, st, "owner-b@x", "user")
+	seedDeviceWith(t, t.Context(), st, ownerA.ID, "phone", "203.0.113.9", "", false)
+	seedDeviceWith(t, t.Context(), st, ownerB.ID, "router", "203.0.113.9", "2001:db8::1", false)
+
+	addrs, err := svc.ListAllDeviceIPs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 2 {
+		t.Fatalf("len(addrs) = %d, want 2: %v", len(addrs), addrs)
+	}
+	if got := addrs[0].String(); got != "203.0.113.9" {
+		t.Errorf("addrs[0] = %q, want 203.0.113.9", got)
+	}
+	if got := addrs[1].String(); got != "2001:db8::1" {
+		t.Errorf("addrs[1] = %q, want 2001:db8::1", got)
+	}
+}
+
 // TestAdminService_ListAllDevicesWithExpiry_ReturnsLatestAddress pins that the
 // admin list's counterpart to ListAllDevices reports a device's last-recorded
 // address even after the sweep has cleared current_ipv4 -- the whole point of

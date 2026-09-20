@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 
 	// Aliased: this file has a parameter named `email`, and revive's
 	// import-shadowing rule (enabled repo-wide, and NOT excluded for any file)
@@ -319,6 +320,25 @@ func (s *AdminService) ListAllDevices(ctx context.Context) ([]store.Device, erro
 		return nil, fmt.Errorf("service.ListAllDevices: %w", err)
 	}
 	return devices, nil
+}
+
+// ListAllDeviceIPs returns the deduplicated, currently-known IP address set
+// across every device (#150): squashed to unique addresses, not a per-device
+// listing, and unscoped by ListAll rather than the feed's membership-scoped
+// ListFeed -- an admin sees a disabled device's last-known address too, same
+// as ListAllDevices. Reuses store.DedupeAddrs, the same core the feed's
+// Render uses for devices.json's cidrs field, so the two audiences squash
+// addresses identically without duplicating that logic.
+func (s *AdminService) ListAllDeviceIPs(ctx context.Context) ([]netip.Addr, error) {
+	devices, err := s.st.Devices().ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("service.ListAllDeviceIPs: %w", err)
+	}
+	pairs := make([]store.AddrPair, len(devices))
+	for i, d := range devices {
+		pairs[i] = store.AddrPair{IPv4: d.CurrentIPv4, IPv6: d.CurrentIPv6}
+	}
+	return store.DedupeAddrs(pairs), nil
 }
 
 // ListAllDevicesWithExpiry is ListAllDevices's counterpart for the admin

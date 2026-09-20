@@ -127,6 +127,18 @@ type adminDeviceView struct {
 }
 type listAllDevicesOutput struct{ Body []adminDeviceView }
 
+// listAllDeviceIPsResponse is the deduplicated, current IP address set
+// across every device (#150) -- squashed to unique addresses, not a
+// per-device listing. Field name and CIDR format (/32, /128) deliberately
+// mirror /feed/v1/devices.json's cidrs field: same conceptual data, a
+// different transport and audience (session-authed admin REST here vs the
+// feed's bearer-token REST for firewalls/WAFs). Both render an address
+// through store.CIDRString, so the two can never diverge on format.
+type listAllDeviceIPsResponse struct {
+	CIDRs []string `json:"cidrs"`
+}
+type listAllDeviceIPsOutput struct{ Body listAllDeviceIPsResponse }
+
 // ---- audit DTOs ----
 
 type auditInput struct {
@@ -179,9 +191,10 @@ type serverInfoResponse struct {
 type serverInfoOutput struct{ Body serverInfoResponse }
 
 // registerAdminOps registers the admin-role operations onto apiAPI: user
-// management (list/create/update/delete), a cross-user device list, the
-// audit log, and non-secret server info. Every op is session + admin gated;
-// mutations additionally require CSRF.
+// management (list/create/update/delete), a cross-user device list, a
+// deduplicated IP list across those devices (#150), the audit log, and
+// non-secret server info. Every op is session + admin gated; mutations
+// additionally require CSRF.
 func registerAdminOps(a huma.API, deps ServerDeps) {
 	adminRead := func() huma.Middlewares {
 		return huma.Middlewares{
@@ -279,6 +292,20 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			views[i] = adminDeviceView{deviceView: newDeviceView(d), UserID: d.UserID}
 		}
 		return &listAllDevicesOutput{Body: views}, nil
+	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodGet, Path: "/api/v1/admin/devices/ips", Middlewares: adminRead(),
+	}, func(ctx context.Context, _ *struct{}) (*listAllDeviceIPsOutput, error) {
+		addrs, err := deps.Admin.ListAllDeviceIPs(ctx)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "list device ips", err)
+		}
+		cidrs := make([]string, len(addrs))
+		for i, a := range addrs {
+			cidrs[i] = store.CIDRString(a)
+		}
+		return &listAllDeviceIPsOutput{Body: listAllDeviceIPsResponse{CIDRs: cidrs}}, nil
 	})
 
 	huma.Register(a, huma.Operation{

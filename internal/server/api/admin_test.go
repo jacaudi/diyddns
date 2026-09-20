@@ -202,6 +202,50 @@ func TestAdminListDevices_IncludesUserID(t *testing.T) {
 	}
 }
 
+// ---------- GET /api/v1/admin/devices/ips ----------
+
+// TestAdminListDeviceIPs_Deduplicates seeds two owners whose devices share an
+// address (two hosts behind one NAT) plus a third, distinct address, and
+// asserts the response is the squashed set -- three devices, two addresses --
+// not a per-device listing (#150).
+func TestAdminListDeviceIPs_Deduplicates(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-ips@example.com", "admin")
+	ownerA := seedUser(t, h.st, "owner-ips-a@example.com", "user")
+	ownerB := seedUser(t, h.st, "owner-ips-b@example.com", "user")
+	if _, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: ownerA.ID, Label: "phone", CurrentIPv4: "203.0.113.9",
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := h.st.Devices().Create(t.Context(), store.Device{
+		UserID: ownerB.ID, Label: "router", CurrentIPv4: "203.0.113.9", CurrentIPv6: "2001:db8::1",
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	adminCookie, _ := sessionFor(t, h, "admin-ips@example.com")
+
+	status, _, body := doJSON(t, http.MethodGet, h.srv.URL+"/api/v1/admin/devices/ips", nil, adminCookie, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	var got struct {
+		CIDRs []string `json:"cidrs"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, body)
+	}
+	want := []string{"203.0.113.9/32", "2001:db8::1/128"}
+	if len(got.CIDRs) != len(want) {
+		t.Fatalf("cidrs = %v, want %v", got.CIDRs, want)
+	}
+	for i, c := range want {
+		if got.CIDRs[i] != c {
+			t.Errorf("cidrs[%d] = %q, want %q", i, got.CIDRs[i], c)
+		}
+	}
+}
+
 // ---------- GET /api/v1/admin/audit ----------
 
 func TestAdminAudit_Paginated(t *testing.T) {
