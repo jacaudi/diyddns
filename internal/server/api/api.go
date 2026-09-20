@@ -37,9 +37,10 @@ type ServerDeps struct {
 	Bootstrap *service.BootstrapService
 	OIDC      *service.OIDCService
 	Admin     *service.AdminService
-	Passkey   *service.PasskeyService // nil until the WebAuthn Relying Party is resolved (fail-closed, Task 9) — passkey ops are only registered when non-nil, see Build
-	Grants    *service.GrantService   // nil alongside Passkey — see Build
-	Mailer    email.Mailer            // SMTP transport backing GrantService's self-service recovery emails; nil until Task 9 wires it
+	Passkey   *service.PasskeyService      // nil until the WebAuthn Relying Party is resolved (fail-closed, Task 9) — passkey ops are only registered when non-nil, see Build
+	Grants    *service.GrantService        // nil alongside Passkey — see Build
+	Notify    *service.NotificationService // nil unless notifications.enabled (#152) — the outbound-webhook admin ops are only registered when non-nil, see Build; mirrors the Passkey/Grants nil-tolerant gate
+	Mailer    email.Mailer                 // SMTP transport backing GrantService's self-service recovery emails; nil until Task 9 wires it
 	OIDCMgr   *oidc.Manager
 	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
 	Cfg       config.Auth
@@ -76,6 +77,13 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	// mirrored from webui.go's own deps.Cfg.Feed.Enabled gate).
 	if deps.FeedEnabled {
 		registerFeedTokenOps(apiAPI, deps)
+	}
+	// deps.Notify is nil whenever notifications.enabled is false (#152) —
+	// same nil-tolerant gate as Passkey/Grants above, so a disabled feature
+	// has no REST surface at all, matching webui.go's own conditional route
+	// table instead of merely 403/404ing per request.
+	if deps.Notify != nil {
+		registerNotificationOps(apiAPI, deps)
 	}
 
 	RegisterHealth(mux, deps.Log, deps.Store)

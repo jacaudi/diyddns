@@ -200,6 +200,18 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	notifySvc := service.NewNotificationService(st, key, allowedPrivateCIDRs, audit)
 	feedSvc := service.NewFeedService(st, hub, audit)
 
+	// notifyAPISvc is nil unless notifications.enabled, so api.Build's own
+	// nil-tolerant gate (#152, mirrors Passkey/Grants) keeps the REST
+	// endpoint/delivery ops off the mux exactly when webui.New's own route
+	// table (webui.go:117-126) leaves the HTML routes off it too.
+	// notifySvc itself stays unconditional above: webDeps.Notify below needs
+	// it regardless, matching webui's own always-construct/gate-at-registration
+	// pattern.
+	var notifyAPISvc *service.NotificationService
+	if cfg.Notifications.Enabled {
+		notifyAPISvc = notifySvc
+	}
+
 	oidcMgr := oidc.NewManager(cfg.Auth.OIDC, cfg.Server.BaseURL, log)
 	if cfg.Auth.OIDC.Enabled && cfg.Auth.OIDC.Required {
 		// Fail-closed: an operator who marked OIDC required wants the server to
@@ -269,6 +281,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Admin:     adminSvc,
 		Passkey:   passkeySvc,
 		Grants:    grantSvc,
+		Notify:    notifyAPISvc,
 		Mailer:    mailer,
 		OIDCMgr:   oidcMgr,
 		HMACKey:   key,
