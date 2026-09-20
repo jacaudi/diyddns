@@ -499,20 +499,35 @@ a:hover { text-decoration: underline; }
 /* #147: .main caps every page's content column at 1080px (see the
    content-width-scale comment in :root), which a table cannot negotiate --
    a .grid-table's natural width is however wide its columns need, not a
-   measure a template picks. At 1080 a five-column table carrying a UUID and
-   a WebAuthn credential ID (/admin/audit) never fits, so .table-wrap's
-   overflow-x: auto below fires on every screen, including ones with plenty
-   of spare width on both sides of the centred 1080px column.
-   :has() targets .main by what it CONTAINS, the same idiom .field:has(+
-   .btn) already uses above, so this is automatic: no template adds a
-   modifier class, and any future page that renders a .grid-table gets the
-   wider shell for free. 1600px, not "none" -- .main already has no
-   min-width, so removing the cap entirely would stretch a two-column table's
-   page just as wide as a five-column one on an 8K display, spacing sparse
-   content out rather than fixing the actual complaint. table-wrap's
-   overflow-x stays regardless: a table wider than 1600px (or than a narrow
-   viewport) still scrolls inside its own box instead of the page. */
-.main:has(.grid-table) { max-width: 1600px; }
+   measure a template picks. Whether that overflows 1080 depends on the
+   actual data, not the column count: a platform passkey's short credential
+   ID (/admin/audit) fits at 1080 fine, but a security-key-class credential
+   ID -- long enough that base64.RawURLEncoding renders it 80+ characters,
+   see internal/server/service/passkey.go -- alongside the row's other
+   columns does not, and .table-wrap's overflow-x: auto below then fires
+   even on screens with plenty of spare width on both sides of the centred
+   1080px column.
+   A first attempt capped this at a guessed 1600px, which was simultaneously
+   too small (a wide-enough row still overflowed 1600 and scrolled its own
+   box) and too generous (a table that only needed ~720px, like the
+   4-column IP history table, got stretched to 1600 anyway, for nothing).
+   Sizing to the content instead of a guessed number fixes both: fit-content
+   grows .main to whatever the table actually needs, with no upper bound to
+   guess wrong, and min-width keeps every page that does NOT carry a wide
+   table at the original 1080px baseline everything else already relies on
+   -- min(100%, 1080px) rather than a bare 1080px so a viewport narrower
+   than 1080 still shrinks instead of forcing a page-level scrollbar.
+   :has() targets .main by what it CONTAINS, the same idiom .empty:has(form)
+   already uses below, so this is automatic: no template adds a modifier
+   class, and any future page that renders a .grid-table gets the
+   content-fit shell for free. table.grid-table's own width: 100% still
+   resolves against this fit-content container to the table's natural
+   (shrink-to-fit) width rather than stretching to fill it -- confirmed by a
+   real browser measurement, not assumed; see the #147 checks in
+   internal/smoke/browser/smoke.mjs. table-wrap's overflow-x stays
+   regardless: a table wider than the viewport still scrolls inside its own
+   box instead of the page. */
+.main:has(.grid-table) { max-width: fit-content; min-width: min(100%, 1080px); }
 
 .table-wrap { overflow-x: auto; }
 table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type-3); }
