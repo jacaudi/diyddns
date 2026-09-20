@@ -36,6 +36,12 @@ func newAdminUserView(u store.User) adminUserView {
 
 type listUsersOutput struct{ Body []adminUserView }
 
+// getUserInput carries the {id} path parameter of GET
+// /api/v1/admin/users/{id} -- mirrors deleteUserInput's shape exactly.
+type getUserInput struct {
+	ID string `path:"id"`
+}
+
 type createUserInput struct {
 	Body struct {
 		Email string `json:"email"`
@@ -90,6 +96,26 @@ type updateUserInput struct {
 	}
 }
 type updateUserOutput struct{ Body adminUserView }
+
+// patchUserEmailInput is the body of PATCH /api/v1/admin/users/{id}/email --
+// a dedicated operation, not a merge into updateUserInput: email's
+// validation/conflict surface is richer than Role/Disabled's two scalars, so
+// it stays separate (mirrors updateUserInput's ID+Body shape).
+type patchUserEmailInput struct {
+	ID   string `path:"id"`
+	Body struct {
+		Email string `json:"email"`
+	}
+}
+
+// adminSetEmailOutput wraps AdminSet's two return values (store.User,
+// Delivery) directly.
+type adminSetEmailOutput struct {
+	Body struct {
+		User     adminUserView `json:"user"`
+		Delivery deliveryView  `json:"delivery"`
+	}
+}
 
 type deleteUserInput struct {
 	ID string `path:"id"`
@@ -221,6 +247,18 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
+		Method: http.MethodGet, Path: "/api/v1/admin/users/{id}", Middlewares: adminReadMW(a, deps),
+	}, func(ctx context.Context, in *getUserInput) (*updateUserOutput, error) {
+		// Same store call issueRecovery's handler already makes for the
+		// identical reason (single-user-by-id lookup with 404 on miss).
+		u, err := deps.Store.Users().GetByID(ctx, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "get user", err)
+		}
+		return &updateUserOutput{Body: newAdminUserView(u)}, nil
+	})
+
+	huma.Register(a, huma.Operation{
 		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWriteMW(a, deps),
 	}, func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
 		actor := UserFrom(ctx)
@@ -245,6 +283,10 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		}
 		return &updateUserOutput{Body: newAdminUserView(u)}, nil
 	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodPatch, Path: "/api/v1/admin/users/{id}/email", Middlewares: adminWriteMW(a, deps),
+	}, adminSetUserEmailHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodDelete, Path: "/api/v1/admin/users/{id}", DefaultStatus: http.StatusNoContent, Middlewares: adminWriteMW(a, deps),
@@ -345,6 +387,34 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 }
 
+// adminSetUserEmailHandler builds the handler for PATCH
+// /api/v1/admin/users/{id}/email. Extracted to a named function -- unlike
+// this file's other ops, which inline their handler directly in the
+// huma.Register call -- solely to keep registerAdminOps under the repo's
+// gocyclo ceiling (.golangci.yml min-complexity: 15): this op's two chained
+// lookups (GetByID, then AdminSet) each need their own error branch, and
+// inlining both pushed registerAdminOps to 17.
+func adminSetUserEmailHandler(deps ServerDeps) func(context.Context, *patchUserEmailInput) (*adminSetEmailOutput, error) {
+	return func(ctx context.Context, in *patchUserEmailInput) (*adminSetEmailOutput, error) {
+		actor := UserFrom(ctx)
+		// AdminSet needs the full store.User, not just its id; the lookup also
+		// keeps the 404-on-bad-id behavior consistent with this file's other
+		// {id}-scoped endpoints.
+		target, err := deps.Store.Users().GetByID(ctx, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "set user email", err)
+		}
+		updated, delivery, err := deps.EmailChange.AdminSet(ctx, actor.ID, target, in.Body.Email)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "set user email", err)
+		}
+		out := &adminSetEmailOutput{}
+		out.Body.User = newAdminUserView(updated)
+		out.Body.Delivery = newDeliveryView(delivery)
+		return out, nil
+	}
+}
+
 // adminErr maps an AdminService error to the right huma response.
 func adminErr(ctx context.Context, deps ServerDeps, action string, err error) error {
 	switch {
@@ -360,6 +430,10 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 		return huma.Error422UnprocessableEntity("role must be 'admin' or 'user'")
 	case errors.Is(err, service.ErrInvalidEmail):
 		return huma.Error422UnprocessableEntity("email address must be a plain 7-bit ASCII address in user@host form, with no display name and no surrounding whitespace")
+	case errors.Is(err, service.ErrEmailUnchanged):
+		return huma.Error422UnprocessableEntity("That is already the account's email address.")
+	case errors.Is(err, service.ErrEmailManagedByOIDC):
+		return huma.Error422UnprocessableEntity("This account's email address is managed by its identity provider.")
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
 		return huma.Error503ServiceUnavailable("passkey authentication is not configured")
 	default:

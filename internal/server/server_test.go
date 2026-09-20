@@ -585,11 +585,14 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 		{"webui nested mux", "GET", "/devices/dev_01J8WABCDEF", "GET /devices/{id}", 303},
 		{"webui static prefix", "GET", "/static/app.css", "GET /static/", 200},
 		{"unmatched (404)", "GET", "/nope/not/a/route", "", 404},
-		// 405: the mux registers PATCH/DELETE on this path, not GET. Design
-		// 11.4 lists it, and only the real handler has a route table where a
+		// 405: the mux registers PATCH on this path, not GET. Design 11.4
+		// lists it, and only the real handler has a route table where a
 		// method mismatch is possible. wantStatus is what separates this row
-		// from the 404 row above; both log an empty route.
-		{"method mismatch (405)", "GET", "/api/v1/admin/users/usr_01J8WZZZ", "", 405},
+		// from the 404 row above; both log an empty route. (#151 added a GET
+		// on the bare .../users/{id} this row used to target, so this now
+		// targets .../users/{id}/email, whose only registered method is
+		// PATCH -- same reasoning, different path.)
+		{"method mismatch (405)", "GET", "/api/v1/admin/users/usr_01J8WZZZ/email", "", 405},
 	}
 
 	ids := make([]string, len(tests)) // row -> the id its response echoed

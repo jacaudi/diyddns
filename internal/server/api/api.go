@@ -26,25 +26,26 @@ import (
 // the register* op functions read from deps rather than taking individual
 // parameters, so adding an operation never changes Build's signature.
 type ServerDeps struct {
-	Log       *slog.Logger
-	Store     *store.Store
-	Verifier  *auth.Verifier
-	Sessions  *auth.SessionManager
-	Enroll    *service.EnrollmentService
-	Devices   *service.DeviceService
-	Checkin   *service.CheckinService
-	Auth      *service.AuthService
-	Bootstrap *service.BootstrapService
-	OIDC      *service.OIDCService
-	Admin     *service.AdminService
-	Passkey   *service.PasskeyService      // nil until the WebAuthn Relying Party is resolved (fail-closed, Task 9) — passkey ops are only registered when non-nil, see Build
-	Grants    *service.GrantService        // nil alongside Passkey — see Build
-	Notify    *service.NotificationService // nil unless notifications.enabled (#152) — the outbound-webhook admin ops are only registered when non-nil, see Build; mirrors the Passkey/Grants nil-tolerant gate
-	Mailer    email.Mailer                 // SMTP transport backing GrantService's self-service recovery emails; nil until Task 9 wires it
-	OIDCMgr   *oidc.Manager
-	HMACKey   []byte // decoded AEAD master key, for sealing the OIDC flow cookie
-	Cfg       config.Auth
-	Info      version.Info
+	Log         *slog.Logger
+	Store       *store.Store
+	Verifier    *auth.Verifier
+	Sessions    *auth.SessionManager
+	Enroll      *service.EnrollmentService
+	Devices     *service.DeviceService
+	Checkin     *service.CheckinService
+	Auth        *service.AuthService
+	Bootstrap   *service.BootstrapService
+	OIDC        *service.OIDCService
+	Admin       *service.AdminService
+	EmailChange *service.EmailChangeService  // unconditionally constructed (server.go) — the self-service and admin-set email-change ops register unconditionally too, like registerDeviceOps, not gated the way Passkey/Grants/Notify below are
+	Passkey     *service.PasskeyService      // nil until the WebAuthn Relying Party is resolved (fail-closed, Task 9) — passkey ops are only registered when non-nil, see Build
+	Grants      *service.GrantService        // nil alongside Passkey — see Build
+	Notify      *service.NotificationService // nil unless notifications.enabled (#152) — the outbound-webhook admin ops are only registered when non-nil, see Build; mirrors the Passkey/Grants nil-tolerant gate
+	Mailer      email.Mailer                 // SMTP transport backing GrantService's self-service recovery emails; nil until Task 9 wires it
+	OIDCMgr     *oidc.Manager
+	HMACKey     []byte // decoded AEAD master key, for sealing the OIDC flow cookie
+	Cfg         config.Auth
+	Info        version.Info
 
 	Feed        *service.FeedService
 	FeedEnabled bool // mirrors cfg.Feed.Enabled; the feed-token REST ops are absent, not just guarded, when off — see Build (issue #153, mirrors webui.go's own feed.enabled gate)
@@ -61,6 +62,7 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	registerAuthOps(apiAPI, deps)
 	registerDeviceOps(apiAPI, deps)
 	registerDeviceMgmtOps(apiAPI, deps)
+	registerAccountEmailOps(apiAPI, deps)
 	registerAdminOps(apiAPI, deps)
 	// Passkey ops depend on BOTH Passkey and Grants being wired (register/begin
 	// and /finish drive a grant redeem via Grants; account passkey management

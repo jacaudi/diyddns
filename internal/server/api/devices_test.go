@@ -102,25 +102,33 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
 	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
 	feedSvc := service.NewFeedService(st, feed.New(), discardAgentAudit{})
+	// EmailChangeService is unconditionally constructed in production
+	// (server.go), unlike Passkey/Grants/Notify's nil-tolerant gates — see
+	// api.Build's doc comment on registerAccountEmailOps. Every harness built
+	// from buildServerDeps therefore carries a working one by default;
+	// account_test.go's no-mailer-configured case builds its own with a nil
+	// mailer instead (see newEmailChangeHarness).
+	emailChangeSvc := service.NewEmailChangeService(st, mailer, "http://localhost", discardAgentAudit{}, log)
 
 	return st, api.ServerDeps{
-		Log:       log,
-		Store:     st,
-		Verifier:  verifier,
-		Sessions:  sessions,
-		Enroll:    enroll,
-		Devices:   devicesSvc,
-		Checkin:   checkinSvc,
-		Auth:      authSvc,
-		Bootstrap: bootstrapSvc,
-		Admin:     adminSvc,
-		Passkey:   passkeySvc,
-		Grants:    grantsSvc,
-		Mailer:    mailer,
-		Cfg:       cfg,
-		Info:      version.Info{Version: "v1.2.3"},
-		HMACKey:   key,
-		Feed:      feedSvc,
+		Log:         log,
+		Store:       st,
+		Verifier:    verifier,
+		Sessions:    sessions,
+		Enroll:      enroll,
+		Devices:     devicesSvc,
+		Checkin:     checkinSvc,
+		Auth:        authSvc,
+		Bootstrap:   bootstrapSvc,
+		Admin:       adminSvc,
+		EmailChange: emailChangeSvc,
+		Passkey:     passkeySvc,
+		Grants:      grantsSvc,
+		Mailer:      mailer,
+		Cfg:         cfg,
+		Info:        version.Info{Version: "v1.2.3"},
+		HMACKey:     key,
+		Feed:        feedSvc,
 	}
 }
 
