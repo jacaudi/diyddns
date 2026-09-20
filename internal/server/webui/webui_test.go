@@ -87,7 +87,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Log:         log,
 		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
 		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit),
-		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}),
+		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}, nil, log),
 		Grants:      grants,
 		EmailChange: emailChange,
 		Notify:      notify,
@@ -2757,7 +2757,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3398,7 +3398,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3482,7 +3482,7 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin-disabled-recovery@example.com", "admin")

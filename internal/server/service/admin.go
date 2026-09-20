@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	// Aliased: this file has a parameter named `email`, and revive's
 	// import-shadowing rule (enabled repo-wide, and NOT excluded for any file)
@@ -25,6 +27,12 @@ var (
 	// not 7-bit ASCII, or is not already in bare canonical addr-spec form (a
 	// display name or surrounding whitespace).
 	ErrInvalidEmail = errors.New("service: invalid email address")
+	// ErrOwnerMissing is returned by GetDevice when a device row's owner row
+	// does not exist. The users→devices foreign key cascades, so this is a
+	// fault, and it deliberately does NOT satisfy errors.Is(err,
+	// store.ErrNotFound): the web handler must not answer "that device does
+	// not exist" about a device that demonstrably does (#132 D18).
+	ErrOwnerMissing = errors.New("service: device owner row is missing")
 )
 
 // UpdateUserParams is the partial-update input to UpdateUser. A nil field is
@@ -35,25 +43,28 @@ type UpdateUserParams struct {
 }
 
 // AdminService implements admin-only user management (with lockout guards),
-// plus cross-user device and audit reads.
+// plus cross-user device reads, the one admin device mutation (#132), and
+// audit reads.
 type AdminService struct {
-	st     *store.Store
-	audit  AuditSink
-	grants *GrantService
-	notify DeviceNotifier
+	deviceMutator // st, audit, notify — shared with DeviceService (#132 D8)
+	grants        *GrantService
+	mailer        emailpkg.Mailer
+	log           *slog.Logger
 }
 
 // NewAdminService constructs an AdminService. grants drives CreateUserInvite's
 // registration-grant issuance (design D15); it may be nil if WebAuthn is not
 // configured, in which case CreateUserInvite returns ErrWebAuthnUnavailable.
 // notify is told, per device, when a user's disable/enable/delete moves that
-// user's devices out of or into the gateway feed (#106).
-func NewAdminService(st *store.Store, audit AuditSink, grants *GrantService, notify DeviceNotifier) *AdminService {
+// user's devices out of or into the gateway feed (#106). mailer carries the
+// owner notice for SetDeviceEnabled (#132 D10) and may be nil, which is
+// treated as disabled; log must not be nil.
+func NewAdminService(st *store.Store, audit AuditSink, grants *GrantService, notify DeviceNotifier, mailer emailpkg.Mailer, log *slog.Logger) *AdminService {
 	return &AdminService{
-		st:     st,
-		audit:  audit,
-		grants: grants,
-		notify: notify,
+		deviceMutator: deviceMutator{st: st, audit: audit, notify: notify},
+		grants:        grants,
+		mailer:        mailer,
+		log:           log,
 	}
 }
 
@@ -334,4 +345,99 @@ func (s *AdminService) ListAudit(ctx context.Context, f store.AuditFilter, curso
 		return store.AuditPage{}, fmt.Errorf("service.ListAudit: %w", err)
 	}
 	return page, nil
+}
+
+// GetDevice returns any device by id together with its owner. Unscoped by
+// construction: this service is the admin-only surface, and the route
+// middleware, not this method, is what decides who may call it (#132 D5).
+// Returns store.ErrNotFound for an unknown device id and ErrOwnerMissing for
+// a device whose owner row is gone; the second names both ids for the log.
+//
+// Two statements, the second issued only after the first's row is scanned,
+// which is what makes this safe on a pool of exactly one connection (see
+// DeviceService.ListWithExpiry).
+func (s *AdminService) GetDevice(ctx context.Context, id string) (store.Device, store.User, error) {
+	dev, err := s.st.Devices().GetByID(ctx, id)
+	if err != nil {
+		return store.Device{}, store.User{}, fmt.Errorf("service.GetDevice: %w", err) // ErrNotFound flows up
+	}
+	owner, err := s.st.Users().GetByID(ctx, dev.UserID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.Device{}, store.User{}, fmt.Errorf("service.GetDevice: device %s owner %s: %w", id, dev.UserID, ErrOwnerMissing)
+		}
+		return store.Device{}, store.User{}, fmt.Errorf("service.GetDevice: %w", err)
+	}
+	return dev, owner, nil
+}
+
+// SetDeviceEnabled flips the disabled flag of ANY device on behalf of an
+// admin (#132 D4, D7). actor is the admin's session: its UserID is the audit
+// actor and its IP the audit source, following #137. The device's owner is
+// resolved here and is the party the audit row's details and the owner
+// notice name. This is the only admin mutation of a device: rename, secret
+// rotation and deletion stay with the owner (#132 D3).
+//
+// Idempotent (#132 D11): when the device already holds the requested state
+// nothing is written, audited or mailed — a double-submit must not send the
+// owner a second unsolicited notice.
+func (s *AdminService) SetDeviceEnabled(ctx context.Context, actor store.Session, id string, disabled bool) (store.Device, error) {
+	dev, owner, err := s.GetDevice(ctx, id)
+	if err != nil {
+		return store.Device{}, fmt.Errorf("service.SetDeviceEnabled: %w", err)
+	}
+	if dev.Disabled == disabled {
+		return dev, nil
+	}
+	event := "device.enabled_by_admin"
+	if disabled {
+		event = "device.disabled_by_admin"
+	}
+	details, _ := json.Marshal(map[string]string{"owner_user_id": owner.ID})
+	updated, err := s.flipDisabled(ctx, dev, owner, disabled, store.AuditEntry{
+		ActorUserID: actor.UserID, EventType: event, TargetType: "device", TargetID: id,
+		DetailsJSON: string(details), IP: actor.IP,
+	})
+	if err != nil {
+		return store.Device{}, fmt.Errorf("service.SetDeviceEnabled: %w", err)
+	}
+	s.notifyOwner(ctx, actor, owner, dev, disabled)
+	return updated, nil
+}
+
+// notifyOwner mails the device's owner that an admin changed its state. It
+// mirrors GrantService.deliver (grants.go): a nil or disabled mailer sends
+// nothing; cancellation is stripped so a closed browser tab does not abort
+// the send; the send is bounded by adminDeliveryTimeout; a failure is logged
+// and audited as email.send_failed against the owner — with the device in the
+// details so the row can be told from an invite or recovery failure — and is
+// never returned. The disable is the durable record; the mail is a courtesy
+// (#132 D10, D17). The send is synchronous in the admin's request, exactly as
+// the invite and recovery sends are.
+//
+// Deliberately a second copy of deliver's shape rather than a shared helper:
+// deliver returns a Delivery the invite page renders and its timeout is a
+// struct field a test shrinks; see the #132 design §7 for why extraction
+// waits for a third caller.
+func (s *AdminService) notifyOwner(ctx context.Context, actor store.Session, owner store.User, dev store.Device, disabled bool) {
+	if s.mailer == nil || !s.mailer.Enabled() {
+		return
+	}
+	subject, body := emailpkg.DeviceStateChangedByAdminBody(dev.Label, dev.ID, disabled)
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), adminDeliveryTimeout)
+	defer cancel()
+	if err := s.mailer.Send(sendCtx, owner.Email, subject, body); err != nil {
+		s.log.ErrorContext(ctx, "device state notice delivery failed",
+			"error", err, "user_id", owner.ID, "device_id", dev.ID)
+		details, _ := json.Marshal(map[string]string{"device_id": dev.ID})
+		// The same context discipline as GrantService.auditSendFailure: never
+		// the send's context (it may be the thing that just expired) and never
+		// the raw request context (it may already be canceled).
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+		defer cancelAudit()
+		s.audit.Log(auditCtx, store.AuditEntry{
+			ActorUserID: actor.UserID, EventType: EventEmailSendFailed,
+			TargetType: "user", TargetID: owner.ID, DetailsJSON: string(details), IP: actor.IP,
+		})
+	}
 }
