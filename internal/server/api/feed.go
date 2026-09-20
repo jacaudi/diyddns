@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -19,7 +20,7 @@ import (
 type feedTokenView struct {
 	ID         string `json:"id"`
 	Label      string `json:"label"`
-	CreatedBy  string `json:"created_by"`
+	CreatedBy  string `json:"created_by" doc:"User ID of the minting admin; empty if that user has since been deleted."`
 	CreatedAt  int64  `json:"created_at"`
 	LastUsedAt int64  `json:"last_used_at"`
 }
@@ -42,8 +43,8 @@ type mintFeedTokenInput struct {
 
 // mintFeedTokenResponse carries the freshly-minted token's plaintext secret,
 // shown exactly once (mirrors devices.go's rotateSecretResponse and
-// enroll.go's mintCodeResponse — see service.FeedService.MintToken's doc
-// comment). Token is a named field, not an embedded feedTokenView, matching
+// mintCodeResponse — see service.FeedService.MintToken's doc comment).
+// Token is a named field, not an embedded feedTokenView, matching
 // admin.go's createUserResponse/issueRecoveryResponse convention for scalar
 // (object) response bodies: huma's SchemaLinkTransformer only inspects a
 // struct's own top-level fields' export bit, and an anonymously-embedded
@@ -73,6 +74,13 @@ type revokeFeedTokenOutput struct{}
 // admin gated; mutations additionally require CSRF, matching the rest of
 // /api/v1/admin/*. Build only calls this when deps.FeedEnabled is true.
 func registerFeedTokenOps(a huma.API, deps ServerDeps) {
+	// feedRead/feedWrite restate admin.go's registerAdminOps' adminRead()/
+	// adminWrite() closures verbatim (session+admin, and session+admin+CSRF).
+	// Tolerated as a second copy per this codebase's Rule of Three convention
+	// (authmw.go's *MW helpers exist for exactly this reason) — but a THIRD
+	// copy anywhere should trigger hoisting adminRead(a, deps)/adminWrite(a,
+	// deps) into authmw.go next to the existing *MW helpers, rather than a
+	// fourth restatement.
 	feedRead := huma.Middlewares{
 		sessionMW(a, deps),
 		adminMW(a, deps),
@@ -128,6 +136,8 @@ func feedTokenErr(ctx context.Context, deps ServerDeps, action string, err error
 		return huma.Error404NotFound("feed token not found")
 	case errors.Is(err, store.ErrConflict):
 		return huma.Error409Conflict("a feed token with that label already exists")
+	case errors.Is(err, service.ErrInvalidLabel):
+		return huma.Error422UnprocessableEntity("label must not be empty")
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)

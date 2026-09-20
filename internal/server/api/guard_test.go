@@ -62,3 +62,25 @@ func TestGuard_ProtectedPathsRejectUnauthenticated(t *testing.T) {
 		}
 	}
 }
+
+// TestGuard_FeedTokenRoutesRejectUnauthenticated is
+// TestGuard_ProtectedPathsRejectUnauthenticated's feed-token counterpart.
+// newFullHarness's harness (used above) leaves FeedEnabled false, so the
+// three feed-token routes are structurally absent (404) there and never
+// exercise this safety net — this test drives the same behavioral check
+// against a harness with the feed feature ON, so a future feed-token op that
+// forgets its auth middleware fails here the same way it would above.
+func TestGuard_FeedTokenRoutesRejectUnauthenticated(t *testing.T) {
+	srv := newFeedHarness(t, true).srv
+	cases := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/feed/tokens"},
+		{http.MethodPost, "/api/v1/admin/feed/tokens"},
+		{http.MethodDelete, "/api/v1/admin/feed/tokens/some-id"},
+	}
+	for _, c := range cases {
+		code := doNoAuth(t, srv, c.method, c.path)
+		if code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Errorf("%s %s returned %d (fail-open!), want 401 or 403", c.method, c.path, code)
+		}
+	}
+}

@@ -96,6 +96,15 @@ const FeedTokenPrefix = store.FeedTokenPrefix
 // middleware can log "malformed" vs "unknown_token".
 var ErrTokenMalformed = errors.New("service: malformed feed token")
 
+// ErrInvalidLabel is returned by MintToken when the label is empty after
+// trimming surrounding whitespace. The store's label column is NOT NULL
+// UNIQUE, which happily accepts "" -- this sentinel is what actually keeps a
+// blank label out, for every caller (webui, REST) rather than each adapter
+// re-implementing the same check (mirrors admin.go's ErrInvalidRole /
+// ErrInvalidEmail: a guard sentinel mapped to 422 by each presentation
+// layer).
+var ErrInvalidLabel = errors.New("service: feed token label must not be empty")
+
 // lastUsedThrottle is how often Authenticate writes last_used_at per token.
 const lastUsedThrottle = 60
 
@@ -133,12 +142,20 @@ func (s *FeedService) ListTokens(ctx context.Context) ([]store.FeedToken, error)
 	return toks, nil
 }
 
-// MintToken creates a token and returns its plaintext exactly once. The
-// plaintext is FeedTokenPrefix + 32 random bytes (base64url); only its
-// SHA-256 hash is stored (auth.HashToken — hashed, not sealed: the server
-// never needs the plaintext back). Returns store.ErrConflict on a duplicate
-// label.
+// MintToken creates a token and returns its plaintext exactly once. label is
+// trimmed of surrounding whitespace and the trimmed value is what gets
+// stored; MintToken returns ErrInvalidLabel if that leaves it empty, so
+// "envoy" and " envoy " cannot become two distinct tokens and a blank label
+// can never reach the store. The plaintext is FeedTokenPrefix + 32 random
+// bytes (base64url); only its SHA-256 hash is stored (auth.HashToken —
+// hashed, not sealed: the server never needs the plaintext back). Returns
+// store.ErrConflict on a duplicate label.
 func (s *FeedService) MintToken(ctx context.Context, actorID, label string) (store.FeedToken, string, error) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return store.FeedToken{}, "", fmt.Errorf("service.MintToken: %w", ErrInvalidLabel)
+	}
+
 	rnd, err := auth.RandToken(32)
 	if err != nil {
 		return store.FeedToken{}, "", fmt.Errorf("service.MintToken: %w", err)
