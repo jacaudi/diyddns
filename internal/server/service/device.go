@@ -18,11 +18,9 @@ type SecretCacheInvalidator interface {
 // device owned by a different user is always reported as store.ErrNotFound, so
 // callers cannot distinguish "not yours" from "doesn't exist".
 type DeviceService struct {
-	st          *store.Store
-	key         []byte
-	invalidator SecretCacheInvalidator
-	audit       AuditSink
-	notify      DeviceNotifier
+	deviceMutator // st, audit, notify — shared with AdminService (#132 D8)
+	key           []byte
+	invalidator   SecretCacheInvalidator
 }
 
 // NewDeviceService constructs a DeviceService. key is the 32-byte AEAD key used
@@ -30,7 +28,11 @@ type DeviceService struct {
 // HMAC verifier's secret cache on rotation; audit records lifecycle events;
 // notify is told when a device joins or leaves the gateway feed (#106).
 func NewDeviceService(st *store.Store, key []byte, invalidator SecretCacheInvalidator, audit AuditSink, notify DeviceNotifier) *DeviceService {
-	return &DeviceService{st: st, key: key, invalidator: invalidator, audit: audit, notify: notify}
+	return &DeviceService{
+		deviceMutator: deviceMutator{st: st, audit: audit, notify: notify},
+		key:           key,
+		invalidator:   invalidator,
+	}
 }
 
 // List returns all devices belonging to userID.
@@ -120,8 +122,9 @@ func (s *DeviceService) Rename(ctx context.Context, userID, id, newLabel string)
 
 // SetEnabled toggles a device's disabled flag and emits device.added /
 // device.removed when the flip changes the device's feed membership (design
-// #106 §6.2, §7.2). before is evaluated on the pre-write rows; after on the
-// same snapshot with Disabled set to the requested value.
+// #106 §6.2, §7.2). The write, the audit row and the pre-write-snapshot
+// membership emission are deviceMutator.flipDisabled's; this method's own
+// knowledge is the owner scope and the owner's event names.
 func (s *DeviceService) SetEnabled(ctx context.Context, userID, id string, disabled bool) (store.Device, error) {
 	dev, err := s.ownedDevice(ctx, userID, id)
 	if err != nil {
@@ -131,22 +134,13 @@ func (s *DeviceService) SetEnabled(ctx context.Context, userID, id string, disab
 	if err != nil {
 		return store.Device{}, fmt.Errorf("service.SetEnabled: %w", err)
 	}
-	if err := s.st.Devices().SetDisabled(ctx, id, disabled); err != nil {
-		return store.Device{}, fmt.Errorf("service.SetEnabled: %w", err)
-	}
 	event := "device.enabled"
 	if disabled {
 		event = "device.disabled"
 	}
-	s.audit.Log(ctx, store.AuditEntry{
+	updated, err := s.flipDisabled(ctx, dev, owner, disabled, store.AuditEntry{
 		ActorUserID: userID, EventType: event, TargetType: "device", TargetID: id,
 	})
-
-	after := dev
-	after.Disabled = disabled
-	emitMembership(ctx, s.notify, after, inFeed(dev, owner), inFeed(after, owner))
-
-	updated, err := s.st.Devices().GetByID(ctx, id)
 	if err != nil {
 		return store.Device{}, fmt.Errorf("service.SetEnabled: %w", err)
 	}

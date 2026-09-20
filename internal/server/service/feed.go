@@ -56,6 +56,37 @@ func emitMembership(ctx context.Context, n DeviceNotifier, d store.Device, befor
 	}
 }
 
+// deviceMutator is the write path DeviceService and AdminService share for
+// flipping a device's disabled flag (#132 D8). Embedded by both, so each
+// service's st/audit/notify fields ARE the mutator's: one construction site
+// per service and no duplicated wiring.
+type deviceMutator struct {
+	st     *store.Store
+	audit  AuditSink
+	notify DeviceNotifier
+}
+
+// flipDisabled writes disabled, records entry, emits the membership event
+// computed from the PRE-WRITE snapshot (dev, owner; design #106 §7.2 and
+// #106 D13), and returns the re-read row. Errors are returned unwrapped; the
+// caller adds its own "service.X:" prefix.
+//
+// Callers differ only in entry: DeviceService.SetEnabled audits the owner's
+// device.disabled/device.enabled; AdminService.SetDeviceEnabled audits
+// device.disabled_by_admin/device.enabled_by_admin with the admin as actor.
+func (m deviceMutator) flipDisabled(ctx context.Context, dev store.Device, owner store.User, disabled bool, entry store.AuditEntry) (store.Device, error) {
+	if err := m.st.Devices().SetDisabled(ctx, dev.ID, disabled); err != nil {
+		return store.Device{}, err
+	}
+	m.audit.Log(ctx, entry)
+
+	after := dev
+	after.Disabled = disabled
+	emitMembership(ctx, m.notify, after, inFeed(dev, owner), inFeed(after, owner))
+
+	return m.st.Devices().GetByID(ctx, dev.ID)
+}
+
 // FeedTokenPrefix re-exports store.FeedTokenPrefix for callers in this
 // package's orbit (tests, the web UI); the constant is owned by store.
 const FeedTokenPrefix = store.FeedTokenPrefix

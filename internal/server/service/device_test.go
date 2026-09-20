@@ -347,3 +347,59 @@ type panickingDeviceNotifier struct{}
 
 func (panickingDeviceNotifier) DeviceAdded(context.Context, store.Device)   { panic("boom") }
 func (panickingDeviceNotifier) DeviceRemoved(context.Context, store.Device) { panic("boom") }
+
+// TestDeviceMutator_FlipDisabled_EmitsFromPreWriteSnapshot pins the one
+// piece of knowledge flipDisabled exists to hold (#132 D8): membership is
+// computed from the rows as read BEFORE the write (design #106 §7.2), the
+// audit entry is written exactly as handed in, and the returned row is the
+// re-read post-write state. Both DeviceService.SetEnabled and
+// AdminService.SetDeviceEnabled build on this; neither re-derives it.
+func TestDeviceMutator_FlipDisabled_EmitsFromPreWriteSnapshot(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "a@b.co", "user")
+	dev := seedDevice(t, st, usr.ID, "d")
+	giveIP(t, st, dev.ID, "203.0.113.9")
+	// giveIP wrote to the database; the local dev is still the address-less
+	// row. flipDisabled computes membership from the value it is HANDED, so
+	// re-read the row -- that is the pre-write snapshot a caller holds.
+	dev, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &recordingDeviceNotifier{}
+	m := deviceMutator{st: st, audit: NewAuditWriter(st), notify: n}
+
+	entry := store.AuditEntry{ActorUserID: usr.ID, EventType: "device.disabled", TargetType: "device", TargetID: dev.ID, IP: "198.51.100.7"}
+	got, err := m.flipDisabled(t.Context(), dev, usr, true, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Disabled {
+		t.Fatal("returned row is not the post-write state")
+	}
+	if len(n.removed) != 1 || n.removed[0].ID != dev.ID || len(n.added) != 0 {
+		t.Fatalf("removed=%+v added=%+v, want exactly one removed", n.removed, n.added)
+	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "device.disabled"}, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].ActorUserID != usr.ID || page.Rows[0].TargetID != dev.ID || page.Rows[0].IP != "198.51.100.7" {
+		t.Fatalf("audit rows = %+v, want the entry as handed in", page.Rows)
+	}
+
+	// Flip back from the post-write row: before=not a member, after=member.
+	entry.EventType = "device.enabled"
+	if _, err := m.flipDisabled(t.Context(), got, usr, false, entry); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.added) != 1 || n.added[0].ID != dev.ID || n.added[0].Disabled {
+		t.Fatalf("added = %+v, want the re-enabled device", n.added)
+	}
+
+	// An unknown device is the store's ErrNotFound, unwrapped: the caller
+	// adds its own "service.X:" prefix.
+	if _, err := m.flipDisabled(t.Context(), store.Device{ID: "nope", UserID: usr.ID}, usr, true, entry); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown device err = %v, want ErrNotFound", err)
+	}
+}
