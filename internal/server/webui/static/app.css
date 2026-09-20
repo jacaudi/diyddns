@@ -142,7 +142,11 @@
      The shell widths stay where they are declared: .wrap (420, the auth
      card), .modal-card (440, the overlay) and .main (1080, the app shell)
      size a shell around content rather than the content itself, and none of
-     them is a choice a template makes. */
+     them is a choice a template makes. .main's 1080 is a default, not a
+     ceiling -- see the .main:has(.grid-table) override by .table-wrap below
+     (#147): a table is exactly the content this scale does not cover
+     (min-content width, not a chosen measure), so it gets its own rule
+     instead of a third scale. */
   --measure-1: 560px;
   --measure-2: 680px;
 }
@@ -491,6 +495,24 @@ a:hover { text-decoration: underline; }
 .stat .value.small { font-size: var(--type-5); }
 
 /* ---------- Tables ---------- */
+
+/* #147: .main caps every page's content column at 1080px (see the
+   content-width-scale comment in :root), which a table cannot negotiate --
+   a .grid-table's natural width is however wide its columns need, not a
+   measure a template picks. At 1080 a five-column table carrying a UUID and
+   a WebAuthn credential ID (/admin/audit) never fits, so .table-wrap's
+   overflow-x: auto below fires on every screen, including ones with plenty
+   of spare width on both sides of the centred 1080px column.
+   :has() targets .main by what it CONTAINS, the same idiom .field:has(+
+   .btn) already uses above, so this is automatic: no template adds a
+   modifier class, and any future page that renders a .grid-table gets the
+   wider shell for free. 1600px, not "none" -- .main already has no
+   min-width, so removing the cap entirely would stretch a two-column table's
+   page just as wide as a five-column one on an 8K display, spacing sparse
+   content out rather than fixing the actual complaint. table-wrap's
+   overflow-x stays regardless: a table wider than 1600px (or than a narrow
+   viewport) still scrolls inside its own box instead of the page. */
+.main:has(.grid-table) { max-width: 1600px; }
 
 .table-wrap { overflow-x: auto; }
 table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type-3); }
