@@ -265,6 +265,7 @@ feed and feed expiry) and documented on its own. Every key also has a
 | Doc | Default | Covers |
 |---|---|---|
 | [Deployment](docs/deployment.md) | — | Containers, production Docker/Compose/Kubernetes, client credential volumes |
+| [Admin](docs/admin.md) | — | Cross-user device REST views for administrators |
 | [Email](docs/email.md) | off | Invite/recovery/address-change link delivery, via Apprise over SMTP |
 | [Notifications](docs/notifications.md) | off | Signed outbound webhooks, payload contract, verification |
 | [Feed](docs/feed.md) | **on** | REST/WebSocket gateway allow-list |

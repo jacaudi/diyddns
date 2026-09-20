@@ -28,6 +28,14 @@ An admin adds an endpoint from `/admin/endpoints`: a label and a target URL. The
 that endpoint's signing secret exactly once — copy it immediately, it cannot be shown again, and
 creating another endpoint will not show it again either.
 
+The same management — list, create, get, enable/disable, delete, and a one-off test delivery —
+is also available over REST at `/api/v1/admin/endpoints` (and
+`/api/v1/admin/endpoints/{id}/test`), session + admin gated, with every write additionally
+requiring a CSRF token, matching every other admin-write endpoint. A delivery stuck in a terminal
+state can be redelivered at `POST /api/v1/admin/deliveries/{id}/redeliver`, same gating. This is
+a second interface onto the same notification service, not a separate configuration store: an
+endpoint created from one surface is visible and manageable from the other.
+
 ## The Payload
 
 Every delivery is one JSON object, one event. There are three device events and one rule for
