@@ -2805,6 +2805,7 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 	// Seed a passkey so the recovery route's assertion is meaningful: without
 	// one, "credentials still exist" is trivially true and proves nothing.
 	seedPasskey(t, st, target.ID, "existing key")
+	dev := seedDevice(t, st, target.ID, "targets-pi")
 	cookie := signIn(t, deps, admin)
 
 	for _, path := range []string{
@@ -2813,6 +2814,7 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 		"/admin/users/" + target.ID + "/update",
 		"/admin/users/" + target.ID + "/delete",
 		"/admin/users/" + target.ID + "/recovery",
+		"/admin/devices/" + dev.ID + "/enabled",
 	} {
 		t.Run(path, func(t *testing.T) {
 			form := url.Values{
@@ -3527,8 +3529,8 @@ func TestKnownEventTypes_IncludesRetentionPrune(t *testing.T) {
 
 // TestAdminDevices_ListsEveryOwnersDevices is #105's happy path: the admin page
 // lists devices across users, links each owner to the admin user page, links a
-// device to its owner-scoped detail only when the signed-in admin owns it, and
-// offers no mutation at all.
+// device the admin owns to the owner-scoped detail and every other device to
+// the read-only admin detail page (#132), and offers no mutation on the list.
 func TestAdminDevices_ListsEveryOwnersDevices(t *testing.T) {
 	deps, st := testDeps(t)
 	h, _ := New(deps)
@@ -3566,6 +3568,9 @@ func TestAdminDevices_ListsEveryOwnersDevices(t *testing.T) {
 	}
 	if strings.Contains(body, `href="/devices/`+theirs.ID+`"`) {
 		t.Error("another user's device is linked; detail pages are owner-scoped")
+	}
+	if !strings.Contains(body, `href="/admin/devices/`+theirs.ID+`"`) {
+		t.Error("another user's device is not linked to the admin detail page (#132)")
 	}
 	if strings.Contains(body, "<form method=\"post\"") {
 		t.Error("the admin devices page is read-only for v1 and must carry no mutation form")

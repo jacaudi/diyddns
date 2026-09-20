@@ -1,0 +1,43 @@
+{{define "content"}}
+<div class="breadcrumb"><a href="/admin/devices">All Devices</a> / {{.Device.Label}}</div>
+
+<div class="page-head">
+  <div>
+    <h1>{{.Device.Label}} {{template "statusTag" .Status}}</h1>
+    <p class="sub">Last check-in <span title="{{.LastSeenAbs}}">{{.LastSeenRel}}</span> · created {{.CreatedAbs}}</p>
+  </div>
+  <div class="btn-row"><a class="btn" href="{{.HistoryURL}}">View full history</a></div>
+</div>
+
+{{/* The same three read-only cards as the owner's page, from partials.html
+     (#132 D12). This page deliberately has NO reveal modal and never renders
+     .Secret or .Credentials: those are the owner's, and no admin handler sets
+     them. */}}
+<div class="grid cols-2">
+  {{template "deviceAddressesCard" .}}
+  {{template "deviceFactsCard" .}}
+</div>
+
+{{template "deviceHistoryCard" .}}
+
+{{/* The one admin action (#132 D4). The owner's markup with the action
+     swapped; no typed confirmation, because disable is reversible and the
+     owner's own control has none either. */}}
+<div class="card danger-zone">
+  <div class="card-head"><h2>Danger zone</h2></div>
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>{{if .Device.Disabled}}Enable{{else}}Disable{{end}} device</strong>
+      <span>A disabled device is rejected at check-in but keeps its history. The owner is emailed.</span>
+    </div>
+    <form method="post" action="/admin/devices/{{.Device.ID}}/enabled">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="disabled" value="{{if .Device.Disabled}}false{{else}}true{{end}}">
+      <button class="btn danger" type="submit">{{if .Device.Disabled}}Enable{{else}}Disable{{end}}</button>
+    </form>
+  </div>
+</div>
+
+<p class="muted">Renaming, secret rotation and deletion are only available to the device's owner.</p>
+{{end}}

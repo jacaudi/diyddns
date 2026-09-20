@@ -462,7 +462,7 @@ const auditPageSize = 100
 // `EventType: "` alone does not find them.
 var knownEventTypes = []string{
 	"bootstrap.consumed",
-	"device.deleted", "device.disabled", "device.enabled",
+	"device.deleted", "device.disabled", "device.disabled_by_admin", "device.enabled", "device.enabled_by_admin",
 	"device.enroll.code", "device.enroll.oidc", "device.renamed", "device.secret.rotated",
 	service.EventEmailSendFailed,
 	"passkey.invite_issued", "passkey.recovery_issued", "passkey.recovery_redeemed",

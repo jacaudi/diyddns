@@ -105,6 +105,9 @@ func New(deps Deps) (http.Handler, []string) {
 		{"POST /admin/users/{id}/delete", h.requirePostAdmin(h.handleAdminUserDelete)},
 		{"POST /admin/users/{id}/recovery", h.requirePostAdmin(h.handleAdminUserRecovery)},
 		{"GET /admin/devices", h.requireAdmin(h.handleAdminDevices)},
+		{"GET /admin/devices/{id}", h.requireAdmin(h.handleAdminDeviceDetail)},
+		{"GET /admin/devices/{id}/history", h.requireAdmin(h.handleAdminDeviceHistory)},
+		{"POST /admin/devices/{id}/enabled", h.requirePostAdmin(h.handleAdminDeviceSetEnabled)},
 		{"GET /admin/audit", h.requireAdmin(h.handleAdminAudit)},
 		{"GET /admin/server", h.requireAdmin(h.handleAdminServer)},
 		{"GET /static/", http.FileServerFS(staticFS)},
@@ -165,4 +168,4 @@ var authPages = []string{"login", "register"}
 
 // appPages render in the app.html shell with the topbar and navigation. Adding
 // a screen is one entry here plus one templates/<name>.html file.
-var appPages = []string{"account", "account-email-confirm", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-devices", "admin-audit", "admin-server", "admin-feed", "endpoints", "endpoint-detail", "error"}
+var appPages = []string{"account", "account-email-confirm", "devices", "device-new", "device-detail", "device-history", "admin-users", "admin-user-new", "admin-user", "admin-devices", "admin-device", "admin-audit", "admin-server", "admin-feed", "endpoints", "endpoint-detail", "error"}

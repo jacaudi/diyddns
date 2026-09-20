@@ -10,8 +10,9 @@ import (
 )
 
 // adminDeviceRow is one row of the admin devices list: a device row plus who
-// owns it. Owned decides whether the label links to the owner-scoped detail
-// page — those pages stay owner-scoped, so another user's device gets no link.
+// owns it. Owned decides which detail page the label links to: the owner-scoped
+// page (a superset, with every action) for the admin's own device, the
+// read-only admin page for anyone else's (#132 D14).
 type adminDeviceRow struct {
 	deviceRow
 	OwnerID    string
