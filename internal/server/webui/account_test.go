@@ -98,6 +98,33 @@ func TestAccount_EmailCard_States(t *testing.T) {
 	})
 }
 
+// TestAccount_RoleIndicator: #146. The role information the userchip used to
+// carry (as an inline badge on every page) now lives on /account instead,
+// which previously showed no role information at all.
+func TestAccount_RoleIndicator(t *testing.T) {
+	// "Role: " is the new indicator's own label text -- distinct from the
+	// bare role-badge <span> app.html's userchip used to carry before #146
+	// moved it here, so this can't pass by accidentally matching a leftover
+	// badge the account page still shares the app shell with.
+	t.Run("admin sees the admin role", func(t *testing.T) {
+		h, _, _, _, cookie, _ := accountHarness(t, "a@example.com", "admin")
+		body := getPage(t, h, cookie, "/account").Body.String()
+		if !strings.Contains(body, `Role: <span class="tag accent role-badge">admin</span>`) {
+			t.Errorf("account page missing the admin role indicator:\n%s", body)
+		}
+	})
+	t.Run("a regular user sees the user role, not admin", func(t *testing.T) {
+		h, _, _, _, cookie, _ := accountHarness(t, "u@example.com", "user")
+		body := getPage(t, h, cookie, "/account").Body.String()
+		if !strings.Contains(body, `Role: <span class="tag neutral role-badge">user</span>`) {
+			t.Errorf("account page missing the user role indicator:\n%s", body)
+		}
+		if strings.Contains(body, `role-badge">admin<`) {
+			t.Errorf("a non-admin was shown the admin role indicator:\n%s", body)
+		}
+	})
+}
+
 func TestAccountEmail_Request(t *testing.T) {
 	t.Run("redirects and the page shows the pending change", func(t *testing.T) {
 		h, st, deps, usr, cookie, mailer := accountHarness(t, "u@example.com", "user")

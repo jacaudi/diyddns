@@ -1,6 +1,9 @@
 {{define "scripts"}}<script src="/static/passkey.js" defer></script>{{end}}
 {{define "content"}}
-<div class="page-head"><div><h1>Account</h1><p class="sub">{{.Email}}</p></div></div>
+{{/* #146: the role information the topbar's userchip used to carry as an
+     inline badge on every page now lives here instead -- the only place on
+     this page that names it. */}}
+<div class="page-head"><div><h1>Account</h1><p class="sub">{{.Email}} · Role: <span class="tag {{if .IsAdmin}}accent{{else}}neutral{{end}} role-badge">{{if .IsAdmin}}admin{{else}}user{{end}}</span></p></div></div>
 {{template "errorBanner" .Error}}
 {{/* Two cards, not one with a rule through it: the list is what exists and the
      form creates something new. passkey.js finds every element by id and never

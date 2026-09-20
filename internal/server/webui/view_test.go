@@ -153,27 +153,3 @@ func TestBaseURL(t *testing.T) {
 		})
 	}
 }
-
-func TestInitials(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct{ email, want string }{
-		{"jane@example.com", "JA"},
-		{"j@example.com", "J"},
-		{"", "?"},
-		{"@example.com", "?"},
-		// Multi-byte local part: truncation must be rune-aware, not byte-aware.
-		// The first two runes are 日 and 本; strings.ToUpper is a no-op on
-		// non-cased scripts like Kanji, so the uppercased result is unchanged.
-		{"日本語@example.com", "日本"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.email, func(t *testing.T) {
-			t.Parallel()
-			if got := initials(tt.email); got != tt.want {
-				t.Errorf("initials(%q) = %q, want %q", tt.email, got, tt.want)
-			}
-		})
-	}
-}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -28,11 +29,18 @@ type appData struct {
 	Title                string
 	Nav                  string // "devices" | "account" | "admin-users" | "admin-devices" | "admin-endpoints" | "admin-feed" | "admin-audit" | "admin-server"
 	Email                string
-	Initials             string
 	IsAdmin              bool
+	AdminNav             bool // Nav is one of the six admin-* pages nested in the Admin dropdown (#145 review)
 	NotificationsEnabled bool
 	FeedEnabled          bool
 }
+
+// adminNavPages are the Nav identifiers nested inside the Admin dropdown
+// (app.html). Every server render emits that <details> closed, so the
+// dropdown's own <summary> trigger needs its own active state -- the .active
+// class on the nested anchors is otherwise invisible until a visitor
+// manually expands it.
+var adminNavPages = []string{"admin-devices", "admin-audit", "admin-endpoints", "admin-feed", "admin-server", "admin-users"}
 
 // newAppData builds the shell data for a page rendered to an authenticated user.
 func (h *handler) newAppData(usr store.User, sess store.Session, title, nav string) appData {
@@ -41,8 +49,8 @@ func (h *handler) newAppData(usr store.User, sess store.Session, title, nav stri
 		Title:                title,
 		Nav:                  nav,
 		Email:                usr.Email,
-		Initials:             initials(usr.Email),
 		IsAdmin:              usr.Role == "admin",
+		AdminNav:             slices.Contains(adminNavPages, nav),
 		NotificationsEnabled: h.deps.Cfg.Notifications.Enabled,
 		FeedEnabled:          h.deps.Cfg.Feed.Enabled,
 	}

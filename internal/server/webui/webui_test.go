@@ -385,7 +385,7 @@ func TestAccount_RendersInAppShell(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	for _, want := range []string{`class="topbar"`, `href="/devices"`, "jane@example.com", "JA"} {
+	for _, want := range []string{`class="topbar"`, `href="/devices"`, "jane@example.com"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
 		}
@@ -393,6 +393,7 @@ func TestAccount_RendersInAppShell(t *testing.T) {
 	if strings.Contains(body, `href="/admin/users"`) {
 		t.Error("a non-admin was shown the admin nav")
 	}
+	assertUserchipIsEmailOnly(t, body)
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want %q", got, "no-store")
 	}
@@ -415,6 +416,152 @@ func TestAppShell_ShowsAdminNavToAdmins(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("admin nav missing %q", want)
 		}
+	}
+	assertUserchipIsEmailOnly(t, rec.Body.String())
+}
+
+// userchipRE isolates the userchip <div>'s own markup from the rest of the
+// page -- /account's role indicator (account.html, #146) legitimately carries
+// "role-badge" too, so a plain page-wide substring check can't tell "the
+// userchip dropped its badge" from "the page has a badge somewhere else".
+var userchipRE = regexp.MustCompile(`(?s)<div class="userchip">(.*?)</div>`)
+
+// assertUserchipIsEmailOnly asserts the userchip renders only the email --
+// no initials avatar, no inline admin role badge (#146; that moved to
+// /account, see TestAccount_RoleIndicator in account_test.go).
+func assertUserchipIsEmailOnly(t *testing.T, body string) {
+	t.Helper()
+	m := userchipRE.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("no <div class=\"userchip\"> found in body")
+	}
+	for _, gone := range []string{"avatar", "role-badge"} {
+		if strings.Contains(m[1], gone) {
+			t.Errorf("userchip still renders %q, want email-only: %s", gone, m[1])
+		}
+	}
+}
+
+// navMenuPanelRE isolates the Admin dropdown panel's own markup from the rest
+// of the page, the same way userchipRE isolates the userchip -- a page-wide
+// substring check for an href can't tell "the link is inside the dropdown
+// panel" from "the link is somewhere else on the page".
+var navMenuPanelRE = regexp.MustCompile(`(?s)<div class="nav-menu-panel">(.*?)</div>`)
+
+// adminSummaryRE isolates the Admin dropdown's trigger <summary> element so
+// tests can inspect its class attribute without also matching the six
+// anchors nested inside the panel.
+var adminSummaryRE = regexp.MustCompile(`<summary class="([^"]*)">Admin</summary>`)
+
+// TestNav_AdminLinksCollapseIntoDropdown: #145. The six admin-only pages now
+// render inside a single "Admin" <details> dropdown instead of as flat
+// top-level links, alphabetically ordered (All Devices, Audit, Endpoints,
+// Feed, Server, Users), with both flags on so every item is present. It also
+// pins the top-level bar's order (Devices, Account, Admin) that #145
+// specifies.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestNav_AdminLinksCollapseIntoDropdown(t *testing.T) {
+	deps, st := testDeps(t)
+	deps.Cfg.Notifications.Enabled = true
+	deps.Cfg.Feed.Enabled = true
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "dropdown-admin@example.com")
+
+	body := getPage(t, h, cookie, "/account").Body.String()
+	if !strings.Contains(body, `<details class="nav-menu">`) {
+		t.Fatalf("admin nav is not a collapsed \"Admin\" dropdown:\n%s", body)
+	}
+	if adminSummaryRE.FindStringSubmatch(body) == nil {
+		t.Fatalf("no Admin dropdown trigger found:\n%s", body)
+	}
+
+	// Top-level bar order: Devices, Account, Admin.
+	markers := []string{">Devices<", ">Account<", "Admin</summary>"}
+	var barIdx []int
+	for _, marker := range markers {
+		i := strings.Index(body, marker)
+		if i == -1 {
+			t.Fatalf("nav bar missing %q:\n%s", marker, body)
+		}
+		barIdx = append(barIdx, i)
+	}
+	if !slices.IsSorted(barIdx) {
+		t.Errorf("nav bar order is not Devices, Account, Admin: index positions %v", barIdx)
+	}
+
+	// Alphabetical: All Devices, Audit, Endpoints, Feed, Server, Users --
+	// scoped to the dropdown panel itself, not the whole page.
+	panelMatch := navMenuPanelRE.FindStringSubmatch(body)
+	if panelMatch == nil {
+		t.Fatalf("no <div class=\"nav-menu-panel\"> found in body:\n%s", body)
+	}
+	panel := panelMatch[1]
+
+	hrefs := []string{"/admin/devices", "/admin/audit", "/admin/endpoints", "/admin/feed", "/admin/server", "/admin/users"}
+	var idx []int
+	for _, href := range hrefs {
+		i := strings.Index(panel, `href="`+href+`"`)
+		if i == -1 {
+			t.Fatalf("admin dropdown panel missing a link to %s:\n%s", href, panel)
+		}
+		idx = append(idx, i)
+	}
+	if !slices.IsSorted(idx) {
+		t.Errorf("admin dropdown items are not alphabetically ordered: index positions %v for %v", idx, hrefs)
+	}
+}
+
+// TestNav_AdminTriggerActiveState: the #145/#146 review's Significant
+// finding. Before this collapse, the topbar highlighted whichever page was
+// current, including the six admin pages. After the collapse, every server
+// render emits the <details> closed by default, so the six nested anchors'
+// .active class is invisible until the user manually expands the dropdown.
+// The trigger itself needs its own active state whenever the current page is
+// any of the six admin pages nested inside it.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestNav_AdminTriggerActiveState(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	cookie, _ := adminSession(t, deps, st, "admin-trigger@example.com")
+
+	t.Run("active while viewing an admin page", func(t *testing.T) {
+		body := getPage(t, h, cookie, "/admin/users").Body.String()
+		m := adminSummaryRE.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("no Admin dropdown trigger found:\n%s", body)
+		}
+		if !strings.Contains(m[1], "active") {
+			t.Errorf("Admin trigger class = %q on /admin/users, want it to contain \"active\":\n%s", m[1], body)
+		}
+	})
+
+	t.Run("not active on a non-admin page", func(t *testing.T) {
+		body := getPage(t, h, cookie, "/account").Body.String()
+		m := adminSummaryRE.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("no Admin dropdown trigger found:\n%s", body)
+		}
+		if strings.Contains(m[1], "active") {
+			t.Errorf("Admin trigger class = %q on /account, want no \"active\":\n%s", m[1], body)
+		}
+	})
+}
+
+// TestNav_NonAdminHasNoDropdown: a non-admin should not see even an empty
+// "Admin" trigger -- the whole .nav-menu element is admin-gated, not just the
+// links inside it.
+//
+// Deliberately not t.Parallel() — see TestAccount_RendersInAppShell.
+func TestNav_NonAdminHasNoDropdown(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "plain@example.com", "user")
+
+	body := getPage(t, h, signIn(t, deps, usr), "/account").Body.String()
+	if strings.Contains(body, "nav-menu") {
+		t.Errorf("a non-admin was shown the admin dropdown:\n%s", body)
 	}
 }
 
