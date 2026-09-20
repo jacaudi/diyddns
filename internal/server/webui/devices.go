@@ -453,8 +453,10 @@ func relExpiry(expiresAt int64, now time.Time) string {
 
 // deviceScope says whose device a device page is showing and where that
 // device's pages live. ownerScope is the owner looking at their own device;
-// adminScope is an admin looking at anyone's (#132 D6). Every field is set by
-// the constructor, so no page can render an empty href.
+// adminScope is an admin looking at anyone's (#132 D6). ListURL, DetailURL,
+// and HistoryURL are set by the constructor on every scope, so no page can
+// render an empty href for those. OwnerURL is the one field that is
+// deliberately empty on the owner's page — see its own comment below.
 //
 // It exists because the session user used to play two roles in newDetailData
 // -- the shell (newAppData, CSRF, nav) and the SCOPE of the history reads plus

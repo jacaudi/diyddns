@@ -2511,6 +2511,7 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 	h, _ := New(deps)
 
 	victim := seedUser(t, st, "victim@example.com", "user")
+	dev := seedDevice(t, st, victim.ID, "victims-pi")
 	usr := seedUser(t, st, "plain@example.com", "user")
 	cookie := signIn(t, deps, usr)
 	sess := sessionFor(t, deps, cookie)
@@ -2532,6 +2533,10 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 		{http.MethodGet, "/admin/server"},
 		// #105 registers this one.
 		{http.MethodGet, "/admin/devices"},
+		// #132 registers these three.
+		{http.MethodGet, "/admin/devices/" + dev.ID},
+		{http.MethodGet, "/admin/devices/" + dev.ID + "/history"},
+		{http.MethodPost, "/admin/devices/" + dev.ID + "/enabled"},
 	} {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			form := url.Values{
@@ -2850,11 +2855,16 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 	if n == 0 {
 		t.Error("a CSRF-less POST to /recovery revoked the target's passkeys")
 	}
-	// /admin/users/new is the one route in the loop above with no
-	// side-effect-absence check of its own: the form posts email=someone@example.com,
-	// so a CSRF-guard bug on that route specifically would silently create the user.
+	// /admin/users/new and /admin/devices/{id}/enabled are the two routes in the
+	// loop above with no side-effect-absence check of their own: /admin/users/new
+	// posts email=someone@example.com, so a CSRF-guard bug on that route
+	// specifically would silently create the user, and /admin/devices/{id}/enabled
+	// posts disabled=true, so a CSRF-guard bug there would silently disable dev.
 	if _, err := st.Users().GetByEmail(t.Context(), "someone@example.com"); err == nil {
 		t.Error("a CSRF-less POST to /admin/users/new created the invited user")
+	}
+	if got, _ := st.Devices().GetByID(t.Context(), dev.ID); got.Disabled {
+		t.Error("a CSRF-less POST disabled the device")
 	}
 }
 

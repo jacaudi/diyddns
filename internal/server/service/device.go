@@ -29,9 +29,9 @@ type DeviceService struct {
 // notify is told when a device joins or leaves the gateway feed (#106).
 func NewDeviceService(st *store.Store, key []byte, invalidator SecretCacheInvalidator, audit AuditSink, notify DeviceNotifier) *DeviceService {
 	return &DeviceService{
-		deviceMutator: deviceMutator{st: st, audit: audit, notify: notify},
-		key:           key,
-		invalidator:   invalidator,
+		st: st, audit: audit, notify: notify,
+		key:         key,
+		invalidator: invalidator,
 	}
 }
 

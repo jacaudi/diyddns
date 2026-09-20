@@ -61,10 +61,10 @@ type AdminService struct {
 // treated as disabled; log must not be nil.
 func NewAdminService(st *store.Store, audit AuditSink, grants *GrantService, notify DeviceNotifier, mailer emailpkg.Mailer, log *slog.Logger) *AdminService {
 	return &AdminService{
-		deviceMutator: deviceMutator{st: st, audit: audit, notify: notify},
-		grants:        grants,
-		mailer:        mailer,
-		log:           log,
+		st: st, audit: audit, notify: notify,
+		grants: grants,
+		mailer: mailer,
+		log:    log,
 	}
 }
 
@@ -415,10 +415,12 @@ func (s *AdminService) SetDeviceEnabled(ctx context.Context, actor store.Session
 // (#132 D10, D17). The send is synchronous in the admin's request, exactly as
 // the invite and recovery sends are.
 //
-// Deliberately a second copy of deliver's shape rather than a shared helper:
-// deliver returns a Delivery the invite page renders and its timeout is a
-// struct field a test shrinks; see the #132 design §7 for why extraction
-// waits for a third caller.
+// The send itself stays inline rather than going through sendAdvisory:
+// sendAdvisory's failure row carries only ActorUserID/TargetType/TargetID, not
+// the device_id detail or IP this notice needs. The failure-audit half,
+// though, reuses recordSendFailure (grants.go) — the same helper
+// EmailChangeService uses — so a future change to that write's discipline
+// (timeout, context handling) reaches this path too.
 func (s *AdminService) notifyOwner(ctx context.Context, actor store.Session, owner store.User, dev store.Device, disabled bool) {
 	if s.mailer == nil || !s.mailer.Enabled() {
 		return
@@ -430,12 +432,8 @@ func (s *AdminService) notifyOwner(ctx context.Context, actor store.Session, own
 		s.log.ErrorContext(ctx, "device state notice delivery failed",
 			"error", err, "user_id", owner.ID, "device_id", dev.ID)
 		details, _ := json.Marshal(map[string]string{"device_id": dev.ID})
-		// The same context discipline as GrantService.auditSendFailure: never
-		// the send's context (it may be the thing that just expired) and never
-		// the raw request context (it may already be canceled).
-		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
-		defer cancelAudit()
-		s.audit.Log(auditCtx, store.AuditEntry{
+		m := mailDeps{mailer: s.mailer, audit: s.audit, log: s.log, timeout: adminDeliveryTimeout}
+		recordSendFailure(ctx, m, store.AuditEntry{
 			ActorUserID: actor.UserID, EventType: EventEmailSendFailed,
 			TargetType: "user", TargetID: owner.ID, DetailsJSON: string(details), IP: actor.IP,
 		})
