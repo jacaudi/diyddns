@@ -24,17 +24,29 @@
     <p id="passkey-status" class="status" role="status" aria-live="polite"></p>
   </div>
 </div>
-{{/* #131: exactly one of four states. The address is load-bearing identity --
-     it is where passkey-recovery links go -- so a self-service change is
-     pending until the NEW address confirms, and needs this session to do it. */}}
+{{/* #131/#144: exactly one of four states. The address is load-bearing
+     identity -- it is where passkey-recovery links go -- so a self-service
+     change is pending until the NEW address confirms, and needs this session
+     to do it. Whether a mailer is configured (EmailEnabled) no longer gates
+     the form at all (#144) -- it only changes the copy and, on the response
+     to a request, whether the link is shown here (.Link) instead of mailed. */}}
 <div class="card">
   <div class="card-body">
     <h2>Email address</h2>
     <p class="muted">Sign-in and passkey recovery mail go to <code>{{.Email}}</code>.</p>
     {{if .OIDCLinked}}
     <p class="muted">Your email address is managed by your identity provider and updates when you sign in with it.</p>
-    {{else if not .EmailEnabled}}
-    <p class="muted">Changing your address needs email delivery, which this server does not have configured. Ask an administrator to change it.</p>
+    {{else if .Link}}
+    <div class="callout warn">
+      <strong>⚠ Shown once</strong>
+      This confirmation link is displayed a single time because this server has no mail delivery
+      configured. Copy it now; it expires in {{.LinkExpiresIn}} and can be used once.
+    </div>
+    <div class="field">
+      <label>Confirmation link</label>
+      {{template "copyValue" .Link}}
+    </div>
+    <p class="muted">Open it now, or come back and open it later while signed in here. Nothing changes until you do; this address keeps working until then.</p>
     {{else if .PendingEmail}}
     {{template "noticeBanner" .PendingNotice}}
     <form method="post" action="/account/email/cancel">
@@ -50,7 +62,11 @@
       </div>
       <button class="btn primary" type="submit">Send confirmation link</button>
     </form>
+    {{if .EmailEnabled}}
     <p class="muted">A confirmation link is sent to the new address. Nothing changes until you open it while signed in here; this address keeps working until then.</p>
+    {{else}}
+    <p class="muted">This server has no mail delivery configured. After you submit, the confirmation link is shown here once instead of being emailed. Nothing changes until you open it while signed in here; this address keeps working until then.</p>
+    {{end}}
     {{end}}
   </div>
 </div>

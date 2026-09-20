@@ -76,13 +76,13 @@ does not revoke the one already sent.
 Users can change their own address from `/account`; administrators can change any user's
 address from `/admin/users/{id}`.
 
-**Self-service** (`/account`): the user enters a new address, and a confirmation link is
-emailed to it. Nothing about the account changes until they open that link while signed in
-and confirm — the old address stays authoritative until then. The old address gets a
-heads-up notice when the change is requested, and a change notice once it's confirmed. A
-pending change can be cancelled from `/account` at any time before confirmation. If the new
-address is one [the transport can't carry](#addresses-the-transport-cant-carry), the
-confirmation send fails, the change is rolled back, and the user sees a generic
+**Self-service** (`/account`): the user enters a new address, and — when a mailer is
+configured — a confirmation link is emailed to it. Nothing about the account changes until
+they open that link while signed in and confirm — the old address stays authoritative until
+then. The old address gets a heads-up notice when the change is requested, and a change
+notice once it's confirmed. A pending change can be cancelled from `/account` at any time
+before confirmation. If the new address is one [the transport can't carry](#addresses-the-transport-cant-carry),
+the confirmation send fails, the change is rolled back, and the user sees a generic
 delivery-failure error rather than one naming the address as invalid.
 
 **Admin-set** (`/admin/users/{id}`): an administrator can set a user's address directly,
@@ -98,10 +98,17 @@ self-service change is unavailable to them. An administrator can still set the a
 directly; the admin UI warns that the identity provider will replace it again at the
 user's next sign-in.
 
-Self-service change requires `email.enabled: true` — without a mailer there is nowhere to
-send the confirmation link, so the form is not shown. Admin-set changes take effect
-immediately regardless of `email.enabled`, since applying the change doesn't depend on
-sending anything; with email disabled, the previous address simply isn't notified.
+Self-service change works regardless of `email.enabled`. With no mailer configured, the form
+is still offered; after the user submits it, the confirmation link is shown once on that
+response instead of being emailed — the same shown-once fallback the invite and recovery
+links use, though the contract is not identical: an invite or recovery link is always shown
+on screen regardless of delivery outcome, while this link is shown only when sending was
+never attempted (no mailer configured, or the mailer disabled) — once a configured mailer
+successfully carries it to the new address, the page redirects instead and nothing is shown.
+The link works the same way either way: opening it while signed in confirms the change.
+Admin-set changes take effect immediately regardless of `email.enabled`, since applying the
+change doesn't depend on sending anything; with email disabled, the previous address simply
+isn't notified.
 
 ---
 [← Back to README](../README.md)

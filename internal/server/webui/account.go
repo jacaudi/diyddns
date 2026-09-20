@@ -9,8 +9,11 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// accountData is account.html's template data. Exactly one of the email card's
-// four states renders: managed-by-IdP, email-disabled, pending, or the form.
+// accountData is account.html's template data. Exactly one of the email
+// card's four states renders: managed-by-IdP, the shown-once link reveal,
+// pending, or the form. #144 removed the fifth (blocking) state that used to
+// hide the form outright whenever EmailEnabled was false; EmailEnabled now
+// only adjusts copy.
 type accountData struct {
 	appData
 	OIDCLinked   bool
@@ -21,6 +24,17 @@ type accountData struct {
 	// PendingNotice is the pending card's sentence, rendered through the
 	// noticeBanner partial. Built here so the template holds one spelling.
 	PendingNotice string
+	// Link and LinkExpiresIn populate the shown-once reveal after a Request
+	// whose confirmation could not be mailed (#144: no mailer configured),
+	// zero otherwise. Link reuses h.grantLink's URL-completion logic (the same
+	// helper admin-user-new.html's invite reveal uses), but not its second
+	// return value: that is an instruction to an OPERATOR ("Set
+	// server.base_url"), wrong audience for this self-service page, so it is
+	// deliberately discarded here (#144 review). LinkExpiresIn is built the
+	// same way PendingNotice is, from the staged change's actual expiry, so
+	// the on-screen TTL cannot drift from emailChangeTTL.
+	Link          string
+	LinkExpiresIn string
 	Error         string
 }
 
@@ -34,9 +48,18 @@ func (h *handler) accountData(usr store.User, sess store.Session, errMsg string)
 	now := time.Now()
 	if usr.PendingEmail != "" && usr.PendingEmailExpiresAt > now.Unix() {
 		data.PendingEmail = usr.PendingEmail
-		data.PendingNotice = fmt.Sprintf(
-			"A change to %s is waiting for confirmation. Open the link sent to that address; you need to be signed in here when you do. It expires in %s. Did not get it? Cancel and request the change again.",
-			usr.PendingEmail, relExpiry(usr.PendingEmailExpiresAt, now))
+		if data.EmailEnabled {
+			data.PendingNotice = fmt.Sprintf(
+				"A change to %s is waiting for confirmation. Open the link sent to that address; you need to be signed in here when you do. It expires in %s. Did not get it? Cancel and request the change again.",
+				usr.PendingEmail, relExpiry(usr.PendingEmailExpiresAt, now))
+		} else {
+			// #144: with no mailer configured, the confirmation link was shown
+			// once on the response to the request that staged this -- there is
+			// nothing to "check" on this later, plain GET of /account.
+			data.PendingNotice = fmt.Sprintf(
+				"A change to %s is waiting for confirmation. You were shown its confirmation link once, when you requested it; open it while signed in here. It expires in %s. Lost it? Cancel and request the change again.",
+				usr.PendingEmail, relExpiry(usr.PendingEmailExpiresAt, now))
+		}
 	}
 	return data
 }
@@ -57,14 +80,32 @@ func (h *handler) renderAccountError(w http.ResponseWriter, r *http.Request, usr
 	h.renderStatus(w, r, status, "account", h.accountData(usr, sess, msg))
 }
 
-// handleAccountEmailRequest stages a self-service address change (design §5.1).
+// handleAccountEmailRequest stages a self-service address change (design
+// §5.1). #144: when the confirmation could not be mailed (no mailer
+// configured), the link is shown once on this response instead -- the same
+// shown-once pattern handleAdminUserInvite/handleAdminUserRecovery use, so
+// this cannot redirect in that case. Request's own contract (service/
+// email_change.go) makes link != "" alone sufficient to decide that: a
+// configured mailer that carried the link successfully already comes back
+// with link == "".
 func (h *handler) handleAccountEmailRequest(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	if err := h.deps.EmailChange.Request(r.Context(), usr, strings.TrimSpace(r.PostFormValue("email"))); err != nil {
+	link, _, expiresAt, err := h.deps.EmailChange.Request(r.Context(), usr, strings.TrimSpace(r.PostFormValue("email")))
+	if err != nil {
 		if msg, status, ok := adminGuardMessage(err); ok {
 			h.renderAccountError(w, r, usr, sess, status, msg)
 			return
 		}
 		h.logAndFail(w, r, usr, "request email change", err)
+		return
+	}
+	if link != "" {
+		data := h.accountData(usr, sess, "")
+		// grantLink's second return value is operator-facing config advice
+		// ("Set server.base_url") -- deliberately discarded here; see
+		// accountData.LinkExpiresIn's doc comment.
+		data.Link, _ = h.grantLink(r, link)
+		data.LinkExpiresIn = relExpiry(expiresAt, time.Now())
+		h.render(w, r, "account", data)
 		return
 	}
 	http.Redirect(w, r, "/account", http.StatusSeeOther)

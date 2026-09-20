@@ -58,13 +58,16 @@ func TestAccount_EmailCard_States(t *testing.T) {
 			t.Errorf("account page missing the change form:\n%s", body)
 		}
 	})
-	t.Run("no form when email is disabled", func(t *testing.T) {
+	t.Run("form still shown when email is disabled (#144)", func(t *testing.T) {
 		deps, st := testDeps(t)
 		h, _ := New(deps)
 		usr := seedUser(t, st, "u@example.com", "user")
 		body := getPage(t, h, signIn(t, deps, usr), "/account").Body.String()
-		if strings.Contains(body, `action="/account/email"`) || !strings.Contains(body, "Ask an administrator") {
-			t.Errorf("email disabled: want the ask-an-administrator copy and no form:\n%s", body)
+		if !strings.Contains(body, `action="/account/email"`) || !strings.Contains(body, `name="email"`) {
+			t.Errorf("email disabled: the form must still be offered, not blocked:\n%s", body)
+		}
+		if strings.Contains(body, "Ask an administrator") {
+			t.Errorf("email disabled: the old hard-block copy must be gone:\n%s", body)
 		}
 	})
 	t.Run("managed copy for an OIDC-linked account", func(t *testing.T) {
@@ -130,7 +133,7 @@ func TestAccountEmail_Request(t *testing.T) {
 			t.Errorf("status = %d, want 422 with the unchanged copy; body=%s", rec.Code, rec.Body.String())
 		}
 	})
-	t.Run("email disabled is 503", func(t *testing.T) {
+	t.Run("email disabled shows the confirmation link on screen instead of blocking (#144)", func(t *testing.T) {
 		deps, st := testDeps(t)
 		deps.EmailChange = service.NewEmailChangeService(st, nil, deps.Cfg.Server.BaseURL, service.NewAuditWriter(st), deps.Log)
 		h, _ := New(deps)
@@ -138,8 +141,91 @@ func TestAccountEmail_Request(t *testing.T) {
 		cookie := signIn(t, deps, usr)
 		sess := sessionFor(t, deps, cookie)
 		rec := postForm(t, h, cookie, "/account/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"next@example.com"}})
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (shown once, cannot redirect); body=%s", rec.Code, body)
+		}
+		if !strings.Contains(body, "Shown once") || !strings.Contains(body, "/account/email/confirm?token=") {
+			t.Errorf("response missing the shown-once confirmation link:\n%s", body)
+		}
+		// Significant #3 (review of #144): "Email is not configured — send this
+		// link manually" is an instruction to an ADMIN ("send this to someone
+		// else"), shown to the self-service user themselves. It must not appear
+		// here at all -- the "Shown once" callout already explains why the link
+		// is on screen.
+		if strings.Contains(body, "Email is not configured") {
+			t.Errorf("operator-facing delivery copy reached the self-service user:\n%s", body)
+		}
+		// Minor #5: the TTL is a live figure sourced from the staged change's
+		// actual expiry (relExpiry), not a hardcoded "one hour" literal that can
+		// drift from emailChangeTTL.
+		if !strings.Contains(body, "expires in 60 minutes") {
+			t.Errorf("response missing the dynamic expiry (want 60 minutes for a just-staged 1h TTL):\n%s", body)
+		}
+		m := tokenRE.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("no token in the on-screen link: %q", body)
+		}
+		got, err := st.Users().GetByID(t.Context(), usr.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.PendingEmail != "next@example.com" {
+			t.Fatalf("PendingEmail = %q, want next@example.com", got.PendingEmail)
+		}
+		// The link works end to end, the same as an emailed one would.
+		rec = postForm(t, h, cookie, "/account/email/confirm", url.Values{"csrf": {sess.CSRFToken}, "token": {m[1]}})
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account" {
+			t.Fatalf("confirm: status = %d, Location = %q; want 303 to /account; body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+		}
+		if got, _ := st.Users().GetByID(t.Context(), usr.ID); got.Email != "next@example.com" {
+			t.Errorf("Email = %q after confirm, want next@example.com", got.Email)
+		}
+	})
+	// Significant #3 (review of #144): grantLink's second return value tells an
+	// OPERATOR to "Set server.base_url" -- correct on the admin pages that also
+	// call grantLink, wrong-audience on this self-service reveal. With
+	// server.base_url unset, the link must still be completed to an absolute
+	// URL (grantLink's URL-completion logic is still needed), but the operator
+	// instruction must not reach a non-admin user.
+	t.Run("server.base_url unset: link is still absolute, no operator instruction shown", func(t *testing.T) {
+		deps, st := testDeps(t)
+		deps.Cfg.Server.BaseURL = ""
+		deps.EmailChange = service.NewEmailChangeService(st, nil, "", service.NewAuditWriter(st), deps.Log)
+		h, _ := New(deps)
+		usr := seedUser(t, st, "u@example.com", "user")
+		cookie := signIn(t, deps, usr)
+		sess := sessionFor(t, deps, cookie)
+		rec := postForm(t, h, cookie, "/account/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"next@example.com"}})
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (shown once); body=%s", rec.Code, body)
+		}
+		if !strings.Contains(body, "http://example.com/account/email/confirm?token=") {
+			t.Errorf("the relative link was not completed to an absolute URL:\n%s", body)
+		}
+		if strings.Contains(body, "server.base_url") {
+			t.Errorf("operator-facing config instruction reached the self-service user:\n%s", body)
+		}
+	})
+	t.Run("repeat request for the same still-pending address with no mailer redirects (D12)", func(t *testing.T) {
+		deps, st := testDeps(t)
+		deps.EmailChange = service.NewEmailChangeService(st, nil, deps.Cfg.Server.BaseURL, service.NewAuditWriter(st), deps.Log)
+		h, _ := New(deps)
+		usr := seedUser(t, st, "u@example.com", "user")
+		cookie := signIn(t, deps, usr)
+		sess := sessionFor(t, deps, cookie)
+		first := postForm(t, h, cookie, "/account/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"next@example.com"}})
+		if first.Code != http.StatusOK {
+			t.Fatalf("first request: status = %d, want 200 (shown once); body=%s", first.Code, first.Body.String())
+		}
+		// D12: a repeat request for the address already pending (a case variant,
+		// still unexpired) mints and shows nothing new -- the handler must
+		// redirect, not render account.html with an empty reveal (link == "").
+		rec := postForm(t, h, cookie, "/account/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"NEXT@example.com"}})
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account" {
+			t.Fatalf("repeat request: status = %d, Location = %q; want 303 to /account (not a blank reveal); body=%s",
+				rec.Code, rec.Header().Get("Location"), rec.Body.String())
 		}
 	})
 }
