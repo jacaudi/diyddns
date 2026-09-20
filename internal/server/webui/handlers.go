@@ -28,7 +28,6 @@ type appData struct {
 	Title                string
 	Nav                  string // "devices" | "account" | "admin-users" | "admin-devices" | "admin-endpoints" | "admin-feed" | "admin-audit" | "admin-server"
 	Email                string
-	Initials             string
 	IsAdmin              bool
 	NotificationsEnabled bool
 	FeedEnabled          bool
@@ -41,7 +40,6 @@ func (h *handler) newAppData(usr store.User, sess store.Session, title, nav stri
 		Title:                title,
 		Nav:                  nav,
 		Email:                usr.Email,
-		Initials:             initials(usr.Email),
 		IsAdmin:              usr.Role == "admin",
 		NotificationsEnabled: h.deps.Cfg.Notifications.Enabled,
 		FeedEnabled:          h.deps.Cfg.Feed.Enabled,

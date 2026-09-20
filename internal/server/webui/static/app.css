@@ -54,6 +54,13 @@
                   a template. Only ever built through the partial.
    .callout.info  A status or success notice: {{template "noticeBanner" .}}.
                   Same rule: the partial, never a hand-written div.
+   .nav-menu      A dropdown menu in the topbar (Admin, #145):
+                  <details class="nav-menu"><summary>Admin</summary>
+                  <div class="nav-menu-panel">…anchors…</div></details>. Native
+                  <details>, like .modal and .disclosure, so it opens with no
+                  JavaScript. The anchors inside the panel need no styling of
+                  their own -- .nav a already reaches them by descendant
+                  selector, the same rule every top-level nav link uses.
 
    The rules that keep this honest run in CI: `task repo:html` fails on any
    style= attribute in a template, and `task repo:css` fails on a px value in
@@ -424,15 +431,35 @@ a:hover { text-decoration: underline; }
 .nav a:hover { background: var(--neutral-soft); text-decoration: none; color: var(--text); }
 .nav a.active { background: var(--accent-soft); color: var(--accent); }
 
+/* The Admin dropdown (#145). Positioned relative to the <details> itself, not
+   .nav, so the panel tracks the trigger regardless of where it sits in the
+   row. The summary is styled to match a plain .nav a -- same padding, radius,
+   colour, weight -- so collapsing six links into one trigger reads as the
+   same kind of nav item, not a different control. */
+.nav-menu { position: relative; }
+.nav-menu > summary {
+  cursor: pointer; user-select: none; list-style: none;
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+  color: var(--text-muted); font-weight: 500;
+}
+.nav-menu > summary::-webkit-details-marker { display: none; }
+.nav-menu > summary:hover { background: var(--neutral-soft); color: var(--text); }
+.nav-menu[open] > summary { background: var(--accent-soft); color: var(--accent); }
+/* The panel IS reached by .nav a above (a descendant selector, not a direct-
+   child one) -- every anchor inside it already gets the same padding, hover
+   and .active treatment as a top-level nav link, so only the panel's own
+   chrome (surface, position, stacking) lives here. */
+.nav-menu-panel {
+  position: absolute; top: calc(100% + var(--space-1)); left: 0; z-index: 30;
+  display: flex; flex-direction: column; gap: var(--space-1); min-width: 160px;
+  padding: var(--space-2); border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow);
+}
+
 .userchip {
   display: flex; align-items: center; gap: var(--space-2);
   padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); border-radius: 999px;
   border: 1px solid var(--border); background: var(--surface-2);
-}
-.userchip .avatar {
-  width: 26px; height: 26px; border-radius: 999px;
-  background: var(--accent-soft); color: var(--accent);
-  display: grid; place-items: center; font-weight: 700; font-size: var(--type-1);
 }
 
 .menu-toggle {
@@ -911,7 +938,13 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
          flex-direction: column; background: var(--surface); border-bottom: 1px solid var(--border); padding: var(--space-2); }
   .nav.open { display: flex; }
   .menu-toggle { display: inline-block; }
-  .userchip .email { display: none; }
+  /* This used to be `.userchip .email { display: none }`, leaving the compact
+     avatar as the chip's mobile form. #146 removed the avatar -- the chip's
+     only content now IS the email -- so hiding just the email left an empty
+     bordered pill floating in the topbar with nothing inside it. Hiding the
+     whole chip instead: the email is still reachable on /account's own
+     heading, and the hamburger menu is what mobile actually reaches for. */
+  .userchip { display: none; }
   .page-head { flex-direction: column; }
   /* Collapse wide tables into stacked cards */
   .grid-table.responsive thead { display: none; }

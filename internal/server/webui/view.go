@@ -176,23 +176,6 @@ func baseURL(cfg config.Server, r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-// initials renders the avatar text in the topbar user chip: the first two
-// characters of the local part, uppercased. Truncation is rune-aware, not
-// byte-aware, so a multi-byte local part (e.g. CJK) yields its first two
-// runes rather than a mid-character byte split that produces invalid UTF-8.
-func initials(email string) string {
-	local, _, _ := strings.Cut(email, "@")
-	if local == "" {
-		return "?"
-	}
-	r := []rune(local)
-	if len(r) > 2 {
-		r = r[:2]
-	}
-	local = string(r)
-	return strings.ToUpper(local)
-}
-
 // findUser locates a user by id in a slice from AdminService.ListUsers.
 //
 // AdminService has no single-user getter and webui deliberately holds no
