@@ -54,3 +54,69 @@
         <option value="stale" {{if eq . "stale"}}selected{{end}}>Stale</option>
         <option value="never" {{if eq . "never"}}selected{{end}}>Never seen</option>
         <option value="disabled" {{if eq . "disabled"}}selected{{end}}>Disabled</option>{{end}}
+
+{{/* The three read-only cards of a device page -- current addresses, the
+     device's facts, the five-row history preview -- shared by
+     device-detail.html (the owner's page) and admin-device.html (an admin's
+     read-only view of anyone's device, #132 D12). Dot is deviceDetailData.
+     "How a device's state is shown" is one piece of knowledge; the two pages
+     must never disagree on it. */}}
+{{define "deviceAddressesCard"}}
+  <div class="card">
+    <div class="card-head"><h2>Current addresses</h2></div>
+    {{/* dl.kv, the same component as the Device card beside it: these two cards
+         sit side by side and are both a list of labelled values, so they must
+         not be two different layouts. */}}
+    <div class="card-body">
+      <dl class="kv">
+        <dt>IPv4</dt>
+        <dd>{{if .IPv4LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv4LastKnown}}, {{.IPv4LastKnownAt}})</span>
+          {{else}}{{template "copyOrDash" .Device.CurrentIPv4}}{{if and .ShowExpiry .V4ExpiresIn}}<div class="muted expiry">expires in {{.V4ExpiresIn}}</div>{{end}}{{end}}</dd>
+        <dt>IPv6</dt>
+        <dd>{{if .IPv6LastKnown}}{{template "dash"}} <span class="muted">(expired; last seen {{.IPv6LastKnown}}, {{.IPv6LastKnownAt}})</span>
+          {{else}}{{template "copyOrDash" .Device.CurrentIPv6}}{{if and .ShowExpiry .V6ExpiresIn}}<div class="muted expiry">expires in {{.V6ExpiresIn}}</div>{{end}}{{end}}</dd>
+      </dl>
+    </div>
+  </div>
+{{end}}
+
+{{define "deviceFactsCard"}}
+  <div class="card">
+    <div class="card-head"><h2>Device</h2></div>
+    <div class="card-body">
+      <dl class="kv">
+        <dt>Device ID</dt><dd>{{template "copyValue" .Device.ID}}</dd>
+        <dt>Label</dt><dd>{{.Device.Label}}</dd>
+        <dt>Owner</dt><dd>{{if .OwnerURL}}<a href="{{.OwnerURL}}">{{.Owner}}</a>{{else}}{{.Owner}}{{end}}</dd>
+        <dt>Hostname</dt><dd>{{template "textOrDash" .Device.Hostname}}</dd>
+        <dt>OS</dt><dd>{{template "textOrDash" .Device.OS}}</dd>
+        <dt>Client version</dt><dd>{{template "textOrDash" .Device.ClientVersion}}</dd>
+        <dt>State</dt><dd>{{template "statusTag" .Status}}</dd>
+      </dl>
+    </div>
+  </div>
+{{end}}
+
+{{define "deviceHistoryCard"}}
+<div class="card">
+  <div class="card-head"><h2>Recent IP history</h2>
+    <a class="btn sm" href="{{.HistoryURL}}">Full history ›</a></div>
+  {{if .History}}
+  <div class="table-wrap">
+    <table class="grid-table responsive">
+      <thead><tr><th>When</th><th>IPv4</th><th>IPv6</th><th>Client version</th></tr></thead>
+      <tbody>
+        {{range .History}}
+        <tr>
+          <td data-label="When" class="muted nowrap" title="{{.ObservedAbs}}">{{.ObservedRel}}</td>
+          <td data-label="IPv4">{{template "codeOrDash" .IPv4}}</td>
+          <td data-label="IPv6">{{template "mutedCodeOrDash" .IPv6}}</td>
+          <td data-label="Client version" class="muted">{{if .ClientVersion}}{{.ClientVersion}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}<div class="empty"><h3>No check-ins recorded yet</h3></div>{{end}}
+</div>
+{{end}}

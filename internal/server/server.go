@@ -252,7 +252,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// twice.
 	devicesSvc := service.NewDeviceService(st, key, verifier, audit, devNotifier)
 	enrollSvc := service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit)
-	adminSvc := service.NewAdminService(st, audit, grantSvc, devNotifier)
+	adminSvc := service.NewAdminService(st, audit, grantSvc, devNotifier, mailer, log)
 
 	mux := http.NewServeMux()
 	apiDeps := api.ServerDeps{

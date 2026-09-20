@@ -99,7 +99,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	mailer := fakeMailer{}
 	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log)
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
-	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{})
+	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
 
 	return st, api.ServerDeps{
 		Log:       log,

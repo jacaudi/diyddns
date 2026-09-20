@@ -130,6 +130,30 @@ func IsASCII(s string) bool {
 	return true
 }
 
+// ASCIIFold returns s with every rune the SMTP transport cannot carry
+// replaced by '?': anything above 0x7F — which includes utf8.RuneError, the
+// value range yields for an invalid byte — and every control rune (below
+// 0x20, or 0x7F). Printable ASCII passes through unchanged, so the result
+// always satisfies IsASCII and contains no CR or LF.
+//
+// A display concession for one transport, applied where a user-controlled
+// value (a device label, #132) is rendered into a message body. Nothing
+// stored changes. Folding control characters is a choice, not a transport
+// rule: checkSendable does not CR/LF-check a body, but a label must not be
+// able to forge a line of the notice.
+func ASCIIFold(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r > unicode.MaxASCII || r < 0x20 || r == 0x7F {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // NormalizeAddress parses addr, returns its canonical addr-spec form, and
 // rejects any address that is not 7-bit ASCII.
 //

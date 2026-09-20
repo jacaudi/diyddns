@@ -36,7 +36,7 @@
       <tbody>
         {{range .Devices}}
         <tr>
-          <td data-label="Device">{{if .Owned}}<a class="primary-cell" href="/devices/{{.ID}}">{{.Label}}</a>{{else}}<span class="primary-cell">{{.Label}}</span>{{end}}</td>
+          <td data-label="Device"><a class="primary-cell" href="{{if .Owned}}/devices/{{.ID}}{{else}}/admin/devices/{{.ID}}{{end}}">{{.Label}}</a></td>
           <td data-label="Owner"><a href="/admin/users/{{.OwnerID}}">{{.OwnerEmail}}</a></td>
           <td data-label="Status">{{template "statusTag" .Status}}</td>
           <td data-label="IPv4">{{template "v4AddressCell" .}}</td>

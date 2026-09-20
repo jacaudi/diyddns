@@ -87,7 +87,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Log:         log,
 		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
 		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit),
-		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}),
+		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}, nil, log),
 		Grants:      grants,
 		EmailChange: emailChange,
 		Notify:      notify,
@@ -2511,6 +2511,7 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 	h, _ := New(deps)
 
 	victim := seedUser(t, st, "victim@example.com", "user")
+	dev := seedDevice(t, st, victim.ID, "victims-pi")
 	usr := seedUser(t, st, "plain@example.com", "user")
 	cookie := signIn(t, deps, usr)
 	sess := sessionFor(t, deps, cookie)
@@ -2532,6 +2533,10 @@ func TestAdminRoutes_RequireAdmin(t *testing.T) {
 		{http.MethodGet, "/admin/server"},
 		// #105 registers this one.
 		{http.MethodGet, "/admin/devices"},
+		// #132 registers these three.
+		{http.MethodGet, "/admin/devices/" + dev.ID},
+		{http.MethodGet, "/admin/devices/" + dev.ID + "/history"},
+		{http.MethodPost, "/admin/devices/" + dev.ID + "/enabled"},
 	} {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			form := url.Values{
@@ -2757,7 +2762,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -2805,6 +2810,7 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 	// Seed a passkey so the recovery route's assertion is meaningful: without
 	// one, "credentials still exist" is trivially true and proves nothing.
 	seedPasskey(t, st, target.ID, "existing key")
+	dev := seedDevice(t, st, target.ID, "targets-pi")
 	cookie := signIn(t, deps, admin)
 
 	for _, path := range []string{
@@ -2813,6 +2819,7 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 		"/admin/users/" + target.ID + "/update",
 		"/admin/users/" + target.ID + "/delete",
 		"/admin/users/" + target.ID + "/recovery",
+		"/admin/devices/" + dev.ID + "/enabled",
 	} {
 		t.Run(path, func(t *testing.T) {
 			form := url.Values{
@@ -2848,11 +2855,16 @@ func TestAdminMutations_RequireCSRF(t *testing.T) {
 	if n == 0 {
 		t.Error("a CSRF-less POST to /recovery revoked the target's passkeys")
 	}
-	// /admin/users/new is the one route in the loop above with no
-	// side-effect-absence check of its own: the form posts email=someone@example.com,
-	// so a CSRF-guard bug on that route specifically would silently create the user.
+	// /admin/users/new and /admin/devices/{id}/enabled are the two routes in the
+	// loop above with no side-effect-absence check of their own: /admin/users/new
+	// posts email=someone@example.com, so a CSRF-guard bug on that route
+	// specifically would silently create the user, and /admin/devices/{id}/enabled
+	// posts disabled=true, so a CSRF-guard bug there would silently disable dev.
 	if _, err := st.Users().GetByEmail(t.Context(), "someone@example.com"); err == nil {
 		t.Error("a CSRF-less POST to /admin/users/new created the invited user")
+	}
+	if got, _ := st.Devices().GetByID(t.Context(), dev.ID); got.Disabled {
+		t.Error("a CSRF-less POST disabled the device")
 	}
 }
 
@@ -3398,7 +3410,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3482,7 +3494,7 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{})
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin-disabled-recovery@example.com", "admin")
@@ -3527,8 +3539,8 @@ func TestKnownEventTypes_IncludesRetentionPrune(t *testing.T) {
 
 // TestAdminDevices_ListsEveryOwnersDevices is #105's happy path: the admin page
 // lists devices across users, links each owner to the admin user page, links a
-// device to its owner-scoped detail only when the signed-in admin owns it, and
-// offers no mutation at all.
+// device the admin owns to the owner-scoped detail and every other device to
+// the read-only admin detail page (#132), and offers no mutation on the list.
 func TestAdminDevices_ListsEveryOwnersDevices(t *testing.T) {
 	deps, st := testDeps(t)
 	h, _ := New(deps)
@@ -3566,6 +3578,9 @@ func TestAdminDevices_ListsEveryOwnersDevices(t *testing.T) {
 	}
 	if strings.Contains(body, `href="/devices/`+theirs.ID+`"`) {
 		t.Error("another user's device is linked; detail pages are owner-scoped")
+	}
+	if !strings.Contains(body, `href="/admin/devices/`+theirs.ID+`"`) {
+		t.Error("another user's device is not linked to the admin detail page (#132)")
 	}
 	if strings.Contains(body, "<form method=\"post\"") {
 		t.Error("the admin devices page is read-only for v1 and must carry no mutation form")

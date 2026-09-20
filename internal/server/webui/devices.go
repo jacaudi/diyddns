@@ -451,6 +451,51 @@ func relExpiry(expiresAt int64, now time.Time) string {
 	return fmt.Sprintf("%d hours", int(d.Hours())+1)
 }
 
+// deviceScope says whose device a device page is showing and where that
+// device's pages live. ownerScope is the owner looking at their own device;
+// adminScope is an admin looking at anyone's (#132 D6). ListURL, DetailURL,
+// and HistoryURL are set by the constructor on every scope, so no page can
+// render an empty href for those. OwnerURL is the one field that is
+// deliberately empty on the owner's page — see its own comment below.
+//
+// It exists because the session user used to play two roles in newDetailData
+// -- the shell (newAppData, CSRF, nav) and the SCOPE of the history reads plus
+// the Owner label -- and on the admin path those are two different people. A
+// second store.User parameter beside the first would be two same-typed values
+// the compiler cannot tell apart; this is the second role, named.
+type deviceScope struct {
+	OwnerID    string // scope argument for DeviceService.History / LatestAddress
+	OwnerEmail string // the facts card's Owner row
+	OwnerURL   string // "" on the owner's page (plain text); /admin/users/{id} on the admin's
+	Nav        string // "devices" | "admin-devices"
+	ListURL    string // "/devices" | "/admin/devices"
+	ListLabel  string // "Devices" | "All Devices"
+	DetailURL  string // ListURL + "/" + dev.ID
+	HistoryURL string // DetailURL + "/history"
+}
+
+// ownerScope is the owner-scoped view: usr owns dev, and every page lives
+// under /devices.
+func ownerScope(usr store.User, dev store.Device) deviceScope {
+	return newDeviceScope(usr, "", "devices", "/devices", "Devices", dev)
+}
+
+// adminScope is the admin-scoped view of ANY device: owner is the device's
+// owner, resolved by AdminService.GetDevice, and every page lives under
+// /admin/devices. The Owner row links to the owner's admin page.
+func adminScope(owner store.User, dev store.Device) deviceScope {
+	return newDeviceScope(owner, "/admin/users/"+owner.ID, "admin-devices", "/admin/devices", "All Devices", dev)
+}
+
+func newDeviceScope(owner store.User, ownerURL, nav, listURL, listLabel string, dev store.Device) deviceScope {
+	detail := listURL + "/" + dev.ID
+	return deviceScope{
+		OwnerID: owner.ID, OwnerEmail: owner.Email, OwnerURL: ownerURL,
+		Nav: nav, ListURL: listURL, ListLabel: listLabel,
+		DetailURL: detail, HistoryURL: detail + "/history",
+	}
+}
+
 // deviceDetailData is device-detail.html's template data. Secret is populated
 // only on the rotate reveal.
 type deviceDetailData struct {
@@ -461,6 +506,8 @@ type deviceDetailData struct {
 	LastSeenAbs string
 	CreatedAbs  string
 	Owner       string
+	OwnerURL    string // "" on the owner's page (plain text); /admin/users/{id} on the admin's (#132 D12)
+	HistoryURL  string // this device's full-history page, owner- or admin-scoped
 	History     []historyRow
 	Error       string
 
@@ -509,21 +556,25 @@ func (h *handler) ownedDevice(w http.ResponseWriter, r *http.Request, usr store.
 }
 
 // newDetailData assembles the detail view model, including the five most recent
-// history rows the page previews.
-func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Session, dev store.Device) (deviceDetailData, error) {
-	page, err := h.deps.Devices.History(r.Context(), usr.ID, dev.ID, "", 5)
+// history rows the page previews. usr is the signed-in user (the shell); v
+// says whose device this is and scopes the reads (#132 D6) -- the two are the
+// same person on the owner's page and different people on the admin's.
+func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Session, v deviceScope, dev store.Device) (deviceDetailData, error) {
+	page, err := h.deps.Devices.History(r.Context(), v.OwnerID, dev.ID, "", 5)
 	if err != nil {
 		return deviceDetailData{}, err
 	}
 	now := time.Now()
 	data := deviceDetailData{
-		appData:     h.newAppData(usr, sess, dev.Label, "devices"),
+		appData:     h.newAppData(usr, sess, dev.Label, v.Nav),
 		Device:      dev,
 		Status:      deviceStatus(dev, now),
 		LastSeenRel: relTime(dev.LastSeenAt, now),
 		LastSeenAbs: absTime(dev.LastSeenAt),
 		CreatedAbs:  absTime(dev.CreatedAt),
-		Owner:       usr.Email,
+		Owner:       v.OwnerEmail,
+		OwnerURL:    v.OwnerURL,
+		HistoryURL:  v.HistoryURL,
 		History:     historyRows(page.Rows, now),
 	}
 
@@ -544,7 +595,7 @@ func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Sess
 	// The five-row preview didn't carry it -- fall back to the same
 	// per-family read the list pages use, scoped to this one device.
 	if needV4 || needV6 {
-		latest, err := h.deps.Devices.LatestAddress(r.Context(), usr.ID, dev.ID)
+		latest, err := h.deps.Devices.LatestAddress(r.Context(), v.OwnerID, dev.ID)
 		if err != nil {
 			return deviceDetailData{}, err
 		}
@@ -582,7 +633,7 @@ func (h *handler) handleDeviceDetail(w http.ResponseWriter, r *http.Request, usr
 	if !ok {
 		return
 	}
-	data, err := h.newDetailData(r, usr, sess, dev)
+	data, err := h.newDetailData(r, usr, sess, ownerScope(usr, dev), dev)
 	if err != nil {
 		h.logAndFail(w, r, usr, "load device history", err)
 		return
@@ -648,7 +699,7 @@ func (h *handler) handleDeviceRotate(w http.ResponseWriter, r *http.Request, usr
 		h.logAndFail(w, r, usr, "rotate device secret", err)
 		return
 	}
-	data, err := h.newDetailData(r, usr, sess, dev)
+	data, err := h.newDetailData(r, usr, sess, ownerScope(usr, dev), dev)
 	if err != nil {
 		// The rotation has ALREADY COMMITTED at this point and the plaintext
 		// lives only in the local above — this failure is the cosmetic history
@@ -691,7 +742,7 @@ func (h *handler) handleDeviceDelete(w http.ResponseWriter, r *http.Request, usr
 // renderDetailError re-renders the detail page at 422 with a banner, for a
 // failed validation or confirmation.
 func (h *handler) renderDetailError(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session, dev store.Device, msg string) {
-	data, err := h.newDetailData(r, usr, sess, dev)
+	data, err := h.newDetailData(r, usr, sess, ownerScope(usr, dev), dev)
 	if err != nil {
 		h.logAndFail(w, r, usr, "load device history", err)
 		return
@@ -763,23 +814,38 @@ func firstPageURL(r *http.Request) string {
 	return r.URL.Path
 }
 
-// deviceHistoryData is device-history.html's template data.
+// deviceHistoryData is device-history.html's template data. The four URLs
+// come from the deviceScope so the owner's and the admin's history pages can
+// never link into each other's route family (#132 D13).
 type deviceHistoryData struct {
 	appData
-	Device    store.Device
-	Rows      []historyRow
-	Pager     pager
-	HasCursor bool
+	Device     store.Device
+	Rows       []historyRow
+	Pager      pager
+	HasCursor  bool
+	ListURL    string
+	ListLabel  string
+	DetailURL  string
+	HistoryURL string
 }
 
-// handleDeviceHistory renders one device's paginated IP history.
+// handleDeviceHistory renders one device's paginated IP history for its owner.
 func (h *handler) handleDeviceHistory(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 	dev, ok := h.ownedDevice(w, r, usr)
 	if !ok {
 		return
 	}
+	h.renderDeviceHistory(w, r, usr, sess, ownerScope(usr, dev), dev)
+}
+
+// renderDeviceHistory renders one device's paginated IP history for whichever
+// relationship v names: the owner under /devices, an admin under
+// /admin/devices (#132 D13). The read is scoped by v.OwnerID; the pager and
+// every link are built from v.HistoryURL, exactly as they were built from the
+// local "base" before the admin page existed.
+func (h *handler) renderDeviceHistory(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session, v deviceScope, dev store.Device) {
 	cursor := r.URL.Query().Get("cursor")
-	page, err := h.deps.Devices.History(r.Context(), usr.ID, dev.ID, cursor, historyPageSize)
+	page, err := h.deps.Devices.History(r.Context(), v.OwnerID, dev.ID, cursor, historyPageSize)
 	if err != nil {
 		// Always log first. A bad cursor is user input from a pasted or
 		// truncated URL, not a server fault, and this screen promises shareable
@@ -798,20 +864,23 @@ func (h *handler) handleDeviceHistory(w http.ResponseWriter, r *http.Request, us
 		return
 	}
 
-	base := "/devices/" + dev.ID + "/history"
 	p := pager{RowCount: len(page.Rows)}
 	if page.NextCursor != "" {
-		p.NextURL = base + "?cursor=" + url.QueryEscape(page.NextCursor)
+		p.NextURL = v.HistoryURL + "?cursor=" + url.QueryEscape(page.NextCursor)
 	}
 	if cursor != "" {
-		p.FirstURL = base
+		p.FirstURL = v.HistoryURL
 	}
 
 	h.render(w, r, "device-history", deviceHistoryData{
-		appData:   h.newAppData(usr, sess, dev.Label+" history", "devices"),
-		Device:    dev,
-		Rows:      historyRows(page.Rows, time.Now()),
-		Pager:     p,
-		HasCursor: cursor != "",
+		appData:    h.newAppData(usr, sess, dev.Label+" history", v.Nav),
+		Device:     dev,
+		Rows:       historyRows(page.Rows, time.Now()),
+		Pager:      p,
+		HasCursor:  cursor != "",
+		ListURL:    v.ListURL,
+		ListLabel:  v.ListLabel,
+		DetailURL:  v.DetailURL,
+		HistoryURL: v.HistoryURL,
 	})
 }

@@ -186,3 +186,28 @@ func TestIsRoutableFrom(t *testing.T) {
 		})
 	}
 }
+
+// TestASCIIFold pins the one transport concession this package makes for a
+// user-controlled value rendered into a message (#132 D10, design §7): every
+// rune the 7-bit SMTP path cannot carry becomes '?', and printable ASCII is
+// untouched, so the result always satisfies IsASCII and carries no CR/LF.
+func TestASCIIFold(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"plain-pi", "plain-pi"},
+		{"Büro-Pi", "B?ro-Pi"}, // one multi-byte rune, one '?'
+		{"line\r\nbreak", "line??break"},
+		{"nul\x00byte", "nul?byte"},
+		{"del\x7f", "del?"},
+		{"bad\xffutf8", "bad?utf8"}, // an invalid byte ranges as utf8.RuneError
+		{"tab\tin", "tab?in"},
+		{"", ""},
+	} {
+		got := email.ASCIIFold(tc.in)
+		if got != tc.want {
+			t.Errorf("ASCIIFold(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if !email.IsASCII(got) || strings.ContainsAny(got, "\r\n") {
+			t.Errorf("ASCIIFold(%q) = %q is not sendable", tc.in, got)
+		}
+	}
+}
