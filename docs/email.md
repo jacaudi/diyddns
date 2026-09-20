@@ -98,6 +98,17 @@ self-service change is unavailable to them. An administrator can still set the a
 directly; the admin UI warns that the identity provider will replace it again at the
 user's next sign-in.
 
+The same operations are also available over REST: self-service request/cancel/confirm at
+`POST /api/v1/account/email`, `POST /api/v1/account/email/cancel`, and
+`POST /api/v1/account/email/confirm` (session gated, every write additionally requiring a
+CSRF token), and the admin-set path at `PATCH /api/v1/admin/users/{id}/email` (session +
+admin + CSRF). A single user's record, including its email, is readable at
+`GET /api/v1/admin/users/{id}`. This is a second interface onto the same
+`EmailChangeService`, not a separate flow — a change staged from one surface is visible
+and actionable from the other, and every guard described above (OIDC-managed accounts,
+the transport's carriable-address rule, the shown-once confirmation link) applies
+identically.
+
 Self-service change works regardless of `email.enabled`. With no mailer configured, the form
 is still offered; after the user submits it, the confirmation link is shown once on that
 response instead of being emailed — the same shown-once fallback the invite and recovery
