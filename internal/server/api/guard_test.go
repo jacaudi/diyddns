@@ -85,3 +85,33 @@ func TestGuard_FeedTokenRoutesRejectUnauthenticated(t *testing.T) {
 		}
 	}
 }
+
+// TestGuard_NotificationRoutesRejectUnauthenticated is
+// TestGuard_ProtectedPathsRejectUnauthenticated's counterpart for the seven
+// #152 notification-endpoint/delivery operations. It runs against
+// newNotificationHarness rather than newFullHarness: newFullHarness's
+// deps.Notify is nil (notifications disabled), which keeps these routes off
+// the mux entirely and would make every case here 404 — a route that isn't
+// registered can't prove its auth middleware is attached. Asserting a bare
+// 401 here (not "401 or 403", unlike the table above) is deliberate: every
+// case sends no session cookie, so sessionMW always rejects first, before
+// adminMW ever runs — 403 is only reachable for an authenticated non-admin,
+// which none of these requests are.
+func TestGuard_NotificationRoutesRejectUnauthenticated(t *testing.T) {
+	srv := newNotificationHarness(t).srv
+	cases := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/endpoints"},
+		{http.MethodPost, "/api/v1/admin/endpoints"},
+		{http.MethodGet, "/api/v1/admin/endpoints/some-id"},
+		{http.MethodPatch, "/api/v1/admin/endpoints/some-id"},
+		{http.MethodDelete, "/api/v1/admin/endpoints/some-id"},
+		{http.MethodPost, "/api/v1/admin/endpoints/some-id/test"},
+		{http.MethodPost, "/api/v1/admin/deliveries/1/redeliver"},
+	}
+	for _, c := range cases {
+		code := doNoAuth(t, srv, c.method, c.path)
+		if code != http.StatusUnauthorized {
+			t.Errorf("%s %s returned %d (fail-open!), want 401", c.method, c.path, code)
+		}
+	}
+}

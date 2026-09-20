@@ -295,6 +295,78 @@ func TestServer_PasskeyRoutesWired(t *testing.T) {
 	}
 }
 
+// TestServer_NotificationRoutesWired confirms the live wiring for #152: the
+// real cfg.Notifications.Enabled -> server.go's notifyAPISvc gate ->
+// api.Build's nil-tolerant deps.Notify check chain, not just a hand-built
+// api.ServerDeps (see internal/server/api's newNotificationHarness for that
+// narrower unit-level check, which this test complements rather than
+// replaces). Checks both a read (GET list) and a mutation (PATCH) in each
+// case: notifications.enabled=false must leave BOTH fully absent (404, not
+// merely guarded), and =true must register BOTH — a disabled-case check that
+// only covered GET would miss a registration bug isolated to the mutating
+// ops.
+func TestServer_NotificationRoutesWired(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+	}{
+		{"disabled", false},
+		{"enabled", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("database.path", ":memory:")
+			v.Set("auth.hmac.secret_key", validSecretKey())
+			v.Set("server.base_url", "https://ddns.example.com")
+			v.Set("notifications.enabled", tt.enabled)
+			cfg, err := config.Load(v, "")
+			if err != nil {
+				t.Fatalf("config.Load: %v", err)
+			}
+
+			handler, _, err := server.Handler(cfg, memStore(t), discard(), server.NopInstruments{})
+			if err != nil {
+				t.Fatalf("server.Handler: %v", err)
+			}
+			srv := httptest.NewServer(handler)
+			t.Cleanup(srv.Close)
+
+			getResp, err := http.Get(srv.URL + "/api/v1/admin/endpoints")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer getResp.Body.Close()
+
+			patchReq, err := http.NewRequest(http.MethodPatch, srv.URL+"/api/v1/admin/endpoints/some-id", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			patchResp, err := http.DefaultClient.Do(patchReq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer patchResp.Body.Close()
+
+			if tt.enabled {
+				if getResp.StatusCode == http.StatusNotFound {
+					t.Error("GET /api/v1/admin/endpoints = 404 with notifications.enabled=true, want the route registered")
+				}
+				if patchResp.StatusCode == http.StatusNotFound {
+					t.Error("PATCH /api/v1/admin/endpoints/{id} = 404 with notifications.enabled=true, want the route registered")
+				}
+			} else {
+				if getResp.StatusCode != http.StatusNotFound {
+					t.Errorf("GET /api/v1/admin/endpoints = %d with notifications.enabled=false, want 404 (route absent)", getResp.StatusCode)
+				}
+				if patchResp.StatusCode != http.StatusNotFound {
+					t.Errorf("PATCH /api/v1/admin/endpoints/{id} = %d with notifications.enabled=false, want 404 (route absent)", patchResp.StatusCode)
+				}
+			}
+		})
+	}
+}
+
 // TestServer_ServeBoot is the happy-path serve boot test (follow-up #6): New
 // + Run in a goroutine, hit a real endpoint over the network, cancel, and
 // confirm a clean shutdown.

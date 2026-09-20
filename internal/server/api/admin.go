@@ -206,22 +206,8 @@ type serverInfoOutput struct{ Body serverInfoResponse }
 // audit log, and non-secret server info. Every op is session + admin gated;
 // mutations additionally require CSRF.
 func registerAdminOps(a huma.API, deps ServerDeps) {
-	adminRead := func() huma.Middlewares {
-		return huma.Middlewares{
-			sessionMW(a, deps),
-			adminMW(a, deps),
-		}
-	}
-	adminWrite := func() huma.Middlewares {
-		return huma.Middlewares{
-			sessionMW(a, deps),
-			adminMW(a, deps),
-			csrfMW(a, deps),
-		}
-	}
-
 	huma.Register(a, huma.Operation{
-		Method: http.MethodGet, Path: "/api/v1/admin/users", Middlewares: adminRead(),
+		Method: http.MethodGet, Path: "/api/v1/admin/users", Middlewares: adminReadMW(a, deps),
 	}, func(ctx context.Context, _ *struct{}) (*listUsersOutput, error) {
 		users, err := deps.Admin.ListUsers(ctx)
 		if err != nil {
@@ -235,7 +221,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
+		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWriteMW(a, deps),
 	}, func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
 		actor := UserFrom(ctx)
 		u, link, delivery, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
@@ -248,7 +234,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodPatch, Path: "/api/v1/admin/users/{id}", Middlewares: adminWrite(),
+		Method: http.MethodPatch, Path: "/api/v1/admin/users/{id}", Middlewares: adminWriteMW(a, deps),
 	}, func(ctx context.Context, in *updateUserInput) (*updateUserOutput, error) {
 		actor := UserFrom(ctx)
 		u, err := deps.Admin.UpdateUser(ctx, actor.ID, in.ID, service.UpdateUserParams{
@@ -261,7 +247,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodDelete, Path: "/api/v1/admin/users/{id}", DefaultStatus: http.StatusNoContent, Middlewares: adminWrite(),
+		Method: http.MethodDelete, Path: "/api/v1/admin/users/{id}", DefaultStatus: http.StatusNoContent, Middlewares: adminWriteMW(a, deps),
 	}, func(ctx context.Context, in *deleteUserInput) (*deleteUserOutput, error) {
 		actor := UserFrom(ctx)
 		if err := deps.Admin.DeleteUser(ctx, actor.ID, in.ID); err != nil {
@@ -271,7 +257,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/recovery", DefaultStatus: http.StatusOK, Middlewares: adminWrite(),
+		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/recovery", DefaultStatus: http.StatusOK, Middlewares: adminWriteMW(a, deps),
 	}, func(ctx context.Context, in *issueRecoveryInput) (*issueRecoveryOutput, error) {
 		actor := UserFrom(ctx)
 		// The lookup keeps the 404-on-bad-id behavior consistent with this
@@ -291,7 +277,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodGet, Path: "/api/v1/admin/devices", Middlewares: adminRead(),
+		Method: http.MethodGet, Path: "/api/v1/admin/devices", Middlewares: adminReadMW(a, deps),
 	}, func(ctx context.Context, _ *struct{}) (*listAllDevicesOutput, error) {
 		devices, err := deps.Admin.ListAllDevices(ctx)
 		if err != nil {
@@ -305,7 +291,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodGet, Path: "/api/v1/admin/devices/ips", Middlewares: adminRead(),
+		Method: http.MethodGet, Path: "/api/v1/admin/devices/ips", Middlewares: adminReadMW(a, deps),
 	}, func(ctx context.Context, _ *struct{}) (*listAllDeviceIPsOutput, error) {
 		addrs, err := deps.Admin.ListAllDeviceIPs(ctx)
 		if err != nil {
@@ -319,7 +305,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodGet, Path: "/api/v1/admin/audit", Middlewares: adminRead(),
+		Method: http.MethodGet, Path: "/api/v1/admin/audit", Middlewares: adminReadMW(a, deps),
 	}, func(ctx context.Context, in *auditInput) (*auditOutput, error) {
 		page, err := deps.Admin.ListAudit(ctx, store.AuditFilter{
 			ActorUserID: in.ActorUserID, EventType: in.EventType, Since: in.Since, Until: in.Until,
@@ -338,7 +324,7 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 
 	huma.Register(a, huma.Operation{
-		Method: http.MethodGet, Path: "/api/v1/admin/server", Middlewares: adminRead(),
+		Method: http.MethodGet, Path: "/api/v1/admin/server", Middlewares: adminReadMW(a, deps),
 	}, func(ctx context.Context, _ *struct{}) (*serverInfoOutput, error) {
 		oidc := deps.Cfg.OIDC
 		sess := deps.Cfg.Session
