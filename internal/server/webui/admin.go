@@ -467,6 +467,7 @@ const auditPageSize = 100
 // (event := "device.enabled", event := "user.enabled"), so grepping for
 // `EventType: "` alone does not find them.
 var knownEventTypes = []string{
+	"api_key.created", "api_key.revoked",
 	"bootstrap.consumed",
 	"device.deleted", "device.disabled", "device.disabled_by_admin", "device.enabled", "device.enabled_by_admin",
 	"device.enroll.code", "device.enroll.oidc", "device.renamed", "device.secret.rotated",
