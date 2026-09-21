@@ -23,8 +23,10 @@ import (
 // sessionOrAPIKeyMiddleware (+ csrfMiddleware chained after, matching the
 // required session-mutation ordering) and returns everything a test needs:
 // the server, a seeded admin user + their real API key (AdminScope=false,
-// as every #149 mint always produces) + session + csrf token, a seeded
-// disabled user + their key, and the log buffer.
+// as every #149 mint always produces) + session + csrf token, and a second
+// user (returned still ENABLED, name kept as "disabledUser" for its role in
+// the disabled-user tests, which flip it live via st.Users().SetDisabled)
+// with their own key, and the log buffer.
 func registerKeyOrSessionProbe(t *testing.T) (srv *httptest.Server, st *store.Store, keySvc *service.APIKeyService,
 	admin store.User, adminKeyPlain string, adminSess store.Session, adminCSRF string,
 	disabledUser store.User, disabledKeyPlain string, buf *bytes.Buffer) {
@@ -35,9 +37,15 @@ func registerKeyOrSessionProbe(t *testing.T) (srv *httptest.Server, st *store.St
 	if err != nil {
 		t.Fatalf("seed admin: %v", err)
 	}
-	disabledUser, err = st.Users().Create(t.Context(), store.User{Email: "mwdisabled@example.com", Role: "user", Disabled: true})
+	// Seeded ENABLED, deliberately: a test that needs to prove the
+	// disabled-user check reads LIVE state (design B3) must mint the key
+	// while the owner is enabled, confirm it works, and only then disable
+	// the owner via st.Users().SetDisabled and reuse the same key plaintext.
+	// Minting for an already-disabled user cannot distinguish a live check
+	// from a mint-time snapshot.
+	disabledUser, err = st.Users().Create(t.Context(), store.User{Email: "mwdisabled@example.com", Role: "user"})
 	if err != nil {
-		t.Fatalf("seed disabled user: %v", err)
+		t.Fatalf("seed second user: %v", err)
 	}
 
 	keySvc = service.NewAPIKeyService(st, discardServiceAudit{})
@@ -47,7 +55,7 @@ func registerKeyOrSessionProbe(t *testing.T) (srv *httptest.Server, st *store.St
 	}
 	_, disabledKeyPlain, err = keySvc.MintKey(t.Context(), disabledUser.ID, "disabled-probe-key")
 	if err != nil {
-		t.Fatalf("mint disabled-user key: %v", err)
+		t.Fatalf("mint second user's key: %v", err)
 	}
 
 	sm := auth.NewSessionManager(st.Sessions(), st.Users(), time.Hour, time.Minute)
@@ -178,13 +186,27 @@ func TestSessionOrAPIKey_KeyCapsRoleToUser(t *testing.T) {
 
 // TestSessionOrAPIKey_DisabledUsersKeyRejected pins design B3 (design-gate
 // review): a disabled user's key must be rejected 401 on every request,
-// live, not just at mint time.
+// live, not just at mint time. Proven by minting the key while the owner is
+// still ENABLED, confirming it works, then flipping Disabled on the SAME
+// user via the users repo and reusing the SAME key plaintext -- an
+// implementation that (wrongly) stamped Disabled onto the key row at mint
+// time would fail this test, unlike a test that only ever mints for an
+// already-disabled user.
 func TestSessionOrAPIKey_DisabledUsersKeyRejected(t *testing.T) {
-	srv, _, _, _, _, _, _, _, disabledKeyPlain, _ := registerKeyOrSessionProbe(t)
+	srv, st, _, _, _, _, _, disabledUser, disabledKeyPlain, _ := registerKeyOrSessionProbe(t)
 
 	status, body := doProbe(t, http.MethodGet, srv.URL+"/api/v1/probe", nil, disabledKeyPlain, "")
+	if status != http.StatusOK {
+		t.Fatalf("enabled user's key: status = %d, want 200, body=%s", status, body)
+	}
+
+	if err := st.Users().SetDisabled(t.Context(), disabledUser.ID, true); err != nil {
+		t.Fatalf("SetDisabled: %v", err)
+	}
+
+	status, body = doProbe(t, http.MethodGet, srv.URL+"/api/v1/probe", nil, disabledKeyPlain, "")
 	if status != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401, body=%s", status, body)
+		t.Fatalf("disabled user's key: status = %d, want 401, body=%s", status, body)
 	}
 }
 
@@ -233,7 +255,19 @@ func TestSessionOrAPIKey_ExclusiveCredential_MalformedBearerNeverFallsBack(t *te
 // are equal to EACH OTHER and never contain a reason word, exactly as this
 // codebase's own HMAC precedent already does.
 func TestSessionOrAPIKey_401BodyUniform(t *testing.T) {
-	srv, _, _, _, _, _, _, _, _, _ := registerKeyOrSessionProbe(t)
+	srv, st, _, _, _, _, _, disabledUser, disabledKeyPlain, _ := registerKeyOrSessionProbe(t)
+
+	// The helper returns disabledUser still ENABLED (design B3 fix); disable
+	// it here so "real key, owner disabled after mint" below actually
+	// exercises the disabled_user rejection path, not a 200.
+	if err := st.Users().SetDisabled(t.Context(), disabledUser.ID, true); err != nil {
+		t.Fatalf("SetDisabled: %v", err)
+	}
+
+	// wrong prefix, right shape is a control -- never touches keys.Authenticate.
+	// unknownKey has the real prefix but no corresponding row: exercises the
+	// unknown_key rejection path (Authenticate -> store.ErrNotFound).
+	unknownKey := service.APIKeyPrefix + "0000000000000000000000000000000000000000"
 
 	cases := []struct {
 		name   string
@@ -243,6 +277,8 @@ func TestSessionOrAPIKey_401BodyUniform(t *testing.T) {
 		{"no credential at all", nil, ""},
 		{"malformed bearer", nil, "not-even-close"},
 		{"wrong prefix, right shape", nil, "ddf_" + "0123456789012345678901234567890123456789"},
+		{"syntactically valid, unknown key", nil, unknownKey},
+		{"real key, owner disabled after mint", nil, disabledKeyPlain},
 	}
 	bodies := make([]string, 0, len(cases))
 	for _, tc := range cases {
