@@ -106,6 +106,19 @@ func adminWriteMW(a huma.API, deps ServerDeps) huma.Middlewares {
 	}
 }
 
+// sessionOrKeyMW is the middleware chain for a route that accepts EITHER a
+// session cookie OR a capped-scope API key (design D5/D7): every
+// consumption route this design names, except the exclusions in D4/D6/D7.
+// Deliberately uncalled by this task (#149 plan T4): T5 swaps sessionMW for
+// this inside adminReadMW/adminWriteMW in this same file (see the plan's
+// pre-flight T4xT5 conflict-scan entry) -- registerAPIKeyOps itself never
+// wires it, by design (see that function's own doc comment).
+//
+//nolint:unused // deliberate T4->T5 sequencing, see doc comment above
+func sessionOrKeyMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) {
+	return sessionOrAPIKeyMiddleware(a, deps.APIKeys, deps.Sessions, deps.Cfg.Session.CookieName, deps.Log)
+}
+
 // hmacMiddleware verifies the HMAC request-signing envelope for agent
 // operations. It bounds the body read to maxBody (pre-auth DoS defense),
 // restores the body afterward so huma's own input binding can still parse it,
@@ -275,13 +288,6 @@ func sessionOrAPIKeyMiddleware(api huma.API, keys *service.APIKeyService, sessio
 		next(huma.WithValue(huma.WithValue(ctx, userKey, effectiveUser), authMethodKey, authMethodAPIKey))
 	}
 }
-
-// sessionOrKeyMW is Task 4's wiring point: once ServerDeps.APIKeys exists,
-// Task 4 defines `func sessionOrKeyMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) { return sessionOrAPIKeyMiddleware(a, deps.APIKeys, deps.Sessions, deps.Cfg.Session.CookieName, deps.Log) }`
-// alongside sessionMW/csrfMW/adminMW (authmw.go:66-76). This task does not
-// define sessionOrKeyMW itself, since ServerDeps.APIKeys does not exist
-// until Task 4 -- defining it here against a field that doesn't compile yet
-// would break the build for every task before Task 4 runs.
 
 // csrfMiddleware enforces the X-CSRF-Token header against the session's CSRF
 // token using a constant-time comparison. It MUST run after sessionMiddleware

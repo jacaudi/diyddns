@@ -49,6 +49,11 @@ type ServerDeps struct {
 
 	Feed        *service.FeedService
 	FeedEnabled bool // mirrors cfg.Feed.Enabled; the feed-token REST ops are absent, not just guarded, when off — see Build (issue #153, mirrors webui.go's own feed.enabled gate)
+
+	// APIKeys is unconditionally constructed (server.go) and unconditionally
+	// registered below, like EmailChange -- unlike Passkey/Grants/Notify/Feed,
+	// there is no config flag that turns account-scoped API keys off (#149).
+	APIKeys *service.APIKeyService
 }
 
 // Build registers both huma APIs, their operations, and the health handlers
@@ -63,6 +68,7 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	registerDeviceOps(apiAPI, deps)
 	registerDeviceMgmtOps(apiAPI, deps)
 	registerAccountEmailOps(apiAPI, deps)
+	registerAPIKeyOps(apiAPI, deps)
 	registerAdminOps(apiAPI, deps)
 	// Passkey ops depend on BOTH Passkey and Grants being wired (register/begin
 	// and /finish drive a grant redeem via Grants; account passkey management
