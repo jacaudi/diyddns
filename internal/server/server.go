@@ -316,6 +316,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		EmailChange: emailChangeSvc,
 		Notify:      notifySvc,
 		Feed:        feedSvc,
+		APIKeys:     apiKeySvc,
 		Info:        version.Current(),
 		StartedAt:   time.Now(),
 	}

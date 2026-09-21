@@ -36,6 +36,7 @@ type accountData struct {
 	Link          string
 	LinkExpiresIn string
 	Error         string
+	APIKeys       apiKeysSectionData
 }
 
 func (h *handler) accountData(usr store.User, sess store.Session, errMsg string) accountData {
@@ -64,11 +65,32 @@ func (h *handler) accountData(usr store.User, sess store.Session, errMsg string)
 	return data
 }
 
+// accountPageData composes accountData with its API Keys section -- the one
+// piece of /account's data that can fail to load (a store error);
+// accountData itself never returns an error. Every render of "account" goes
+// through this function, added by #149, so no call site can forget to
+// populate APIKeys and silently show an empty section on a page that
+// actually has keys.
+func (h *handler) accountPageData(r *http.Request, usr store.User, sess store.Session, errMsg string) (accountData, error) {
+	data := h.accountData(usr, sess, errMsg)
+	apiKeys, err := h.newAPIKeysSectionData(r, usr.ID)
+	if err != nil {
+		return accountData{}, err
+	}
+	data.APIKeys = apiKeys
+	return data, nil
+}
+
 // handleAccount renders /account. requireSession has already guaranteed a
 // valid session (usr, sess) by the time this runs. Since #106 the page has no
 // notification card: endpoints are admin-only and live under /admin.
 func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
-	h.render(w, r, "account", h.accountData(usr, sess, ""))
+	data, err := h.accountPageData(r, usr, sess, "")
+	if err != nil {
+		h.logAndFail(w, r, usr, "load account page", err)
+		return
+	}
+	h.render(w, r, "account", data)
 }
 
 // renderAccountError re-renders /account with a banner at the status the
@@ -77,7 +99,12 @@ func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, usr stor
 // not (design §5.1 step 9's failed rollback) the copy describes the state after
 // the retry, not this page.
 func (h *handler) renderAccountError(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session, status int, msg string) {
-	h.renderStatus(w, r, status, "account", h.accountData(usr, sess, msg))
+	data, err := h.accountPageData(r, usr, sess, msg)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load account page", err)
+		return
+	}
+	h.renderStatus(w, r, status, "account", data)
 }
 
 // handleAccountEmailRequest stages a self-service address change (design
@@ -99,7 +126,11 @@ func (h *handler) handleAccountEmailRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if link != "" {
-		data := h.accountData(usr, sess, "")
+		data, err := h.accountPageData(r, usr, sess, "")
+		if err != nil {
+			h.logAndFail(w, r, usr, "load account page", err)
+			return
+		}
 		// grantLink's second return value is operator-facing config advice
 		// ("Set server.base_url") -- deliberately discarded here; see
 		// accountData.LinkExpiresIn's doc comment.

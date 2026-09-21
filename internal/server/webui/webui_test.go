@@ -68,6 +68,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log)
+	apiKeys := service.NewAPIKeyService(st, audit)
 
 	// allowed (nil = no private destinations, the same "empty allow-list"
 	// default production ships) is an arbitrary test fixture, not policy
@@ -92,6 +93,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		EmailChange: emailChange,
 		Notify:      notify,
 		Feed:        feedSvc,
+		APIKeys:     apiKeys,
 		Info:        version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
 		StartedAt:   time.Now().Add(-2 * time.Hour),
 	}, st
