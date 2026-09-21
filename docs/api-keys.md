@@ -25,7 +25,9 @@ A key **cannot**:
 **A visible quirk worth knowing:** `GET /api/v1/auth/me` reports your *capped* role when called
 with a key. If you're an admin and you call `/auth/me` with your API key, it reports
 `"role":"user"`, not `"role":"admin"` — that's correct, not a bug: the key genuinely cannot act
-as an admin, so it reports the role it actually has for this request.
+as an admin, so it reports the role it actually has for this request. The same response also
+returns `"csrf":""` for a key-authenticated call, since a key has no session to carry a CSRF
+token in the first place — also correct, not a bug.
 
 ## Minting, using, and revoking a key
 

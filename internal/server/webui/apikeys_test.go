@@ -83,6 +83,31 @@ func extractSecret(t *testing.T, body string) string {
 	return rest[:end]
 }
 
+// TestHandleAPIKeyMint_DuplicateLabel_PreservesTypedLabel: a failed mint
+// (422, duplicate label) re-renders the form with the label the user typed
+// still in the input's value attribute, rather than discarding it (whole-branch
+// review M2).
+func TestHandleAPIKeyMint_DuplicateLabel_PreservesTypedLabel(t *testing.T) {
+	deps, st := testDeps(t)
+	h, _ := New(deps)
+	usr := seedUser(t, st, "webui-duplabel@example.com", "user")
+	cookie := signIn(t, deps, usr)
+	sess := sessionFor(t, deps, cookie)
+
+	if _, _, err := deps.APIKeys.MintKey(t.Context(), usr.ID, "deploy script"); err != nil {
+		t.Fatalf("mint first key: %v", err)
+	}
+
+	rec := postForm(t, h, cookie, "/account/keys", url.Values{"csrf": {sess.CSRFToken}, "label": {"deploy script"}})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `value="deploy script"`) {
+		t.Errorf("failed mint response did not re-populate the typed label in the input's value attribute:\n%s", body)
+	}
+}
+
 // TestHandleAPIKeyRevoke_OwnershipEnforced: the webui revoke handler scopes
 // to the viewer's own user_id (design D9's correction from the feed
 // precedent, which has no such scope).

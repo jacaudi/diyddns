@@ -84,7 +84,7 @@ func adminMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context))
 	return adminMiddleware(a, deps.Log)
 }
 
-// adminReadMW is the middleware chain for an admin-role read: session +
+// adminReadMW is the middleware chain for an admin-role read: session-or-key +
 // admin. Shared by registerAdminOps and registerNotificationOps — both
 // defined this exact chain as a local closure before it was hoisted here
 // (the same "argument list repeated verbatim across register*Ops functions"
@@ -96,8 +96,8 @@ func adminReadMW(a huma.API, deps ServerDeps) huma.Middlewares {
 	}
 }
 
-// adminWriteMW is the middleware chain for an admin-role mutation: session +
-// admin + CSRF. See adminReadMW.
+// adminWriteMW is the middleware chain for an admin-role mutation:
+// session-or-key + admin + CSRF. See adminReadMW.
 func adminWriteMW(a huma.API, deps ServerDeps) huma.Middlewares {
 	return huma.Middlewares{
 		sessionOrKeyMW(a, deps),
@@ -220,12 +220,13 @@ func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName string,
 // which is what makes /auth/logout's exclusion (design D6) and this
 // function's own CSRF-skip flag both correct.
 func sessionOrAPIKeyMiddleware(api huma.API, keys *service.APIKeyService, sessions *auth.SessionManager, cookieName string, log *slog.Logger) func(huma.Context, func(huma.Context)) {
+	sessionFallback := sessionMiddleware(api, sessions, cookieName, log)
 	return func(ctx huma.Context, next func(huma.Context)) {
 		r, _ := humago.Unwrap(ctx)
 
 		header := ctx.Header("Authorization")
 		if header == "" {
-			sessionMiddleware(api, sessions, cookieName, log)(ctx, next)
+			sessionFallback(ctx, next)
 			return
 		}
 

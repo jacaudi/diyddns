@@ -234,6 +234,54 @@ func TestSessionOrAPIKey_ExclusiveCredential_MalformedBearerNeverFallsBack(t *te
 	}
 }
 
+// TestSessionOrAPIKey_ValidKeyWinsOverValidSessionCookie: design D5's
+// exclusive-credential rule proven with a VALID key alongside a VALID
+// session cookie for the SAME admin user, not just a malformed one (see
+// TestSessionOrAPIKey_ExclusiveCredential_MalformedBearerNeverFallsBack for
+// the malformed-bearer case). The admin's own key is capped (AdminScope=false,
+// as every #149 mint produces), so if the key's identity wins the response
+// reports role "user"; if the cookie's real session identity leaked through
+// instead, it would report "admin". This is a positive proof, not an
+// inference from the malformed-bearer test: a session lookup that ran only
+// AFTER a successful key auth (e.g. as an unintended merge/fallback) could
+// still pass every existing test while leaking the cookie's real role here.
+func TestSessionOrAPIKey_ValidKeyWinsOverValidSessionCookie(t *testing.T) {
+	srv, _, _, admin, adminKeyPlain, adminSess, _, _, _, _ := registerKeyOrSessionProbe(t)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/probe", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: testCookieName, Value: adminSess.ID}) // a VALID session cookie, real admin role
+	req.Header.Set("Authorization", "Bearer "+adminKeyPlain)               // AND a VALID capped key, same user
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", resp.StatusCode, body)
+	}
+	var got struct {
+		UserID string `json:"userId"`
+		Role   string `json:"role"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, body)
+	}
+	if got.UserID != admin.ID {
+		t.Errorf("UserID = %q, want %q", got.UserID, admin.ID)
+	}
+	if got.Role != "user" {
+		t.Errorf("Role = %q, want %q -- the key's capped identity must win over the cookie's real admin identity", got.Role, "user")
+	}
+}
+
 // TestSessionOrAPIKey_401BodyUniform: every rejection reason returns a
 // BYTE-IDENTICAL body that never names the reason (design D5's "one door,
 // one answer" rule) -- mirrors TestHMACMiddleware_401BodyIdenticalAcrossReasons's

@@ -22,8 +22,7 @@ type apiKeyRow struct {
 // unlike feed.go's admin-only /admin/feed page). Label/FieldErr carry a
 // failed mint form's re-render; NewLabel/Secret carry the once-only reveal.
 type apiKeysSectionData struct {
-	Keys  []apiKeyRow
-	Total int
+	Keys []apiKeyRow
 
 	Label    string
 	FieldErr string
@@ -47,7 +46,7 @@ func (h *handler) newAPIKeysSectionData(r *http.Request, userID string) (apiKeys
 			CreatedAbs: absTime(k.CreatedAt), LastUsedAbs: absTime(k.LastUsedAt),
 		})
 	}
-	return apiKeysSectionData{Keys: rows, Total: len(rows)}, nil
+	return apiKeysSectionData{Keys: rows}, nil
 }
 
 // handleAPIKeyMint mints a key and reveals it in this response -- never a
@@ -98,8 +97,8 @@ func (h *handler) handleAPIKeyMint(w http.ResponseWriter, r *http.Request, usr s
 	h.render(w, r, "account", refreshed)
 }
 
-// handleAPIKeyRevoke revokes a key owned by usr and re-renders the account
-// page. Ownership-as-404 (design D8/D9): RevokeKey itself enforces it, this
+// handleAPIKeyRevoke revokes a key owned by usr and redirects to /account.
+// Ownership-as-404 (design D8/D9): RevokeKey itself enforces it, this
 // handler just passes usr.ID through -- it never trusts the path id alone.
 func (h *handler) handleAPIKeyRevoke(w http.ResponseWriter, r *http.Request, usr store.User, _ store.Session) {
 	if err := h.deps.APIKeys.RevokeKey(r.Context(), usr.ID, r.PathValue("id")); err != nil {

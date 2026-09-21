@@ -76,7 +76,7 @@
 <div class="card">
   <div class="card-body">
     <h2>API Keys</h2>
-    <p class="muted">Bearer credentials for scripts and automation, scoped to your own account. Each key can do exactly what you can do here, minus registering a new passkey or changing your email — never more, and never anything admin-only unless a future admin-scoped key type is granted to you separately.</p>
+    <p class="muted">Bearer credentials for scripts and automation, scoped to your own account. Each key can do exactly what you can do here, minus registering a new passkey, changing your email, managing API keys (including itself), or logging out — never more, and never anything admin-only.</p>
     {{if .APIKeys.Secret}}
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
@@ -115,7 +115,7 @@
       <input type="hidden" name="csrf" value="{{.CSRFToken}}">
       <div class="field">
         <label for="new-key-label">Label</label>
-        <input class="input" id="new-key-label" name="label" type="text" autocomplete="off" placeholder="e.g. deploy script" required>
+        <input class="input" id="new-key-label" name="label" type="text" autocomplete="off" placeholder="e.g. deploy script" value="{{.APIKeys.Label}}" required>
       </div>
       {{template "errorBanner" .APIKeys.FieldErr}}
       <button class="btn primary" type="submit">Mint API key</button>

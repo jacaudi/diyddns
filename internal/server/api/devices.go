@@ -84,8 +84,8 @@ type getDeviceOutput struct {
 	Body deviceView
 }
 
-// registerDeviceOps registers the session-authenticated device management
-// operations onto apiAPI: POST /api/v1/devices mints an enrollment code
+// registerDeviceOps registers the session-or-key-authenticated device
+// management operations onto apiAPI: POST /api/v1/devices mints an enrollment code
 // (mutating, so it also requires CSRF); GET /api/v1/devices lists the
 // caller's own devices; GET /api/v1/devices/{id} returns one device.
 // Ownership scoping (a device belonging to another user is indistinguishable
@@ -204,7 +204,8 @@ type historyOutput struct {
 
 // registerDeviceMgmtOps registers the owner-scoped device management operations
 // onto apiAPI: PATCH (rename / enable-disable), DELETE, POST rotate-secret (all
-// mutating → session + CSRF), and GET history (session only). Ownership scoping
+// mutating → session-or-key + CSRF), and GET history (session-or-key only).
+// Ownership scoping
 // (foreign device → 404) is enforced by service.DeviceService.
 func registerDeviceMgmtOps(a huma.API, deps ServerDeps) {
 	session := func() huma.Middlewares {
