@@ -114,6 +114,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
 	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
 	feedSvc := service.NewFeedService(st, feed.New(), discardAgentAudit{})
+	apiKeySvc := service.NewAPIKeyService(st, discardAgentAudit{})
 	// EmailChangeService is unconditionally constructed in production
 	// (server.go), unlike Passkey/Grants/Notify's nil-tolerant gates — see
 	// registerAccountEmailOps's own doc comment (account.go). Every harness
@@ -141,6 +142,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Info:        version.Info{Version: "v1.2.3"},
 		HMACKey:     key,
 		Feed:        feedSvc,
+		APIKeys:     apiKeySvc,
 	}
 }
 

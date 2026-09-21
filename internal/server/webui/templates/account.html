@@ -73,6 +73,55 @@
     {{end}}
   </div>
 </div>
+<div class="card">
+  <div class="card-body">
+    <h2>API Keys</h2>
+    <p class="muted">Bearer credentials for scripts and automation, scoped to your own account. Each key can do exactly what you can do here, minus registering a new passkey, changing your email, managing API keys (including itself), or logging out — never more, and never anything admin-only.</p>
+    {{if .APIKeys.Secret}}
+    <div class="callout warn">
+      <strong>⚠ Shown once</strong>
+      This key is displayed a single time. Copy it now — it cannot be shown again, and losing it means minting a new one.
+    </div>
+    <div class="field">
+      <label>{{.APIKeys.NewLabel}}</label>
+      {{template "copyValue" .APIKeys.Secret}}
+    </div>
+    {{end}}
+    {{if .APIKeys.Keys}}
+    <div class="table-wrap">
+      <table class="grid-table responsive">
+        <thead><tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody>
+          {{range .APIKeys.Keys}}
+          <tr>
+            <td data-label="Label"><span class="primary-cell">{{.Label}}</span></td>
+            <td data-label="Created" class="muted nowrap">{{.CreatedAbs}}</td>
+            <td data-label="Last used" class="muted nowrap">{{template "textOrDash" .LastUsedAbs}}</td>
+            <td class="actions">
+              <form method="post" action="/account/keys/{{.ID}}/delete">
+                <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+                <button class="btn ghost" type="submit">Revoke</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="muted">No API keys yet.</p>
+    {{end}}
+    <form method="post" action="/account/keys">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        <label for="new-key-label">Label</label>
+        <input class="input" id="new-key-label" name="label" type="text" autocomplete="off" placeholder="e.g. deploy script" value="{{.APIKeys.Label}}" required>
+      </div>
+      {{template "errorBanner" .APIKeys.FieldErr}}
+      <button class="btn primary" type="submit">Mint API key</button>
+    </form>
+  </div>
+</div>
 <form id="logout-form" method="post" action="/api/v1/auth/logout">
   <input type="hidden" name="csrf" value="{{.CSRFToken}}">
   <button class="btn" type="submit">Sign out</button>

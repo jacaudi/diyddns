@@ -199,6 +199,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	authSvc := service.NewAuthService(sessions, audit)
 	notifySvc := service.NewNotificationService(st, key, allowedPrivateCIDRs, audit)
 	feedSvc := service.NewFeedService(st, hub, audit)
+	apiKeySvc := service.NewAPIKeyService(st, audit)
 
 	// notifyAPISvc is nil unless notifications.enabled, so api.Build's own
 	// nil-tolerant gate (#152, mirrors Passkey/Grants) keeps the REST
@@ -291,6 +292,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 
 		Feed:        feedSvc,
 		FeedEnabled: cfg.Feed.Enabled,
+		APIKeys:     apiKeySvc,
 	}
 	api.Build(mux, apiDeps)
 
@@ -314,6 +316,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		EmailChange: emailChangeSvc,
 		Notify:      notifySvc,
 		Feed:        feedSvc,
+		APIKeys:     apiKeySvc,
 		Info:        version.Current(),
 		StartedAt:   time.Now(),
 	}

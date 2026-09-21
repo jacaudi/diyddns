@@ -44,6 +44,7 @@ type Deps struct {
 	EmailChange *service.EmailChangeService
 	Notify      *service.NotificationService
 	Feed        *service.FeedService
+	APIKeys     *service.APIKeyService
 
 	Info      version.Info
 	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
@@ -86,6 +87,8 @@ func New(deps Deps) (http.Handler, []string) {
 		{"POST /account/email/cancel", h.requirePost(h.handleAccountEmailCancel)},
 		{"GET /account/email/confirm", h.requireSession(h.handleAccountEmailConfirmPage)},
 		{"POST /account/email/confirm", h.requirePost(h.handleAccountEmailConfirm)},
+		{"POST /account/keys", h.requirePost(h.handleAPIKeyMint)},
+		{"POST /account/keys/{id}/delete", h.requirePost(h.handleAPIKeyRevoke)},
 		{"GET /devices", h.requireSession(h.handleDevices)},
 		{"GET /devices/new", h.requireSession(h.handleDeviceNewForm)},
 		{"POST /devices/new", h.requirePost(h.handleDeviceNewCreate)},

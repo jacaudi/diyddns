@@ -84,8 +84,8 @@ type getDeviceOutput struct {
 	Body deviceView
 }
 
-// registerDeviceOps registers the session-authenticated device management
-// operations onto apiAPI: POST /api/v1/devices mints an enrollment code
+// registerDeviceOps registers the session-or-key-authenticated device
+// management operations onto apiAPI: POST /api/v1/devices mints an enrollment code
 // (mutating, so it also requires CSRF); GET /api/v1/devices lists the
 // caller's own devices; GET /api/v1/devices/{id} returns one device.
 // Ownership scoping (a device belonging to another user is indistinguishable
@@ -96,7 +96,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 		Path:          "/api/v1/devices",
 		DefaultStatus: http.StatusOK,
 		Middlewares: huma.Middlewares{
-			sessionMW(a, deps),
+			sessionOrKeyMW(a, deps),
 			csrfMW(a, deps),
 		},
 	}, func(ctx context.Context, in *mintCodeInput) (*mintCodeOutput, error) {
@@ -113,7 +113,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/devices",
-		Middlewares: huma.Middlewares{sessionMW(a, deps)},
+		Middlewares: huma.Middlewares{sessionOrKeyMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*listDevicesOutput, error) {
 		u := UserFrom(ctx)
 		devices, err := deps.Devices.List(ctx, u.ID)
@@ -132,7 +132,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/devices/{id}",
-		Middlewares: huma.Middlewares{sessionMW(a, deps)},
+		Middlewares: huma.Middlewares{sessionOrKeyMW(a, deps)},
 	}, func(ctx context.Context, in *getDeviceInput) (*getDeviceOutput, error) {
 		u := UserFrom(ctx)
 		dev, err := deps.Devices.Get(ctx, u.ID, in.ID)
@@ -204,15 +204,16 @@ type historyOutput struct {
 
 // registerDeviceMgmtOps registers the owner-scoped device management operations
 // onto apiAPI: PATCH (rename / enable-disable), DELETE, POST rotate-secret (all
-// mutating → session + CSRF), and GET history (session only). Ownership scoping
+// mutating → session-or-key + CSRF), and GET history (session-or-key only).
+// Ownership scoping
 // (foreign device → 404) is enforced by service.DeviceService.
 func registerDeviceMgmtOps(a huma.API, deps ServerDeps) {
 	session := func() huma.Middlewares {
-		return huma.Middlewares{sessionMW(a, deps)}
+		return huma.Middlewares{sessionOrKeyMW(a, deps)}
 	}
 	sessionCSRF := func() huma.Middlewares {
 		return huma.Middlewares{
-			sessionMW(a, deps),
+			sessionOrKeyMW(a, deps),
 			csrfMW(a, deps),
 		}
 	}

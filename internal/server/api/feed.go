@@ -75,18 +75,19 @@ type revokeFeedTokenOutput struct{}
 // /api/v1/admin/*. Build only calls this when deps.FeedEnabled is true.
 func registerFeedTokenOps(a huma.API, deps ServerDeps) {
 	// feedRead/feedWrite restate admin.go's registerAdminOps' adminRead()/
-	// adminWrite() closures verbatim (session+admin, and session+admin+CSRF).
+	// adminWrite() closures verbatim (session-or-key+admin, and
+	// session-or-key+admin+CSRF).
 	// Tolerated as a second copy per this codebase's Rule of Three convention
 	// (authmw.go's *MW helpers exist for exactly this reason) — but a THIRD
 	// copy anywhere should trigger hoisting adminRead(a, deps)/adminWrite(a,
 	// deps) into authmw.go next to the existing *MW helpers, rather than a
 	// fourth restatement.
 	feedRead := huma.Middlewares{
-		sessionMW(a, deps),
+		sessionOrKeyMW(a, deps),
 		adminMW(a, deps),
 	}
 	feedWrite := huma.Middlewares{
-		sessionMW(a, deps),
+		sessionOrKeyMW(a, deps),
 		adminMW(a, deps),
 		csrfMW(a, deps),
 	}
