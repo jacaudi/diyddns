@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.0.0](https://github.com/jacaudi/diyddns/compare/v0.6.0...v1.0.0) (2026-09-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** /api/openapi, /api/docs, /api/schemas (and the /agent equivalents) return 404. Every JSON response's $schema field and Link header also moved to the versioned path. Point any bookmarked docs page or external OpenAPI client generator at /api/v1/openapi instead.
+
+### Features
+
+* **admin:** deduplicated cross-device IP list via session-authed REST ([5a0c2f2](https://github.com/jacaudi/diyddns/commit/5a0c2f2c9cbf81b648f1da9eeb75eab3fd238295))
+* **admin:** deduplicated cross-device IP list via session-authed REST ([a185a76](https://github.com/jacaudi/diyddns/commit/a185a767652dcf073d65982bc7f00e698b337938)), closes [#150](https://github.com/jacaudi/diyddns/issues/150)
+* **admin:** open any device from the admin list, read-only, with disable and enable ([fd7787a](https://github.com/jacaudi/diyddns/commit/fd7787aeeead8a45ede8f025c02c0efb1ecd131c))
+* **admin:** open any device from the admin list, read-only, with disable and enable ([5cf3b5d](https://github.com/jacaudi/diyddns/commit/5cf3b5d0853f5a925461db1ba7f6ed4b5dd16b6c)), closes [#132](https://github.com/jacaudi/diyddns/issues/132)
+* **admin:** read any device with its owner, and disable or enable it as an admin ([fde36fa](https://github.com/jacaudi/diyddns/commit/fde36fa70b5cccbf9c8ba1d81b90b2260b0b2be4))
+* **api:** account-scoped API keys for programmatic /api/v1 access ([#169](https://github.com/jacaudi/diyddns/issues/169)) ([03cf1e2](https://github.com/jacaudi/diyddns/commit/03cf1e27fc5e65dcca8d3ebe98f43d4fc879d1c5))
+* **api:** expose email-change flow and admin user GET over REST ([#151](https://github.com/jacaudi/diyddns/issues/151)) ([82d526a](https://github.com/jacaudi/diyddns/commit/82d526affd8c4fdf7e422b7faa9941e6ecf2b761))
+* **api:** expose feed-token management over REST ([cca3fe6](https://github.com/jacaudi/diyddns/commit/cca3fe631fa1b36e01413a3353537ce119956d75))
+* **api:** expose feed-token management over REST ([ffdbd7b](https://github.com/jacaudi/diyddns/commit/ffdbd7b32b31a7db607e8d51fb7993cfdc8d2b33)), closes [#153](https://github.com/jacaudi/diyddns/issues/153)
+* **api:** expose outbound notification-endpoint management over REST ([146bafd](https://github.com/jacaudi/diyddns/commit/146bafd05b10478035879b21b34cd37d64816679))
+* **api:** expose outbound notification-endpoint management over REST ([4ba1eeb](https://github.com/jacaudi/diyddns/commit/4ba1eeb35edcd4500bb23ce4614de83206d4d834)), closes [#152](https://github.com/jacaudi/diyddns/issues/152)
+* **api:** expose the email-change flow (self-service + admin) over REST ([990d9b0](https://github.com/jacaudi/diyddns/commit/990d9b063824f9c4cb4930e019f52343035fad34))
+* **email:** owner notice for an admin device state change, with an ASCII fold for the label ([90bd092](https://github.com/jacaudi/diyddns/commit/90bd092efde746e261d8cccf705431e5301217b3))
+* **webui:** collapse admin nav into a dropdown and slim the user chip ([2004aa1](https://github.com/jacaudi/diyddns/commit/2004aa15c03f01689eb481b44f7c8c34630bfb72))
+* **webui:** collapse admin nav into a dropdown and slim the user chip ([78262f1](https://github.com/jacaudi/diyddns/commit/78262f101393b779c4035b1f0e94cc32d3504bf4)), closes [#145](https://github.com/jacaudi/diyddns/issues/145) [#146](https://github.com/jacaudi/diyddns/issues/146)
+
+
+### Bug Fixes
+
+* **account:** clear the leaked link, drop operator copy from the self-service reveal, and correct docs.md ([8e20977](https://github.com/jacaudi/diyddns/commit/8e209770e7c73fda8498d882937622962794c25a))
+* **account:** show the confirmation link on screen when no mailer is configured ([77f8895](https://github.com/jacaudi/diyddns/commit/77f8895a9b743ab489c24284ccbf9660f57e541a))
+* **account:** show the confirmation link on screen when no mailer is configured ([8c229fe](https://github.com/jacaudi/diyddns/commit/8c229fec1503b5fda50cb169d675c316a490f5bf)), closes [#144](https://github.com/jacaudi/diyddns/issues/144)
+* **admin:** lint, comment accuracy, and test coverage from the [#132](https://github.com/jacaudi/diyddns/issues/132) integration review ([ac8470b](https://github.com/jacaudi/diyddns/commit/ac8470bc997837fb8bf7e5c8bf6effd23da341ef))
+* **admin:** source device-IP list from ListFeed, not ListAll, for staleness parity with devices.json ([1333d5c](https://github.com/jacaudi/diyddns/commit/1333d5c585559ac40cebf496f59dd1585e03ebfd))
+* **api:** close [#151](https://github.com/jacaudi/diyddns/issues/151) review gaps in email-change mapper coverage and comments ([b07d3f9](https://github.com/jacaudi/diyddns/commit/b07d3f95c97caaabe929e185c7cb3a2cf628be63))
+* **api:** close [#152](https://github.com/jacaudi/diyddns/issues/152) review gaps in notification-endpoint REST ops ([d1db1ea](https://github.com/jacaudi/diyddns/commit/d1db1ea617cf0d21325131f2ff43942b5e6ffdd2))
+* **api:** review fixes for feed-token REST (label validation, auth coverage, wiring test) ([5255aa6](https://github.com/jacaudi/diyddns/commit/5255aa6b547dc8fe594a34aee1d1c5f39dafd680))
+* **api:** version the OpenAPI, docs, and schemas meta paths ([f459499](https://github.com/jacaudi/diyddns/commit/f459499dcfea862c49eebb23fa4760ffe5153e9c))
+* **api:** version the OpenAPI, docs, and schemas meta paths ([0c87418](https://github.com/jacaudi/diyddns/commit/0c87418313c1c699c5daec6cdfa2eb670d87f872)), closes [#148](https://github.com/jacaudi/diyddns/issues/148)
+* **webui:** handle long values, doc the inventory entry, and polish the code chip ([c8fe76e](https://github.com/jacaudi/diyddns/commit/c8fe76e0d599b1860742c321e7183627d0e5a691))
+* **webui:** highlight the Admin trigger on admin pages, fix mobile dropdown, review cleanup ([067a445](https://github.com/jacaudi/diyddns/commit/067a44595437597990f1538c969a78511eb1e2b4))
+* **webui:** let wide-table pages use available width instead of a flat 1080px cap ([a7a6cdf](https://github.com/jacaudi/diyddns/commit/a7a6cdfdd280a4b6759daa2d218b53d3161ae3fa))
+* **webui:** let wide-table pages use available width instead of a flat 1080px cap ([6bd42de](https://github.com/jacaudi/diyddns/commit/6bd42de24c1257d2ca063dbc42ea5e7889c941b0)), closes [#147](https://github.com/jacaudi/diyddns/issues/147)
+* **webui:** redirect unauthenticated 404s to /login instead of a raw 404 ([#170](https://github.com/jacaudi/diyddns/issues/170)) ([ac10a9b](https://github.com/jacaudi/diyddns/commit/ac10a9b3176f522adbd736878aa13a9076b36aaf)), closes [#168](https://github.com/jacaudi/diyddns/issues/168)
+* **webui:** size wide-table pages to their content, not a guessed 1600px ([3e61f08](https://github.com/jacaudi/diyddns/commit/3e61f08507178abfa4c2a2f0f5eb18a1dca39fcf))
+* **webui:** style bare &lt;code&gt; so confirm-dialog target names read as code ([487368c](https://github.com/jacaudi/diyddns/commit/487368cc5f6b5ace74d7f6932da139f71e04d19c))
+* **webui:** style bare &lt;code&gt; so confirm-dialog target names read as code ([880c07d](https://github.com/jacaudi/diyddns/commit/880c07d1910b2faeff7df8cb721f0d021bbe640c)), closes [#143](https://github.com/jacaudi/diyddns/issues/143)
+
 ## [0.6.0](https://github.com/jacaudi/diyddns/compare/v0.5.0...v0.6.0) (2026-09-19)
 
 
