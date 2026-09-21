@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "go",
-      "bump-minor-pre-major": true,
+      "bump-minor-pre-major": false,
       "initial-version": "0.1.0"
     }
   }
