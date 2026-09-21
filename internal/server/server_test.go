@@ -584,11 +584,16 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 		{"huma agent group", "POST", "/agent/v1/checkin", "POST /agent/v1/checkin", 401},
 		{"webui nested mux", "GET", "/devices/dev_01J8WABCDEF", "GET /devices/{id}", 303},
 		{"webui static prefix", "GET", "/static/app.css", "GET /static/", 200},
-		{"unmatched (404)", "GET", "/nope/not/a/route", "", 404},
+		// This row is anonymous (no cookie), and an unmatched WEBUI-space path
+		// now redirects an anonymous caller to /login instead of falling
+		// through to stdlib's bare 404 (#168) -- route stays "": the mux
+		// still resolved nothing, notFoundInterceptor only changes what gets
+		// written for that outcome, not r.Pattern itself.
+		{"unmatched, anonymous (303)", "GET", "/nope/not/a/route", "", 303},
 		// 405: the mux registers PATCH on this path, not GET. Design 11.4
 		// lists it, and only the real handler has a route table where a
 		// method mismatch is possible. wantStatus is what separates this row
-		// from the 404 row above; both log an empty route. (#151 added a GET
+		// from the row above; both log an empty route. (#151 added a GET
 		// on the bare .../users/{id} this row used to target, so this now
 		// targets .../users/{id}/email, whose only registered method is
 		// PATCH -- same reasoning, different path.)

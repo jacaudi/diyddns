@@ -442,10 +442,17 @@ func registerFeed(mux *http.ServeMux, cfg config.Server, st *store.Store, feedAu
 // NopInstruments{} is for tests and other callers that hold no
 // *telemetry.Providers at all.
 func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, *sweeper, error) {
-	mux, oidcMgr, _, _, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log)
+	mux, oidcMgr, _, webDeps, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
+	// A genuinely unmatched webui-space request must redirect to /login
+	// (unauthenticated) or the app's own 404 page (authenticated) instead of
+	// falling through to Go's stdlib default (#168). This wraps mux directly,
+	// as the innermost layer below, for the same r.Pattern-visibility reason
+	// the comment above return explains -- see withNotFoundRedirect's own
+	// doc comment for why a route-table catch-all was rejected instead.
+	wrapped := withNotFoundRedirect(mux, webui.NotFound(webDeps))
 	// This order is load-bearing, not stylistic. AccessLog reads r.Pattern
 	// AFTER next.ServeHTTP returns, and that works only because
 	// ServeMux.ServeHTTP sets Pattern on the very *http.Request the caller
@@ -468,7 +475,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 	// RequestID sits outside Trace too, and that ordering is unconstrained by
 	// the AccessLog hazard above: nothing in Trace reads the request id, and
 	// RequestID's own r.WithContext is already outside AccessLog either way.
-	return middleware.Chain(mux,
+	return middleware.Chain(wrapped,
 		middleware.RequestID(cfg.Observability.RequestIDHeader),
 		middleware.Trace(inst.Tracer(), inst.RequestDuration()),
 		middleware.AccessLog(log),

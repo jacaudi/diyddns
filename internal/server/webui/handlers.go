@@ -143,6 +143,34 @@ func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/devices", http.StatusSeeOther)
 }
 
+// handleNotFound serves a request that internal/server's not-found
+// interceptor has already determined matches no route anywhere in the
+// server — a typo'd URL, or a disabled feature's route group that was never
+// registered (design #106 §8.1/#65 §8.3). It is reached by that interceptor
+// reacting to the mux's own already-decided 404, not by pattern matching of
+// its own. An anonymous visitor is bounced to /login like every other
+// screen, matching requireSession's own behavior; a signed-in user genuinely
+// hit a nonexistent page and sees a real 404, not a login loop.
+func (h *handler) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	usr, _, err := authenticateBrowser(h.deps.Sessions, r, h.deps.Cfg.Auth.Session.CookieName)
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	h.renderError(w, r, usr, http.StatusNotFound, "That page doesn't exist.")
+}
+
+// NotFound builds a standalone handler for a request that matched no route
+// anywhere in the server. It can't be a webui route-table entry (see the
+// warnings at webui.go's route list and internal/server/notfound.go's doc
+// comment for why) — it's invoked by internal/server's not-found
+// interceptor, the only place that can tell a genuinely unmatched request
+// apart from a matched route's own semantic 404 (e.g. "device not found").
+func NotFound(deps Deps) http.HandlerFunc {
+	h := &handler{pages: parsePages(), deps: deps}
+	return h.handleNotFound
+}
+
 // loginData is login.html's template data.
 type loginData struct {
 	pageData
