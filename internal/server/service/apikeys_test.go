@@ -275,3 +275,34 @@ func TestAPIKeyService_RevokeKey_AuditsRevocation(t *testing.T) {
 // hashForTest re-derives the hash the way Authenticate does, so tests can
 // look a minted key up by hash without exporting HashToken's use here.
 func hashForTest(plaintext string) string { return auth.HashToken(plaintext) }
+
+func TestAPIKeyService_UserForKey_ResolvesOwner(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "userforkey@x", "user")
+	svc := NewAPIKeyService(st, discardAudit{})
+	ctx := t.Context()
+
+	key, _, err := svc.MintKey(ctx, usr.ID, "k")
+	if err != nil {
+		t.Fatalf("MintKey: %v", err)
+	}
+
+	got, err := svc.UserForKey(ctx, key)
+	if err != nil {
+		t.Fatalf("UserForKey: %v", err)
+	}
+	if got.ID != usr.ID || got.Email != usr.Email {
+		t.Errorf("UserForKey = %+v, want ID %s, Email %s", got, usr.ID, usr.Email)
+	}
+}
+
+func TestAPIKeyService_UserForKey_UnknownUserIsNotFound(t *testing.T) {
+	st := openTestStore(t)
+	svc := NewAPIKeyService(st, discardAudit{})
+	ctx := t.Context()
+
+	key := store.APIKey{ID: store.NewID(), UserID: store.NewID()}
+	if _, err := svc.UserForKey(ctx, key); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("UserForKey(unknown user) err = %v, want store.ErrNotFound", err)
+	}
+}
