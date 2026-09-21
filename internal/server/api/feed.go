@@ -82,11 +82,11 @@ func registerFeedTokenOps(a huma.API, deps ServerDeps) {
 	// deps) into authmw.go next to the existing *MW helpers, rather than a
 	// fourth restatement.
 	feedRead := huma.Middlewares{
-		sessionMW(a, deps),
+		sessionOrKeyMW(a, deps),
 		adminMW(a, deps),
 	}
 	feedWrite := huma.Middlewares{
-		sessionMW(a, deps),
+		sessionOrKeyMW(a, deps),
 		adminMW(a, deps),
 		csrfMW(a, deps),
 	}

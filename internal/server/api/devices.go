@@ -96,7 +96,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 		Path:          "/api/v1/devices",
 		DefaultStatus: http.StatusOK,
 		Middlewares: huma.Middlewares{
-			sessionMW(a, deps),
+			sessionOrKeyMW(a, deps),
 			csrfMW(a, deps),
 		},
 	}, func(ctx context.Context, in *mintCodeInput) (*mintCodeOutput, error) {
@@ -113,7 +113,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/devices",
-		Middlewares: huma.Middlewares{sessionMW(a, deps)},
+		Middlewares: huma.Middlewares{sessionOrKeyMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*listDevicesOutput, error) {
 		u := UserFrom(ctx)
 		devices, err := deps.Devices.List(ctx, u.ID)
@@ -132,7 +132,7 @@ func registerDeviceOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/devices/{id}",
-		Middlewares: huma.Middlewares{sessionMW(a, deps)},
+		Middlewares: huma.Middlewares{sessionOrKeyMW(a, deps)},
 	}, func(ctx context.Context, in *getDeviceInput) (*getDeviceOutput, error) {
 		u := UserFrom(ctx)
 		dev, err := deps.Devices.Get(ctx, u.ID, in.ID)
@@ -208,11 +208,11 @@ type historyOutput struct {
 // (foreign device → 404) is enforced by service.DeviceService.
 func registerDeviceMgmtOps(a huma.API, deps ServerDeps) {
 	session := func() huma.Middlewares {
-		return huma.Middlewares{sessionMW(a, deps)}
+		return huma.Middlewares{sessionOrKeyMW(a, deps)}
 	}
 	sessionCSRF := func() huma.Middlewares {
 		return huma.Middlewares{
-			sessionMW(a, deps),
+			sessionOrKeyMW(a, deps),
 			csrfMW(a, deps),
 		}
 	}

@@ -120,7 +120,7 @@ func registerAuthOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/api/v1/auth/me",
-		Middlewares: huma.Middlewares{sessionMW(a, deps)},
+		Middlewares: huma.Middlewares{sessionOrKeyMW(a, deps)},
 	}, func(ctx context.Context, _ *struct{}) (*meOutput, error) {
 		u := UserFrom(ctx)
 		sess := SessionFrom(ctx)

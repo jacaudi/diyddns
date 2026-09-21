@@ -91,7 +91,7 @@ func adminMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context))
 // hmacMW/sessionMW/csrfMW/adminMW above already exist to avoid).
 func adminReadMW(a huma.API, deps ServerDeps) huma.Middlewares {
 	return huma.Middlewares{
-		sessionMW(a, deps),
+		sessionOrKeyMW(a, deps),
 		adminMW(a, deps),
 	}
 }
@@ -100,7 +100,7 @@ func adminReadMW(a huma.API, deps ServerDeps) huma.Middlewares {
 // admin + CSRF. See adminReadMW.
 func adminWriteMW(a huma.API, deps ServerDeps) huma.Middlewares {
 	return huma.Middlewares{
-		sessionMW(a, deps),
+		sessionOrKeyMW(a, deps),
 		adminMW(a, deps),
 		csrfMW(a, deps),
 	}
@@ -109,12 +109,6 @@ func adminWriteMW(a huma.API, deps ServerDeps) huma.Middlewares {
 // sessionOrKeyMW is the middleware chain for a route that accepts EITHER a
 // session cookie OR a capped-scope API key (design D5/D7): every
 // consumption route this design names, except the exclusions in D4/D6/D7.
-// Deliberately uncalled by this task (#149 plan T4): T5 swaps sessionMW for
-// this inside adminReadMW/adminWriteMW in this same file (see the plan's
-// pre-flight T4xT5 conflict-scan entry) -- registerAPIKeyOps itself never
-// wires it, by design (see that function's own doc comment).
-//
-//nolint:unused // deliberate T4->T5 sequencing, see doc comment above
 func sessionOrKeyMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) {
 	return sessionOrAPIKeyMiddleware(a, deps.APIKeys, deps.Sessions, deps.Cfg.Session.CookieName, deps.Log)
 }
