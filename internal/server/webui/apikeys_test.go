@@ -14,10 +14,13 @@ func TestAccountPage_ShowsOwnAPIKeysOnly(t *testing.T) {
 	deps, st := testDeps(t)
 	h, _ := New(deps)
 	alice := seedUser(t, st, "webui-alice@example.com", "user")
-	seedUser(t, st, "webui-bob@example.com", "user")
+	bob := seedUser(t, st, "webui-bob@example.com", "user")
 
 	if _, _, err := deps.APIKeys.MintKey(t.Context(), alice.ID, "alice-webui-key"); err != nil {
-		t.Fatalf("mint: %v", err)
+		t.Fatalf("mint alice's key: %v", err)
+	}
+	if _, _, err := deps.APIKeys.MintKey(t.Context(), bob.ID, "bob-webui-key"); err != nil {
+		t.Fatalf("mint bob's key: %v", err)
 	}
 
 	cookie := signIn(t, deps, alice)
@@ -25,8 +28,12 @@ func TestAccountPage_ShowsOwnAPIKeysOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "alice-webui-key") {
-		t.Errorf("account page did not render alice's key label:\n%s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "alice-webui-key") {
+		t.Errorf("account page did not render alice's key label:\n%s", body)
+	}
+	if strings.Contains(body, "bob-webui-key") {
+		t.Errorf("account page rendered bob's key label on alice's page:\n%s", body)
 	}
 }
 
@@ -43,9 +50,37 @@ func TestHandleAPIKeyMint_RevealsSecretOnce(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "dak_") {
-		t.Errorf("mint response page did not render the once-only secret:\n%s", rec.Body.String())
+	mintBody := rec.Body.String()
+	if !strings.Contains(mintBody, "dak_") {
+		t.Errorf("mint response page did not render the once-only secret:\n%s", mintBody)
 	}
+
+	secret := extractSecret(t, mintBody)
+	followUp := getPage(t, h, cookie, "/account")
+	if followUp.Code != http.StatusOK {
+		t.Fatalf("follow-up GET /account: status = %d, want 200, body=%s", followUp.Code, followUp.Body.String())
+	}
+	if strings.Contains(followUp.Body.String(), secret) {
+		t.Errorf("the minted secret is still present on a subsequent /account render, want shown once only:\n%s", followUp.Body.String())
+	}
+}
+
+// extractSecret pulls the dak_... plaintext out of a mint response body, so
+// the once-only follow-up assertion checks for the actual minted value
+// rather than the bare "dak_" prefix (which would also match copy naming a
+// key type in surrounding prose).
+func extractSecret(t *testing.T, body string) string {
+	t.Helper()
+	i := strings.Index(body, "dak_")
+	if i == -1 {
+		t.Fatalf("no dak_ secret found in mint response body:\n%s", body)
+	}
+	rest := body[i:]
+	end := strings.IndexAny(rest, "<& \t\n")
+	if end == -1 {
+		t.Fatalf("could not isolate secret token in mint response body:\n%s", body)
+	}
+	return rest[:end]
 }
 
 // TestHandleAPIKeyRevoke_OwnershipEnforced: the webui revoke handler scopes
