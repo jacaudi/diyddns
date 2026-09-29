@@ -281,7 +281,7 @@ func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.
 		ActorUserID: actorID, EventType: "passkey.invite_issued",
 		TargetType: "user", TargetID: u.ID,
 	})
-	subject, body := email.InviteLinkBody(link)
+	subject, body := email.InviteLinkBody(link, email.FormatDuration(grantTTL))
 	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
@@ -359,7 +359,7 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	// AdminRecoveryLinkBody, not RecoveryLinkBody: the self-service body says the
 	// link "was requested" and can be "safely ignored", and both are false here —
 	// DeleteAllByUser above has already locked the user out.
-	subject, body := email.AdminRecoveryLinkBody(link)
+	subject, body := email.AdminRecoveryLinkBody(link, email.FormatDuration(grantTTL))
 	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
@@ -434,7 +434,7 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 		return
 	}
 
-	subj, body := email.RecoveryLinkBody(link)
+	subj, body := email.RecoveryLinkBody(link, email.FormatDuration(grantTTL))
 	if err := s.mailer.Send(ctx, u.Email, subj, body); err != nil {
 		s.auditSendFailure(ctx, store.AuditEntry{
 			EventType: EventEmailSendFailed, TargetType: "user", TargetID: u.ID, IP: ip,
