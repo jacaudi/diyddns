@@ -25,8 +25,8 @@ import (
 const emailChangeTokenBytes = 32
 
 // emailChangeTTL is how long a staged email change stays confirmable. Not
-// grantTTL: a registration grant and a confirmation link are different
-// things whose windows may diverge.
+// auth.registration_link_ttl: a registration grant and a confirmation link
+// are different things whose windows may diverge.
 const emailChangeTTL = time.Hour
 
 // Guard sentinels for an email change -- mapped to HTTP 422/503 by the web UI
@@ -268,7 +268,7 @@ func changedRow(u store.User, newEmail string, now int64) store.User {
 // differ in body and in whether the send may sit on the request path.
 func (s *EmailChangeService) applyChanged(ctx context.Context, actorID string, u store.User, oldEmail, event string) {
 	if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
-		s.mail.log.ErrorContext(ctx, "email change: deleting outstanding registration grants failed; they expire within the hour",
+		s.mail.log.ErrorContext(ctx, "email change: deleting outstanding registration grants failed; they expire when their link TTL elapses",
 			"error", err, "user_id", u.ID)
 	}
 	s.mail.audit.Log(ctx, store.AuditEntry{

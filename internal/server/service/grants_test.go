@@ -157,12 +157,16 @@ const selfServiceRecoveryWaitTimeout = 5 * time.Second
 // the "no send" tests fast.
 const selfServiceRecoveryNoSendWindow = 300 * time.Millisecond
 
+// testLinkTTL is the registration-link lifetime every service test uses unless
+// it is testing the lifetime itself: the production default.
+const testLinkTTL = 15 * time.Minute
+
 // newTestGrantService builds a GrantService bound to st, using the fixed
 // base URL "https://ddns.example.com" so extractToken can round-trip a
 // minted link back to its raw token.
 func newTestGrantService(t *testing.T, st *store.Store, passkeys *PasskeyService, mailer email.Mailer, audit AuditSink) *GrantService {
 	t.Helper()
-	return NewGrantService(st, passkeys, mailer, "https://ddns.example.com", audit, discardLogger())
+	return NewGrantService(st, passkeys, mailer, "https://ddns.example.com", audit, discardLogger(), testLinkTTL)
 }
 
 // extractToken parses the raw token out of a grant link's "token" query
@@ -568,7 +572,7 @@ func TestGrantService_RequestSelfServiceRecovery_NilMailer_NoPanicNilError(t *te
 	st := openTestStore(t)
 	// A nil email.Mailer must be treated as "not configured" — same uniform
 	// no-op outcome as a disabled mailer, never a panic on s.mailer.Enabled().
-	grants := NewGrantService(st, nil, nil, "https://ddns.example.com", discardAudit{}, discardLogger())
+	grants := NewGrantService(st, nil, nil, "https://ddns.example.com", discardAudit{}, discardLogger(), testLinkTTL)
 
 	if err := grants.RequestSelfServiceRecovery(t.Context(), "anyone@example.com", "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery with nil mailer: %v, want nil", err)
@@ -1188,7 +1192,7 @@ func TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase(t *testin
 		sendDelay: selfServiceTestStall,
 		sendCh:    make(chan sentEmail, 4),
 	}
-	grants := NewGrantService(st, passkeys, mailer, "https://ddns.example.com", NewAuditWriter(st), log)
+	grants := NewGrantService(st, passkeys, mailer, "https://ddns.example.com", NewAuditWriter(st), log, testLinkTTL)
 	grants.selfServiceTimeout = selfServiceTestTimeout
 
 	u := seedUser(t, st, "alice@example.test", "user")
@@ -1222,7 +1226,7 @@ func TestIssueInvite_NonASCIIBaseURLFailsTheSendLoudly(t *testing.T) {
 	mailer := email.New(config.EmailSection{
 		Enabled: true, Host: "127.0.0.1", Port: 1, From: "noreply@example.test", TLS: "none",
 	}, discardLogger())
-	grants := NewGrantService(st, passkeys, mailer, "https://exämple.test", NewAuditWriter(st), discardLogger())
+	grants := NewGrantService(st, passkeys, mailer, "https://exämple.test", NewAuditWriter(st), discardLogger(), testLinkTTL)
 	u := seedUser(t, st, "invitee@example.test", "user")
 
 	link, delivery, err := grants.IssueInvite(t.Context(), "admin-id", u)

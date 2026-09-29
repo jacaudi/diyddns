@@ -17,10 +17,6 @@ import (
 // base64 encoding), matching the bootstrap and enrollment-code tokens.
 const grantTokenBytes = 32
 
-// grantTTL is how long a freshly-minted registration grant (invite or
-// recovery) stays redeemable.
-const grantTTL = time.Hour
-
 // ErrGrantInvalid is the single uniform error for every registration-grant
 // redeem failure — unknown, expired, or already-consumed token — so callers
 // cannot distinguish which. Maps to HTTP 401.
@@ -227,19 +223,35 @@ type GrantService struct {
 	// construction path in the tree and always sets it; never build a
 	// GrantService with a bare struct literal.
 	selfServiceTimeout time.Duration
+	// linkTTL is how long a freshly-minted registration grant (invite or
+	// recovery) stays redeemable: auth.registration_link_ttl (#179).
+	//
+	// It must always be set. A zero value mints grants that are already
+	// expired, so every invite and recovery link would be dead on arrival.
+	// config.Load rejects anything under a minute, and NewGrantService is the
+	// only construction path in the tree; never build a GrantService with a
+	// bare struct literal.
+	linkTTL time.Duration
 }
 
 // NewGrantService constructs a GrantService. passkeys may be nil if WebAuthn
 // is not configured (see ErrWebAuthnUnavailable) — IssueInvite/IssueRecovery
 // never need it (they only mint a token), but RedeemBegin/RedeemFinish do.
 // baseURL is prefixed to every minted link ("<baseURL>/register?token=...").
-func NewGrantService(st *store.Store, passkeys *PasskeyService, mailer email.Mailer, baseURL string, audit AuditSink, log *slog.Logger) *GrantService {
+// linkTTL is how long every minted grant stays redeemable
+// (auth.registration_link_ttl).
+func NewGrantService(st *store.Store, passkeys *PasskeyService, mailer email.Mailer, baseURL string, audit AuditSink, log *slog.Logger, linkTTL time.Duration) *GrantService {
 	return &GrantService{
 		st: st, passkeys: passkeys, mailer: mailer, baseURL: baseURL, audit: audit, log: log,
 		deliveryTimeout:    adminDeliveryTimeout,
 		selfServiceTimeout: selfServiceRecoveryTimeout,
+		linkTTL:            linkTTL,
 	}
 }
+
+// LinkTTL reports how long a freshly-minted grant stays redeemable, so the web
+// UI can state the same window the emails do (#179).
+func (s *GrantService) LinkTTL() time.Duration { return s.linkTTL }
 
 // issue mints a fresh single-use grant for userID with the given reason
 // ("invite" | "recovery") and returns its one-time redeem link. It never
@@ -255,7 +267,7 @@ func (s *GrantService) issue(ctx context.Context, userID, reason string) (string
 		TokenHash: auth.HashToken(token),
 		UserID:    userID,
 		Reason:    reason,
-		ExpiresAt: now + int64(grantTTL.Seconds()),
+		ExpiresAt: now + int64(s.linkTTL.Seconds()),
 	}
 	if err := s.st.AccountRecovery().Create(ctx, t); err != nil {
 		return "", fmt.Errorf("service.issue: %w", err)
@@ -281,7 +293,7 @@ func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.
 		ActorUserID: actorID, EventType: "passkey.invite_issued",
 		TargetType: "user", TargetID: u.ID,
 	})
-	subject, body := email.InviteLinkBody(link, email.FormatDuration(grantTTL))
+	subject, body := email.InviteLinkBody(link, email.FormatDuration(s.linkTTL))
 	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
@@ -359,7 +371,7 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	// AdminRecoveryLinkBody, not RecoveryLinkBody: the self-service body says the
 	// link "was requested" and can be "safely ignored", and both are false here —
 	// DeleteAllByUser above has already locked the user out.
-	subject, body := email.AdminRecoveryLinkBody(link, email.FormatDuration(grantTTL))
+	subject, body := email.AdminRecoveryLinkBody(link, email.FormatDuration(s.linkTTL))
 	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
@@ -434,7 +446,7 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 		return
 	}
 
-	subj, body := email.RecoveryLinkBody(link, email.FormatDuration(grantTTL))
+	subj, body := email.RecoveryLinkBody(link, email.FormatDuration(s.linkTTL))
 	if err := s.mailer.Send(ctx, u.Email, subj, body); err != nil {
 		s.auditSendFailure(ctx, store.AuditEntry{
 			EventType: EventEmailSendFailed, TargetType: "user", TargetID: u.ID, IP: ip,

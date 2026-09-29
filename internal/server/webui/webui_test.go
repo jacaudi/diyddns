@@ -67,7 +67,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log)
+	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log, 15*time.Minute)
 	apiKeys := service.NewAPIKeyService(st, audit)
 
 	// allowed (nil = no private destinations, the same "empty allow-list"
@@ -2910,7 +2910,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log)
+	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log, 15*time.Minute)
 	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
@@ -3558,7 +3558,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log)
+	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log, 15*time.Minute)
 	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
@@ -3642,7 +3642,7 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log)
+	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log, 15*time.Minute)
 	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
