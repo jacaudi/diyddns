@@ -233,6 +233,8 @@ func adminGuardMessage(err error) (msg string, status int, ok bool) {
 	case errors.Is(err, service.ErrConfirmationNotSent):
 		// The last sentence describes the state AFTER a retry (design §7.3).
 		return "The confirmation email could not be sent. Try again in a moment. If the account page then shows the change as already pending, cancel it and request it again.", http.StatusServiceUnavailable, true
+	case errors.Is(err, service.ErrAlreadyRegistered):
+		return "This account has already registered. Use the recovery link in the Danger zone instead.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, store.ErrConflict):
 		return "A user with that email address already exists.", http.StatusUnprocessableEntity, true
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
@@ -281,6 +283,12 @@ type adminUserData struct {
 	// zone's recovery item.
 	Registered       bool
 	RegistrationText string
+	// LinkKind selects the reveal card's copy: "recovery" (passkeys were
+	// revoked) or "invite" (a new registration link, nothing revoked; #75).
+	LinkKind string
+	// HideActions suppresses the Registration card on an error page for a
+	// target that no longer exists (renderAdminUserError's 404).
+	HideActions bool
 }
 
 // adminUserPage builds admin-user.html's data for target. Every render of
@@ -392,11 +400,11 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 		// CreateUserInvite creates the user and THEN issues the invite, with no
 		// compensating delete: a failure here can leave a credential-less user
 		// in the list. Say so rather than offering "try again", which would hit
-		// a duplicate-email conflict and never explain why; the admin can issue
-		// a recovery link to the orphan from its edit page.
+		// a duplicate-email conflict and never explain why; the admin can send
+		// the orphan a new registration link from its edit page.
 		h.logAndFailMessage(w, r, usr, "create user invite", err,
 			"No invite link could be issued. The account may already have been created — "+
-				"check the users list, and issue a recovery link from it rather than inviting again.")
+				"check the users list, and send a new registration link from the user's page rather than inviting again.")
 		return
 	}
 
@@ -430,6 +438,7 @@ func (h *handler) renderAdminUserError(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	data.Error = msg
+	data.HideActions = status == http.StatusNotFound
 	h.renderStatus(w, r, status, "admin-user", data)
 }
 
@@ -528,6 +537,42 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 		return
 	}
 	data.Link, data.LinkWarning = h.grantLink(r, link)
+	data.LinkKind = "recovery"
+	data.DeliveryNote = deliveryNote(delivery)
+	h.render(w, r, "admin-user", data)
+}
+
+// handleAdminUserReinvite sends an account that cannot sign in yet a new
+// registration link (#75), revealed in this response. It is non-destructive,
+// so there is no typed confirmation: nothing is revoked, and the grant's
+// reason is "invite", which never revokes at redeem. Every earlier unused
+// link for the account stops working (design D6), so a refresh or double
+// submit cancels the link just shown; the reveal copy says so.
+func (h *handler) handleAdminUserReinvite(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	target, ok := h.adminUser(w, r, usr)
+	if !ok {
+		return
+	}
+	link, _, delivery, err := h.deps.Grants.ReissueInvite(r.Context(), usr.ID, target)
+	if err != nil {
+		if msg, status, ok := adminGuardMessage(err); ok {
+			h.renderAdminUserError(w, r, usr, sess, target, status, msg)
+			return
+		}
+		// ReissueInvite deletes earlier links BEFORE minting, so a failure here
+		// can leave the account with no working link at all.
+		h.logAndFailMessage(w, r, usr, "reissue invite", err,
+			"No registration link could be issued. Earlier links for this account may already "+
+				"have stopped working — send another from the user's page.")
+		return
+	}
+	data, err := h.adminUserPage(r, usr, sess, target)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load registration status", err)
+		return
+	}
+	data.Link, data.LinkWarning = h.grantLink(r, link)
+	data.LinkKind = "invite"
 	data.DeliveryNote = deliveryNote(delivery)
 	h.render(w, r, "admin-user", data)
 }
@@ -913,6 +958,6 @@ func (h *handler) handleAdminUserEmail(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	data.Notice = noticeNote(delivery) +
-		" If this account has not registered a passkey yet, issue a recovery link below so the user can set one up at the new address."
+		" If this account has not registered a passkey yet, send it a new registration link from the Registration card below."
 	h.render(w, r, "admin-user", data)
 }

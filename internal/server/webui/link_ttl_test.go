@@ -64,4 +64,19 @@ func TestAdminPages_StateTheConfiguredLinkTTL(t *testing.T) {
 		t.Fatalf("invite status = %d; body=%s", rec.Code, rec.Body.String())
 	}
 	check("invite reveal", rec.Body.String())
+
+	// #75's two surfaces (Task 11): the Registration card and the re-invite
+	// reveal state the configured window too.
+	pending := seedUser(t, st, "pending@example.com", "user")
+	card := getPage(t, h, cookie, "/admin/users/"+pending.ID)
+	if card.Code != http.StatusOK {
+		t.Fatalf("pending user page status = %d", card.Code)
+	}
+	check("registration card", card.Body.String())
+
+	rec = postForm(t, h, cookie, "/admin/users/"+pending.ID+"/invite", url.Values{"csrf": {sess.CSRFToken}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-invite status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	check("re-invite reveal", rec.Body.String())
 }

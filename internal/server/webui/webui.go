@@ -107,6 +107,7 @@ func New(deps Deps) (http.Handler, []string) {
 		{"POST /admin/users/{id}/email", h.requirePostAdmin(h.handleAdminUserEmail)},
 		{"POST /admin/users/{id}/delete", h.requirePostAdmin(h.handleAdminUserDelete)},
 		{"POST /admin/users/{id}/recovery", h.requirePostAdmin(h.handleAdminUserRecovery)},
+		{"POST /admin/users/{id}/invite", h.requirePostAdmin(h.handleAdminUserReinvite)},
 		{"GET /admin/devices", h.requireAdmin(h.handleAdminDevices)},
 		{"GET /admin/devices/{id}", h.requireAdmin(h.handleAdminDeviceDetail)},
 		{"GET /admin/devices/{id}/history", h.requireAdmin(h.handleAdminDeviceHistory)},

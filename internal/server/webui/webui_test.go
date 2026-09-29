@@ -2209,7 +2209,7 @@ func TestAdminUserInvite_FailureSaysTheAccountMayExist(t *testing.T) {
 	if strings.Contains(body, "Please try again.") {
 		t.Error("the invite failure page says \"try again\" — a retry hits a duplicate-email conflict")
 	}
-	for _, want := range []string{"may already have been created", "recovery link"} {
+	for _, want := range []string{"may already have been created", "new registration link"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("invite failure page missing %q:\n%s", want, body)
 		}

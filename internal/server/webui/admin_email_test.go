@@ -26,7 +26,7 @@ func TestAdminUserEmail_SetsImmediatelyAndShowsNotice(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (rendered in-response so the notice can show); body=%s", rec.Code, body)
 	}
-	if !strings.Contains(body, "Address changed. The previous address was notified.") || !strings.Contains(body, "issue a recovery link below") {
+	if !strings.Contains(body, "Address changed. The previous address was notified.") || !strings.Contains(body, "send it a new registration link from the Registration card below") {
 		t.Errorf("notice missing or wrong:\n%s", body)
 	}
 	if !strings.Contains(body, "<h1>new@example.com</h1>") {
