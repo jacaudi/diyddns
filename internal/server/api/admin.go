@@ -175,6 +175,25 @@ type issueRecoveryResponse struct {
 }
 type issueRecoveryOutput struct{ Body issueRecoveryResponse }
 
+// reissueInviteInput carries the {id} path parameter of POST
+// /api/v1/admin/users/{id}/invite.
+type reissueInviteInput struct {
+	ID string `path:"id"`
+}
+
+// reissueInviteResponse is a fresh registration link for an account that
+// cannot sign in yet (#75). It is its own type, not issueRecoveryResponse, for
+// the reason that type gives: the payloads differ (this one carries the link's
+// expiry and the account's post-mint registration status) and are free to
+// diverge.
+type reissueInviteResponse struct {
+	Link      string        `json:"link"`
+	ExpiresAt int64         `json:"expires_at"`
+	Delivery  deliveryView  `json:"delivery"`
+	User      adminUserView `json:"user"`
+}
+type reissueInviteOutput struct{ Body reissueInviteResponse }
+
 // ---- admin devices DTO (adds user_id to the non-secret device view) ----
 
 // adminDeviceView embeds the owner-scoped deviceView and adds user_id — the
@@ -314,6 +333,10 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			Link: link, Delivery: newDeliveryView(delivery),
 		}}, nil
 	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/invite", DefaultStatus: http.StatusOK, Middlewares: adminWriteMW(a, deps),
+	}, adminReissueInviteHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodGet, Path: "/api/v1/admin/devices", Middlewares: adminReadMW(a, deps),
@@ -457,6 +480,31 @@ func adminUpdateUserHandler(deps ServerDeps) func(context.Context, *updateUserIn
 	}
 }
 
+// adminReissueInviteHandler builds the handler for POST
+// /api/v1/admin/users/{id}/invite (#75): a fresh registration link for an
+// account that cannot sign in yet. Every earlier unused link for the account
+// stops working, so a client retry cancels the link the first call returned.
+func adminReissueInviteHandler(deps ServerDeps) func(context.Context, *reissueInviteInput) (*reissueInviteOutput, error) {
+	return func(ctx context.Context, in *reissueInviteInput) (*reissueInviteOutput, error) {
+		actor := UserFrom(ctx)
+		target, err := deps.Store.Users().GetByID(ctx, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "reissue invite", err)
+		}
+		link, expiresAt, delivery, err := deps.Grants.ReissueInvite(ctx, actor.ID, target)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "reissue invite", err)
+		}
+		view, err := adminUserViewFor(ctx, deps, target)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "reissue invite", err)
+		}
+		return &reissueInviteOutput{Body: reissueInviteResponse{
+			Link: link, ExpiresAt: expiresAt, Delivery: newDeliveryView(delivery), User: view,
+		}}, nil
+	}
+}
+
 // adminSetUserEmailHandler builds the handler for PATCH
 // /api/v1/admin/users/{id}/email. Extracted to a named function -- unlike
 // this file's other ops, which inline their handler directly in the
@@ -509,6 +557,8 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 		return huma.Error422UnprocessableEntity("That is already the account's email address.")
 	case errors.Is(err, service.ErrEmailManagedByOIDC):
 		return huma.Error422UnprocessableEntity("This account's email address is managed by its identity provider.")
+	case errors.Is(err, service.ErrAlreadyRegistered):
+		return huma.Error422UnprocessableEntity("account has already registered; use /recovery")
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
 		return huma.Error503ServiceUnavailable("passkey authentication is not configured")
 	default:

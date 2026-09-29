@@ -58,3 +58,19 @@ func TestAdminErr_MapsErrEmailManagedByOIDC(t *testing.T) {
 		t.Errorf("message = %q, want the exact adminGuardMessage wording", se.Error())
 	}
 }
+
+// TestAdminErr_MapsErrAlreadyRegistered proves the #75 guard reaches API
+// clients as 422, not the default branch's 500.
+func TestAdminErr_MapsErrAlreadyRegistered(t *testing.T) {
+	deps := ServerDeps{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	err := adminErr(t.Context(), deps, "reissue invite", service.ErrAlreadyRegistered)
+
+	se, ok := errors.AsType[huma.StatusError](err)
+	if !ok {
+		t.Fatalf("adminErr returned %v (%T), want a huma.StatusError", err, err)
+	}
+	if se.GetStatus() != 422 {
+		t.Errorf("status = %d, want 422", se.GetStatus())
+	}
+}
