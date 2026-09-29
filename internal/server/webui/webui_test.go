@@ -2876,7 +2876,7 @@ func TestAdminUserInvite_RevealsLinkOnce(t *testing.T) {
 			rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"/register?token=", "Shown once", "one hour"} {
+	for _, want := range []string{"/register?token=", "Shown once", "15 minutes"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("invite reveal missing %q", want)
 		}
@@ -3210,7 +3210,7 @@ func TestAdminUserRecovery_RevokesPasskeysAndRevealsLink(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"https://ddns.test/register?token=", "revoked", "one hour"} {
+	for _, want := range []string{"https://ddns.test/register?token=", "revoked", "15 minutes"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("recovery reveal missing %q", want)
 		}

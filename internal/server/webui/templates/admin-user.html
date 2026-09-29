@@ -7,7 +7,7 @@
   <div class="card-body">
     <div class="callout warn">
       <strong>⚠ Every passkey on this account has been revoked</strong>
-      This link is the only way back in. It is displayed a single time and expires in one hour.
+      This link is the only way back in. It is displayed a single time and expires in {{.LinkTTL}}.
       Send it to the user out of band now.
     </div>
     {{template "errorBanner" .LinkWarning}}
@@ -80,7 +80,7 @@
     <div class="meta">
       <strong>Issue a passkey recovery link</strong>
       <span><strong>This revokes every passkey on the account immediately</strong>, then issues a
-        one-time registration link that expires in one hour. The user cannot sign in until they
+        one-time registration link that expires in {{.LinkTTL}}. The user cannot sign in until they
         redeem it.</span>
     </div>
     {{/* The .modal pattern, as on the device page's rotate/delete actions. The
@@ -94,7 +94,7 @@
         <div class="card modal-card">
           <h2>Issue a passkey recovery link</h2>
           <p class="muted">This revokes every passkey on <code>{{.Target.Email}}</code>
-            immediately, then issues a one-time registration link that expires in one hour.
+            immediately, then issues a one-time registration link that expires in {{.LinkTTL}}.
             They cannot sign in until they redeem it.</p>
           <form method="post" action="/admin/users/{{.Target.ID}}/recovery">
             <input type="hidden" name="csrf" value="{{.CSRFToken}}">

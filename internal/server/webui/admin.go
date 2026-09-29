@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	emailpkg "github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -208,6 +209,8 @@ type adminUserNewData struct {
 	DeliveryNote string
 	LinkWarning  string
 	InvitedUser  string
+	// LinkTTL is the registration link's lifetime in words (#179).
+	LinkTTL string
 }
 
 // adminUserData is admin-user.html's template data. Link and DeliveryNote are
@@ -222,6 +225,21 @@ type adminUserData struct {
 	Link         string
 	DeliveryNote string
 	LinkWarning  string
+	// LinkTTL is the registration link's lifetime in words (#179): the
+	// danger-zone copy and the reveal state it.
+	LinkTTL string
+}
+
+// adminUserPage builds admin-user.html's data for target. Every render of
+// "admin-user" goes through it, so no call site can forget a field the page
+// needs (the accountPageData pattern, account.go).
+func (h *handler) adminUserPage(usr store.User, sess store.Session, target store.User) adminUserData {
+	return adminUserData{
+		appData: h.newAppData(usr, sess, target.Email, "admin-users"),
+		Target:  target,
+		IsSelf:  target.ID == usr.ID,
+		LinkTTL: emailpkg.FormatDuration(h.deps.Grants.LinkTTL()),
+	}
 }
 
 // deliveryNote turns a service.Delivery into the sentence shown beneath the
@@ -299,6 +317,7 @@ func (h *handler) handleAdminUserInvite(w http.ResponseWriter, r *http.Request, 
 		appData: h.newAppData(usr, sess, "Invite user", "admin-users"),
 		Email:   email,
 		Role:    role,
+		LinkTTL: emailpkg.FormatDuration(h.deps.Grants.LinkTTL()),
 	}
 
 	invited, link, delivery, err := h.deps.Admin.CreateUserInvite(r.Context(), usr.ID, email, role)
@@ -331,23 +350,16 @@ func (h *handler) handleAdminUserEdit(w http.ResponseWriter, r *http.Request, us
 	if !ok {
 		return
 	}
-	h.render(w, r, "admin-user", adminUserData{
-		appData: h.newAppData(usr, sess, target.Email, "admin-users"),
-		Target:  target,
-		IsSelf:  target.ID == usr.ID,
-	})
+	h.render(w, r, "admin-user", h.adminUserPage(usr, sess, target))
 }
 
 // renderAdminUserError re-renders the edit screen with a banner at the status
 // the failure deserves — 422 for a guard rejection, 503 when WebAuthn is
 // unconfigured, 404 for a vanished target (see adminGuardMessage).
 func (h *handler) renderAdminUserError(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session, target store.User, status int, msg string) {
-	h.renderStatus(w, r, status, "admin-user", adminUserData{
-		appData: h.newAppData(usr, sess, target.Email, "admin-users"),
-		Target:  target,
-		IsSelf:  target.ID == usr.ID,
-		Error:   msg,
-	})
+	data := h.adminUserPage(usr, sess, target)
+	data.Error = msg
+	h.renderStatus(w, r, status, "admin-user", data)
 }
 
 // handleAdminUserUpdate applies a role and/or disabled change.
@@ -412,7 +424,7 @@ func (h *handler) handleAdminUserDelete(w http.ResponseWriter, r *http.Request, 
 // The typed confirmation is not ceremony: GrantService.IssueRecovery calls
 // DeleteAllByUser BEFORE minting, so a misclick logs the user out of every
 // credential they own and the only way back in is the link below, which expires
-// in an hour.
+// after the configured link TTL.
 func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 	target, ok := h.adminUser(w, r, usr)
 	if !ok {
@@ -439,11 +451,7 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	data := adminUserData{
-		appData: h.newAppData(usr, sess, target.Email, "admin-users"),
-		Target:  target,
-		IsSelf:  target.ID == usr.ID,
-	}
+	data := h.adminUserPage(usr, sess, target)
 	data.Link, data.LinkWarning = h.grantLink(r, link)
 	data.DeliveryNote = deliveryNote(delivery)
 	h.render(w, r, "admin-user", data)
@@ -824,11 +832,8 @@ func (h *handler) handleAdminUserEmail(w http.ResponseWriter, r *http.Request, u
 		h.logAndFail(w, r, usr, "set user email", err)
 		return
 	}
-	h.render(w, r, "admin-user", adminUserData{
-		appData: h.newAppData(usr, sess, updated.Email, "admin-users"),
-		Target:  updated,
-		IsSelf:  updated.ID == usr.ID,
-		Notice: noticeNote(delivery) +
-			" If this account has not registered a passkey yet, issue a recovery link below so the user can set one up at the new address.",
-	})
+	data := h.adminUserPage(usr, sess, updated)
+	data.Notice = noticeNote(delivery) +
+		" If this account has not registered a passkey yet, issue a recovery link below so the user can set one up at the new address."
+	h.render(w, r, "admin-user", data)
 }
