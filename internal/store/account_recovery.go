@@ -152,3 +152,48 @@ func (r *AccountRecoveryRepo) DeleteUnusedByUser(ctx context.Context, userID str
 	}
 	return int(n), nil
 }
+
+// LiveGrant is the part of a live registration grant the admin pages need to
+// describe an account (#177). The token hash deliberately stays in the store.
+type LiveGrant struct {
+	Reason    string
+	ExpiresAt int64
+}
+
+// LiveByUser returns, per user, the unused grant that expires last among
+// those still redeemable at now (used_at IS NULL AND expires_at > now — the
+// same test Consume applies). An expires_at tie goes to a "recovery" grant,
+// the stronger signal to an admin. Users without a live grant are absent.
+//
+// It reads every live row and keeps the first per user in Go rather than
+// asking SQLite for a per-group maximum: live grants are few (they expire
+// within auth.registration_link_ttl and the pruner deletes them hourly), and
+// the ORDER BY states the precedence rule in one place.
+func (r *AccountRecoveryRepo) LiveByUser(ctx context.Context, now int64) (map[string]LiveGrant, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT user_id, reason, expires_at FROM account_recovery_tokens
+		  WHERE used_at IS NULL AND expires_at > ?
+		  ORDER BY user_id, expires_at DESC, reason = 'recovery' DESC`,
+		now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("account_recovery.LiveByUser: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	live := make(map[string]LiveGrant)
+	for rows.Next() {
+		var userID string
+		var g LiveGrant
+		if err := rows.Scan(&userID, &g.Reason, &g.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("account_recovery.LiveByUser: scan: %w", err)
+		}
+		if _, seen := live[userID]; !seen {
+			live[userID] = g
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("account_recovery.LiveByUser: rows: %w", err)
+	}
+	return live, nil
+}
