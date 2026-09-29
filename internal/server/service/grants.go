@@ -22,6 +22,12 @@ const grantTokenBytes = 32
 // cannot distinguish which. Maps to HTTP 401.
 var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, or already used")
 
+// ErrAlreadyRegistered is returned by ReissueInvite for an account that can
+// already sign in: it has a passkey or a linked OIDC identity (#75, design
+// D7). A registered account's route to a new credential is recovery, not an
+// invite. Maps to HTTP 422.
+var ErrAlreadyRegistered = errors.New("service: account has already registered")
+
 // adminDeliveryTimeout bounds an admin-initiated send as seen by this
 // service: internal/email returns at this deadline whatever the SMTP peer is
 // doing. It sits BELOW server.go's shutdownTimeout
@@ -254,13 +260,14 @@ func NewGrantService(st *store.Store, passkeys *PasskeyService, mailer email.Mai
 func (s *GrantService) LinkTTL() time.Duration { return s.linkTTL }
 
 // issue mints a fresh single-use grant for userID with the given reason
-// ("invite" | "recovery") and returns its one-time redeem link. It never
-// audits or revokes — callers (IssueInvite/IssueRecovery) own those
-// reason-specific side effects.
-func (s *GrantService) issue(ctx context.Context, userID, reason string) (string, error) {
+// ("invite" | "recovery") and returns its one-time redeem link and the unix
+// second it expires. It never audits or revokes — callers
+// (IssueInvite/IssueRecovery/ReissueInvite) own those reason-specific side
+// effects.
+func (s *GrantService) issue(ctx context.Context, userID, reason string) (string, int64, error) {
 	token, err := auth.RandToken(grantTokenBytes)
 	if err != nil {
-		return "", fmt.Errorf("service.issue: %w", err)
+		return "", 0, fmt.Errorf("service.issue: %w", err)
 	}
 	now := store.NowUnix()
 	t := store.RecoveryToken{
@@ -270,9 +277,9 @@ func (s *GrantService) issue(ctx context.Context, userID, reason string) (string
 		ExpiresAt: now + int64(s.linkTTL.Seconds()),
 	}
 	if err := s.st.AccountRecovery().Create(ctx, t); err != nil {
-		return "", fmt.Errorf("service.issue: %w", err)
+		return "", 0, fmt.Errorf("service.issue: %w", err)
 	}
-	return s.baseURL + "/register?token=" + token, nil
+	return s.baseURL + "/register?token=" + token, t.ExpiresAt, nil
 }
 
 // IssueInvite mints an "invite" grant for u (a freshly-created,
@@ -285,7 +292,7 @@ func (s *GrantService) issue(ctx context.Context, userID, reason string) (string
 // present it, whatever Delivery reports. Delivery failure is never this
 // function's error, because losing the link is worse than failing to mail it.
 func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.User) (string, Delivery, error) {
-	link, err := s.issue(ctx, u.ID, "invite")
+	link, _, err := s.issue(ctx, u.ID, "invite")
 	if err != nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueInvite: %w", err)
 	}
@@ -297,6 +304,65 @@ func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.
 	return link, s.deliver(ctx, actorID, u, subject, body), nil
 }
 
+// ReissueInvite sends an account that cannot sign in yet a fresh registration
+// link (#75). It is non-destructive by construction: the new grant's reason is
+// always "invite", which never revokes a credential at redeem (RedeemFinish),
+// even if the account registers between the guard below and the mint.
+//
+// It refuses (ErrAlreadyRegistered) an account IsRegistered reports as able to
+// sign in, and (ErrWebAuthnUnavailable) when WebAuthn is not configured.
+// Otherwise it deletes every earlier unused grant for the account, invite or
+// recovery (design D6), so the link it returns is the only one that works, then
+// mints and audits passkey.invite_issued.
+//
+// The email wording follows the account's history (design D12): an account
+// that never registered a passkey (no WebAuthn handle) gets the invite body;
+// one that had passkeys revoked gets ReRegistrationLinkBody. A disabled account
+// gets the link minted and returned but not mailed, as IssueRecovery does
+// (#82).
+//
+// The Delivery contract is IssueInvite's: a nil error means the link is valid
+// and the caller MUST present it, whatever Delivery reports.
+//
+// If the delete succeeds and the mint fails, the account is left with no live
+// link and reads link_expired; the caller shows the error and a retry is safe.
+func (s *GrantService) ReissueInvite(ctx context.Context, actorID string, u store.User) (string, int64, Delivery, error) {
+	if s.passkeys == nil {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", ErrWebAuthnUnavailable)
+	}
+	n, err := s.st.WebAuthnCredentials().CountWebAuthnCredentials(ctx, u.ID)
+	if err != nil {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
+	}
+	if IsRegistered(u, n) {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", ErrAlreadyRegistered)
+	}
+	handle, err := s.st.Users().GetWebAuthnHandle(ctx, u.ID)
+	if err != nil {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
+	}
+	if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
+	}
+	link, expiresAt, err := s.issue(ctx, u.ID, "invite")
+	if err != nil {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
+	}
+	s.audit.Log(ctx, store.AuditEntry{
+		ActorUserID: actorID, EventType: "passkey.invite_issued",
+		TargetType: "user", TargetID: u.ID,
+	})
+	if u.Disabled {
+		return link, expiresAt, Delivery{Suppressed: SuppressUserDisabled}, nil
+	}
+	expiresIn := email.FormatDuration(s.linkTTL)
+	subject, body := email.InviteLinkBody(link, expiresIn)
+	if len(handle) > 0 {
+		subject, body = email.ReRegistrationLinkBody(link, expiresIn)
+	}
+	return link, expiresAt, s.deliver(ctx, actorID, u, subject, body), nil
+}
+
 // mintRecoveryGrant creates a single-use "recovery" grant for userID and
 // audits passkey.recovery_issued. It does NOT revoke any existing passkeys —
 // revocation is the caller's decision and timing: admin recovery revokes at
@@ -306,7 +372,7 @@ func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.
 // actorID is recorded as the audit actor (the triggering admin, or the user
 // themselves for self-service).
 func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID string) (string, error) {
-	link, err := s.issue(ctx, userID, "recovery")
+	link, _, err := s.issue(ctx, userID, "recovery")
 	if err != nil {
 		return "", fmt.Errorf("service.mintRecoveryGrant: %w", err)
 	}
@@ -346,6 +412,12 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", ErrWebAuthnUnavailable)
 	}
 	if _, err := s.st.WebAuthnCredentials().DeleteAllByUser(ctx, u.ID); err != nil {
+		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
+	}
+	// D13: an admin-issued recovery link is the account's only live link, as
+	// a re-sent invite is (ReissueInvite, D6). Without this an unregistered
+	// account's invite would stay redeemable beside the recovery link.
+	if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
 	}
 	link, err := s.mintRecoveryGrant(ctx, actorID, u.ID)

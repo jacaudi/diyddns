@@ -45,9 +45,10 @@ func TestGrantBodies_StateTheConfiguredWindow(t *testing.T) {
 	const link = "https://ddns.example.test/register?token=abc123"
 	expiresIn := email.FormatDuration(45 * time.Minute)
 	bodies := map[string]func() (string, string){
-		"InviteLinkBody":        func() (string, string) { return email.InviteLinkBody(link, expiresIn) },
-		"RecoveryLinkBody":      func() (string, string) { return email.RecoveryLinkBody(link, expiresIn) },
-		"AdminRecoveryLinkBody": func() (string, string) { return email.AdminRecoveryLinkBody(link, expiresIn) },
+		"InviteLinkBody":         func() (string, string) { return email.InviteLinkBody(link, expiresIn) },
+		"RecoveryLinkBody":       func() (string, string) { return email.RecoveryLinkBody(link, expiresIn) },
+		"AdminRecoveryLinkBody":  func() (string, string) { return email.AdminRecoveryLinkBody(link, expiresIn) },
+		"ReRegistrationLinkBody": func() (string, string) { return email.ReRegistrationLinkBody(link, expiresIn) },
 	}
 	for name, render := range bodies {
 		_, body := render()

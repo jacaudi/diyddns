@@ -5,7 +5,7 @@ import (
 	"text/template"
 )
 
-// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl,
+// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl, reRegistrationTmpl,
 // emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl,
 // adminEmailChangedTmpl (#131, via ChangeConfirmBody, ChangeNoticeBody,
 // ChangedBody and AdminChangedBody) and the two device-state templates (#132,
@@ -49,6 +49,19 @@ var adminRecoveryTmpl = template.Must(template.New("admin-recovery-link").Parse(
 		"disregard this message: your existing passkeys no longer work.\r\n",
 ))
 
+// reRegistrationTmpl is the body ReissueInvite sends to an account that HAD
+// registered a passkey and has none now (an admin revoked them), so "an account
+// has been created for you" would be false (#75, design D12).
+var reRegistrationTmpl = template.Must(template.New("re-registration-link").Parse(
+	"An administrator has sent you a new link to register a passkey on your\r\n" +
+		"DIYDDNS account. Any earlier registration link for this account no longer\r\n" +
+		"works.\r\n\r\n" +
+		"Use the link below to register a passkey. It expires in {{.ExpiresIn}} and\r\n" +
+		"can only be used once.\r\n\r\n" +
+		"{{.Link}}\r\n\r\n" +
+		"If you were not expecting this, contact your administrator.\r\n",
+))
+
 // RecoveryLinkBody renders the subject and body of the email sent to a user
 // who requested a passkey recovery link themselves. For an admin-issued
 // recovery link use AdminRecoveryLinkBody. expiresIn is the link's lifetime,
@@ -78,6 +91,15 @@ func InviteLinkBody(link, expiresIn string) (subject, body string) {
 // expiresIn is the link's lifetime, already formatted by FormatDuration.
 func AdminRecoveryLinkBody(link, expiresIn string) (subject, body string) {
 	return renderTemplate(adminRecoveryTmpl, "Your DIYDDNS passkeys were reset by an administrator", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
+}
+
+// ReRegistrationLinkBody renders the subject and body of the email sent when an
+// admin sends a new registration link to an account that has registered a
+// passkey before (#75, design D12). A never-registered account gets
+// InviteLinkBody instead. expiresIn is the link's lifetime, already formatted by
+// FormatDuration.
+func ReRegistrationLinkBody(link, expiresIn string) (subject, body string) {
+	return renderTemplate(reRegistrationTmpl, "A new DIYDDNS registration link from your administrator", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
 }
 
 // The four #131 bodies. Every address interpolated below has passed

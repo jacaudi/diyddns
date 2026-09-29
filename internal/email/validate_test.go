@@ -115,10 +115,11 @@ func TestRenderedMessagesAreASCII(t *testing.T) {
 		userEmail = "user@example.test"
 	)
 	rendered := map[string]func() (string, string){
-		"RecoveryLinkBody":      func() (string, string) { return email.RecoveryLinkBody(link, "15 minutes") },
-		"InviteLinkBody":        func() (string, string) { return email.InviteLinkBody(link, "15 minutes") },
-		"AdminRecoveryLinkBody": func() (string, string) { return email.AdminRecoveryLinkBody(link, "15 minutes") },
-		"AdminNotifyBody":       func() (string, string) { return email.AdminNotifyBody(userEmail) },
+		"RecoveryLinkBody":       func() (string, string) { return email.RecoveryLinkBody(link, "15 minutes") },
+		"InviteLinkBody":         func() (string, string) { return email.InviteLinkBody(link, "15 minutes") },
+		"AdminRecoveryLinkBody":  func() (string, string) { return email.AdminRecoveryLinkBody(link, "15 minutes") },
+		"AdminNotifyBody":        func() (string, string) { return email.AdminNotifyBody(userEmail) },
+		"ReRegistrationLinkBody": func() (string, string) { return email.ReRegistrationLinkBody(link, "15 minutes") },
 	}
 	for name, render := range rendered {
 		t.Run(name, func(t *testing.T) {
