@@ -506,12 +506,11 @@ func adminReissueInviteHandler(deps ServerDeps) func(context.Context, *reissueIn
 }
 
 // adminSetUserEmailHandler builds the handler for PATCH
-// /api/v1/admin/users/{id}/email. Extracted to a named function -- unlike
-// this file's other ops, which inline their handler directly in the
-// huma.Register call -- solely to keep registerAdminOps under the repo's
-// gocyclo ceiling (.golangci.yml min-complexity: 15): this op's two chained
-// lookups (GetByID, then AdminSet) each need their own error branch, and
-// inlining both pushed registerAdminOps to 17.
+// /api/v1/admin/users/{id}/email. It is a named function, like the four user
+// ops above, solely to keep registerAdminOps under the repo's gocyclo ceiling
+// (.golangci.yml min-complexity: 15): this op's two chained lookups (GetByID,
+// then AdminSet) each need their own error branch, and inlining both pushed
+// registerAdminOps to 17.
 func adminSetUserEmailHandler(deps ServerDeps) func(context.Context, *patchUserEmailInput) (*adminSetEmailOutput, error) {
 	return func(ctx context.Context, in *patchUserEmailInput) (*adminSetEmailOutput, error) {
 		actor := UserFrom(ctx)

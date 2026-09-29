@@ -47,6 +47,31 @@ func TestAdminUserEmail_SetsImmediatelyAndShowsNotice(t *testing.T) {
 	}
 }
 
+// TestAdminUserEmail_RegisteredTargetOmitsRegistrationCardHint covers the
+// Registration card hint being gated on the card actually being shown: the
+// card renders only for an unregistered target (admin-user.html:41), so a
+// registered target's notice must not point at it.
+func TestAdminUserEmail_RegisteredTargetOmitsRegistrationCardHint(t *testing.T) {
+	deps, st := testDeps(t)
+	mailer := &recordingMailer{}
+	deps.EmailChange = service.NewEmailChangeService(st, mailer, deps.Cfg.Server.BaseURL, service.NewAuditWriter(st), deps.Log)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "old2@example.com", "user")
+	seedPasskey(t, st, target.ID, "k")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	rec := postForm(t, h, cookie, "/admin/users/"+target.ID+"/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"new2@example.com"}})
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, body)
+	}
+	if strings.Contains(body, "Registration card") {
+		t.Errorf("registered target's notice points at the Registration card, which is hidden for it:\n%s", body)
+	}
+}
+
 func TestAdminUserEmail_NoMailerNoticeIsHonest(t *testing.T) {
 	deps, st := testDeps(t)
 	deps.EmailChange = service.NewEmailChangeService(st, nil, deps.Cfg.Server.BaseURL, service.NewAuditWriter(st), deps.Log)

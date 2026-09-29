@@ -957,7 +957,9 @@ func (h *handler) handleAdminUserEmail(w http.ResponseWriter, r *http.Request, u
 		h.logAndFail(w, r, usr, "load registration status", err)
 		return
 	}
-	data.Notice = noticeNote(delivery) +
-		" If this account has not registered a passkey yet, send it a new registration link from the Registration card below."
+	data.Notice = noticeNote(delivery)
+	if !data.Registered {
+		data.Notice += " If this account has not registered a passkey yet, send it a new registration link from the Registration card below."
+	}
 	h.render(w, r, "admin-user", data)
 }

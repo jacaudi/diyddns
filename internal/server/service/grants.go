@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
@@ -238,6 +239,13 @@ type GrantService struct {
 	// only construction path in the tree; never build a GrantService with a
 	// bare struct literal.
 	linkTTL time.Duration
+	// replaceMu serializes "delete every unused grant, then mint one" for
+	// ReissueInvite and IssueRecovery, so two concurrent calls (a double-click
+	// on the re-invite button, an API retry) cannot interleave and leave two
+	// live links for one account (design D6/D13). The server is one process
+	// over one SQLite connection, so a process-local mutex is sufficient.
+	// Contention is admin-only.
+	replaceMu sync.Mutex
 }
 
 // NewGrantService constructs a GrantService. passkeys may be nil if WebAuthn
@@ -341,10 +349,16 @@ func (s *GrantService) ReissueInvite(ctx context.Context, actorID string, u stor
 	if err != nil {
 		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
 	}
-	if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
-		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
-	}
-	link, expiresAt, err := s.issue(ctx, u.ID, "invite")
+	// replaceMu (see field doc) covers exactly delete-then-mint, released
+	// before audit and delivery so neither ever runs under the lock.
+	link, expiresAt, err := func() (string, int64, error) {
+		s.replaceMu.Lock()
+		defer s.replaceMu.Unlock()
+		if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
+			return "", 0, err
+		}
+		return s.issue(ctx, u.ID, "invite")
+	}()
 	if err != nil {
 		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
 	}
@@ -417,10 +431,16 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	// D13: an admin-issued recovery link is the account's only live link, as
 	// a re-sent invite is (ReissueInvite, D6). Without this an unregistered
 	// account's invite would stay redeemable beside the recovery link.
-	if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
-		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
-	}
-	link, err := s.mintRecoveryGrant(ctx, actorID, u.ID)
+	// replaceMu (see field doc) covers exactly delete-then-mint, released
+	// before delivery so it never runs under the lock.
+	link, err := func() (string, error) {
+		s.replaceMu.Lock()
+		defer s.replaceMu.Unlock()
+		if _, err := s.st.AccountRecovery().DeleteUnusedByUser(ctx, u.ID); err != nil {
+			return "", err
+		}
+		return s.mintRecoveryGrant(ctx, actorID, u.ID)
+	}()
 	if err != nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
 	}

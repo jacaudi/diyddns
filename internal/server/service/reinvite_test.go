@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/auth"
@@ -173,5 +174,69 @@ func TestIssueRecovery_InvalidatesEarlierLinks(t *testing.T) {
 	}
 	if _, _, _, err := grants.RedeemBegin(t.Context(), extractToken(t, invite)); !errors.Is(err, ErrGrantInvalid) {
 		t.Errorf("invite link after recovery: err = %v, want ErrGrantInvalid", err)
+	}
+}
+
+// TestReissueInvite_ConcurrentCallsLeaveOneLiveLink covers design D6/D13: two
+// concurrent calls for one account (a double-click on the re-invite button,
+// an API retry) must never leave two live links, because
+// DeleteUnusedByUser-then-issue is two separate statements that can interleave
+// across goroutines.
+func TestReissueInvite_ConcurrentCallsLeaveOneLiveLink(t *testing.T) {
+	st, grants, _ := newReinviteGrants(t, &fakeMailer{})
+	u := seedUser(t, st, "concurrent@example.com", "user")
+
+	const callers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	links := make([]string, 0, callers)
+	for range callers {
+		wg.Go(func() {
+			link, _, _, err := grants.ReissueInvite(t.Context(), "admin-id", u)
+			if err != nil {
+				t.Errorf("ReissueInvite: %v", err)
+				return
+			}
+			mu.Lock()
+			links = append(links, link)
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+
+	live := 0
+	for _, link := range links {
+		if _, _, _, err := grants.RedeemBegin(t.Context(), extractToken(t, link)); err == nil {
+			live++
+		}
+	}
+	if live != 1 {
+		t.Errorf("live redeemable links = %d, want exactly 1", live)
+	}
+}
+
+// TestReissueInvite_RefusalKeepsExistingGrants covers design D7: an account
+// ReissueInvite refuses (already registered) must be left completely
+// untouched — a refusal is checked before any delete, so it must not cost the
+// account its existing credential or its existing live grant.
+func TestReissueInvite_RefusalKeepsExistingGrants(t *testing.T) {
+	st, grants, _ := newReinviteGrants(t, &fakeMailer{})
+	u := seedUser(t, st, "keep@example.com", "user")
+	if _, err := st.WebAuthnCredentials().Create(t.Context(), store.WebAuthnCredential{
+		CredentialID: []byte("cred-keep"), UserID: u.ID, CredentialJSON: []byte("{}"), Name: "k", CreatedAt: store.NowUnix(),
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	if err := st.AccountRecovery().Create(t.Context(), store.RecoveryToken{
+		TokenHash: "h-keep", UserID: u.ID, Reason: "recovery", ExpiresAt: store.NowUnix() + 600,
+	}); err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
+
+	if _, _, _, err := grants.ReissueInvite(t.Context(), "admin-id", u); !errors.Is(err, ErrAlreadyRegistered) {
+		t.Fatalf("err = %v, want ErrAlreadyRegistered", err)
+	}
+	if _, err := st.AccountRecovery().Get(t.Context(), "h-keep"); err != nil {
+		t.Errorf("Get(h-keep): %v, want the existing grant still live", err)
 	}
 }
