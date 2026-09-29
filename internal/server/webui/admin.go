@@ -24,8 +24,12 @@ type userRow struct {
 	Email    string
 	Role     string
 	Disabled bool
-	Auth     string // "OIDC" | "Passkey"
-	IsSelf   bool
+	Auth     string // "OIDC" | "Passkey" | "—"
+	// Registration and RegistrationTag are the Registration column's label
+	// and tag class (#177), from registrationLabel.
+	Registration    string
+	RegistrationTag string
+	IsSelf          bool
 	// LastAdmin marks the only enabled admin, so the UI can disable the
 	// controls that AdminService would reject anyway. Advisory only — the
 	// service guard remains authoritative.
@@ -43,15 +47,50 @@ type adminUsersData struct {
 }
 
 // authLabel derives how an account authenticates, matching the JSON API's
-// adminUserView.OIDCLinked derivation. An invited-but-unredeemed user has no
-// credential at all and still reads "Passkey" here; distinguishing that needs a
-// per-user credential count with no service wrapper, and is deliberately not
-// done (design open question 1).
-func authLabel(u store.User) string {
-	if u.OIDCSubject != "" {
+// adminUserView.OIDCLinked derivation. An account that has not registered —
+// no passkey and no OIDC link — reads "—": it has no way to sign in yet
+// (#177).
+func authLabel(u store.User, registered bool) string {
+	switch {
+	case !registered:
+		return "—"
+	case u.OIDCSubject != "":
 		return "OIDC"
+	default:
+		return "Passkey"
 	}
-	return "Passkey"
+}
+
+// registrationLabel is the users list's Registration column for one status:
+// its label and its tag class (#177).
+func registrationLabel(s service.RegistrationStatus) (label, tag string) {
+	switch s {
+	case service.RegistrationRegistered:
+		return "Registered", "ok"
+	case service.RegistrationInvited:
+		return "Invited", "neutral"
+	case service.RegistrationRecoveryPending:
+		return "Recovery pending", "warn"
+	default:
+		return "Link expired", "danger"
+	}
+}
+
+// registrationText is the user page header's registration phrase (#177),
+// lower-case to follow "role · state". now must be the instant the status was
+// derived at, so a live link's remaining time is always positive.
+func registrationText(reg service.Registration, now int64) string {
+	remaining := time.Duration(reg.LinkExpiresAt-now) * time.Second
+	switch reg.Status {
+	case service.RegistrationRegistered:
+		return "registered"
+	case service.RegistrationInvited:
+		return "invited, link expires in " + emailpkg.FormatDuration(remaining)
+	case service.RegistrationRecoveryPending:
+		return "recovery pending, link expires in " + emailpkg.FormatDuration(remaining)
+	default:
+		return "no live registration link"
+	}
 }
 
 // handleAdminUsers renders the admin users list with its three stat tiles.
@@ -72,6 +111,11 @@ func (h *handler) renderAdminUsers(w http.ResponseWriter, r *http.Request, usr s
 		h.logAndFail(w, r, usr, "list all devices", err)
 		return
 	}
+	regs, err := h.deps.Admin.RegistrationStatuses(r.Context(), users, store.NowUnix())
+	if err != nil {
+		h.logAndFail(w, r, usr, "load registration status", err)
+		return
+	}
 
 	enabledAdmins := 0
 	var lastAdminID string
@@ -88,11 +132,15 @@ func (h *handler) renderAdminUsers(w http.ResponseWriter, r *http.Request, usr s
 		if u.Disabled {
 			disabled++
 		}
+		reg := regs[u.ID]
+		label, tag := registrationLabel(reg.Status)
 		rows = append(rows, userRow{
 			ID: u.ID, Email: u.Email, Role: u.Role, Disabled: u.Disabled,
-			Auth:      authLabel(u),
-			IsSelf:    u.ID == usr.ID,
-			LastAdmin: enabledAdmins == 1 && u.ID == lastAdminID,
+			Auth:            authLabel(u, reg.Status == service.RegistrationRegistered),
+			Registration:    label,
+			RegistrationTag: tag,
+			IsSelf:          u.ID == usr.ID,
+			LastAdmin:       enabledAdmins == 1 && u.ID == lastAdminID,
 		})
 	}
 
@@ -228,18 +276,32 @@ type adminUserData struct {
 	// LinkTTL is the registration link's lifetime in words (#179): the
 	// danger-zone copy and the reveal state it.
 	LinkTTL string
+	// Registered and RegistrationText describe the target's registration
+	// status (#177); Registered gates the Registration card and the danger
+	// zone's recovery item.
+	Registered       bool
+	RegistrationText string
 }
 
 // adminUserPage builds admin-user.html's data for target. Every render of
 // "admin-user" goes through it, so no call site can forget a field the page
-// needs (the accountPageData pattern, account.go).
-func (h *handler) adminUserPage(usr store.User, sess store.Session, target store.User) adminUserData {
-	return adminUserData{
-		appData: h.newAppData(usr, sess, target.Email, "admin-users"),
-		Target:  target,
-		IsSelf:  target.ID == usr.ID,
-		LinkTTL: emailpkg.FormatDuration(h.deps.Grants.LinkTTL()),
+// needs (the accountPageData pattern, account.go). Call it AFTER any mutation,
+// with the mutated user, so the registration status reflects the change.
+func (h *handler) adminUserPage(r *http.Request, usr store.User, sess store.Session, target store.User) (adminUserData, error) {
+	now := store.NowUnix()
+	regs, err := h.deps.Admin.RegistrationStatuses(r.Context(), []store.User{target}, now)
+	if err != nil {
+		return adminUserData{}, err
 	}
+	reg := regs[target.ID]
+	return adminUserData{
+		appData:          h.newAppData(usr, sess, target.Email, "admin-users"),
+		Target:           target,
+		IsSelf:           target.ID == usr.ID,
+		LinkTTL:          emailpkg.FormatDuration(h.deps.Grants.LinkTTL()),
+		Registered:       reg.Status == service.RegistrationRegistered,
+		RegistrationText: registrationText(reg, now),
+	}, nil
 }
 
 // deliveryNote turns a service.Delivery into the sentence shown beneath the
@@ -350,14 +412,23 @@ func (h *handler) handleAdminUserEdit(w http.ResponseWriter, r *http.Request, us
 	if !ok {
 		return
 	}
-	h.render(w, r, "admin-user", h.adminUserPage(usr, sess, target))
+	data, err := h.adminUserPage(r, usr, sess, target)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load registration status", err)
+		return
+	}
+	h.render(w, r, "admin-user", data)
 }
 
 // renderAdminUserError re-renders the edit screen with a banner at the status
 // the failure deserves — 422 for a guard rejection, 503 when WebAuthn is
 // unconfigured, 404 for a vanished target (see adminGuardMessage).
 func (h *handler) renderAdminUserError(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session, target store.User, status int, msg string) {
-	data := h.adminUserPage(usr, sess, target)
+	data, err := h.adminUserPage(r, usr, sess, target)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load registration status", err)
+		return
+	}
 	data.Error = msg
 	h.renderStatus(w, r, status, "admin-user", data)
 }
@@ -451,7 +522,11 @@ func (h *handler) handleAdminUserRecovery(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	data := h.adminUserPage(usr, sess, target)
+	data, err := h.adminUserPage(r, usr, sess, target)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load registration status", err)
+		return
+	}
 	data.Link, data.LinkWarning = h.grantLink(r, link)
 	data.DeliveryNote = deliveryNote(delivery)
 	h.render(w, r, "admin-user", data)
@@ -832,7 +907,11 @@ func (h *handler) handleAdminUserEmail(w http.ResponseWriter, r *http.Request, u
 		h.logAndFail(w, r, usr, "set user email", err)
 		return
 	}
-	data := h.adminUserPage(usr, sess, updated)
+	data, err := h.adminUserPage(r, usr, sess, updated)
+	if err != nil {
+		h.logAndFail(w, r, usr, "load registration status", err)
+		return
+	}
 	data.Notice = noticeNote(delivery) +
 		" If this account has not registered a passkey yet, issue a recovery link below so the user can set one up at the new address."
 	h.render(w, r, "admin-user", data)

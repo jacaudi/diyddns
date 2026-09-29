@@ -19,7 +19,7 @@
 
 <div class="page-head"><div>
   <h1>{{.Target.Email}}</h1>
-  <p class="sub">{{.Target.Role}} · {{if .Target.Disabled}}disabled{{else}}active{{end}}</p>
+  <p class="sub">{{.Target.Role}} · {{if .Target.Disabled}}disabled{{else}}active{{end}} · {{.RegistrationText}}</p>
 </div></div>
 
 {{template "errorBanner" .Error}}
