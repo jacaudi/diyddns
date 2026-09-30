@@ -2,6 +2,10 @@ package email_test
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"slices"
 	"strings"
 	"testing"
 
@@ -97,43 +101,125 @@ func TestNormalizeAddress(t *testing.T) {
 	}
 }
 
+// testUserID is an ASCII account id (a UUIDv7 shape) for renderers that take one.
+const testUserID = "0192f0c1-7a2b-7c3d-8e4f-000000000001"
+
+// hostileUserValue is what a user-controlled value can hold: non-ASCII, plus a
+// CR/LF that would forge a header line or a line of the notice if it survived.
+const hostileUserValue = "josé\r\nBcc: x@evil.test"
+
+// renderers is every exported function in templates.go that returns
+// (subject, body string).
+// Each takes one user-controlled string: an address or a device label. Where a
+// renderer has none, the argument is ignored. TestEveryTemplateRendererIsCovered
+// fails if a new renderer is not listed here, so the rule below cannot be
+// skipped by adding a renderer and forgetting this table.
+var renderers = map[string]func(user string) (subject, body string){
+	"RecoveryLinkBody": func(string) (string, string) {
+		return email.RecoveryLinkBody("https://ddns.example.test/register?token=abc123", "15 minutes")
+	},
+	"InviteLinkBody": func(string) (string, string) {
+		return email.InviteLinkBody("https://ddns.example.test/register?token=abc123", "15 minutes")
+	},
+	"AdminRecoveryLinkBody": func(string) (string, string) {
+		return email.AdminRecoveryLinkBody("https://ddns.example.test/register?token=abc123", "15 minutes")
+	},
+	"ReRegistrationLinkBody": func(string) (string, string) {
+		return email.ReRegistrationLinkBody("https://ddns.example.test/register?token=abc123", "15 minutes")
+	},
+	"ChangeConfirmBody": func(string) (string, string) {
+		return email.ChangeConfirmBody("https://ddns.example.test/account/email/confirm?token=abc123")
+	},
+	"AdminNotifyBody":  func(u string) (string, string) { return email.AdminNotifyBody(u, testUserID) },
+	"ChangeNoticeBody": email.ChangeNoticeBody,
+	"ChangedBody":      email.ChangedBody,
+	"AdminChangedBody": email.AdminChangedBody,
+	"DeviceStateChangedByAdminBody": func(u string) (string, string) {
+		return email.DeviceStateChangedByAdminBody(u, testUserID, true)
+	},
+}
+
 // TestRenderedMessagesAreASCII is the static guard #80 asks for, widened to
-// cover SUBJECTS as well as bodies. A header is worse off than a body: it has
-// no charset declaration available at all.
+// cover SUBJECTS as well as bodies (a header has no charset declaration at
+// all), and to hostile input (#90, #184).
 //
-// The inputs are FIXED ASCII on purpose. AdminNotifyBody takes a
-// user-controlled address, so feeding it a non-ASCII argument would make this
-// guard fail spuriously — this asserts the TEMPLATES are clean, not the
-// callers. The caller vectors are covered by the wire assertions below and by
-// the per-route tests in B1.3–B1.5.
+// The benign run checks the TEMPLATES are clean. The hostile run checks the
+// FOLD: every user-controlled value is folded before rendering (ASCIIFold), so
+// no value one account controls can make a message the transport refuses, and
+// no CR/LF in it can forge a line. That matters most for a body rendered once
+// and sent to many recipients, like the admin notice.
 //
 // Do NOT replace this with `rg '[^\x00-\x7F]' templates.go`: that hits em dashes
 // in Go // comments, which never reach the wire. Measure the RENDERED output.
 func TestRenderedMessagesAreASCII(t *testing.T) {
-	const (
-		link      = "https://ddns.example.test/register?token=abc123"
-		userEmail = "user@example.test"
-	)
-	rendered := map[string]func() (string, string){
-		"RecoveryLinkBody":       func() (string, string) { return email.RecoveryLinkBody(link, "15 minutes") },
-		"InviteLinkBody":         func() (string, string) { return email.InviteLinkBody(link, "15 minutes") },
-		"AdminRecoveryLinkBody":  func() (string, string) { return email.AdminRecoveryLinkBody(link, "15 minutes") },
-		"AdminNotifyBody":        func() (string, string) { return email.AdminNotifyBody(userEmail) },
-		"ReRegistrationLinkBody": func() (string, string) { return email.ReRegistrationLinkBody(link, "15 minutes") },
+	for name, render := range renderers {
+		for _, in := range []struct{ label, user string }{
+			{label: "benign", user: "user@example.test"},
+			{label: "hostile", user: hostileUserValue},
+		} {
+			t.Run(name+"/"+in.label, func(t *testing.T) {
+				subject, body := render(in.user)
+				if !email.IsASCII(subject) {
+					t.Errorf("%s subject is not 7-bit ASCII: %q", name, subject)
+				}
+				if !email.IsASCII(body) {
+					t.Errorf("%s body is not 7-bit ASCII: %q", name, body)
+				}
+				if strings.ContainsAny(subject, "\r\n") {
+					t.Errorf("%s subject contains CR or LF: %q", name, subject)
+				}
+				if strings.Contains(body, "\nBcc:") || strings.Contains(body, "\rBcc:") {
+					t.Errorf("%s body lets a user-controlled value forge a line: %q", name, body)
+				}
+				if strings.TrimSpace(subject) == "" || strings.TrimSpace(body) == "" {
+					t.Errorf("%s rendered empty output -- the guard would pass vacuously", name)
+				}
+			})
+		}
 	}
-	for name, render := range rendered {
-		t.Run(name, func(t *testing.T) {
-			subject, body := render()
-			if !email.IsASCII(subject) {
-				t.Errorf("%s subject is not 7-bit ASCII: %q", name, subject)
+}
+
+// TestEveryTemplateRendererIsCovered makes the renderers table complete by
+// construction: it parses templates.go and fails for any exported function
+// returning exactly two strings (named or not) that the table does not list,
+// and for any table entry naming no such function.
+func TestEveryTemplateRendererIsCovered(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "templates.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse templates.go: %v", err)
+	}
+	found := map[string]bool{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil || !fn.Name.IsExported() || fn.Type.Results == nil {
+			continue
+		}
+		var types []string
+		for _, field := range fn.Type.Results.List {
+			ident, ok := field.Type.(*ast.Ident)
+			if !ok {
+				types = nil
+				break
 			}
-			if !email.IsASCII(body) {
-				t.Errorf("%s body is not 7-bit ASCII: %q", name, body)
+			for range max(len(field.Names), 1) { // `(subject, body string)` is one field with two names
+				types = append(types, ident.Name)
 			}
-			if strings.TrimSpace(subject) == "" || strings.TrimSpace(body) == "" {
-				t.Errorf("%s rendered empty output — the guard would pass vacuously", name)
-			}
-		})
+		}
+		if !slices.Equal(types, []string{"string", "string"}) {
+			continue
+		}
+		found[fn.Name.Name] = true
+		if _, ok := renderers[fn.Name.Name]; !ok {
+			t.Errorf("templates.go renderer %s is missing from the renderers table in validate_test.go", fn.Name.Name)
+		}
+	}
+	for name := range renderers {
+		if !found[name] {
+			t.Errorf("renderers table lists %s, which is not an exported two-string-returning function in templates.go", name)
+		}
+	}
+	if len(found) == 0 {
+		t.Fatal("found no renderers in templates.go -- the completeness check would pass vacuously")
 	}
 }
 

@@ -50,6 +50,11 @@ type fakeMailer struct {
 	// makes the failure depend on whether sendCtx genuinely expired during
 	// sendDelay, which only a live read of the timeout does.
 	sendErrFromCtx bool
+	// refuseNonASCII, when true, makes Send return email.ErrNotASCII for a
+	// non-ASCII recipient, subject or body -- the clauses of internal/email's
+	// send-path check (checkSendable) a rendered message can fail. The call is
+	// still recorded, so a test can see what was attempted.
+	refuseNonASCII bool
 	// calls counts Send invocations, guarded by mu, for delayFromCall.
 	calls int
 	// sendCh, when non-nil, additionally receives every sentEmail so a test
@@ -93,6 +98,9 @@ func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
 	m.mu.Unlock()
 	if m.sendCh != nil {
 		m.sendCh <- e
+	}
+	if m.refuseNonASCII && (!email.IsASCII(to) || !email.IsASCII(subject) || !email.IsASCII(body)) {
+		return email.ErrNotASCII
 	}
 	if m.sendErrFromCtx {
 		return ctx.Err()
@@ -1278,5 +1286,56 @@ func TestSendAdvisory_MailsTheRecipientItIsGiven(t *testing.T) {
 	}
 	if len(page.Rows) != 1 || page.Rows[0].TargetID != "target-1" || page.Rows[0].ActorUserID != "actor-1" {
 		t.Fatalf("audit rows = %+v, want one email.send_failed for target-1 by actor-1", page.Rows)
+	}
+}
+
+// TestRequestSelfServiceRecovery_UnmailableStoredAddressStillNotifiesEveryAdmin
+// is #90. A row stored before #80's boundary validations can hold a non-ASCII
+// address. The admin notice is ONE body sent to every admin, so before the fold
+// that address made the transport refuse the notice for every admin, on a
+// pre-auth path. Now only the user's own send fails (its To is unmailable), and
+// every admin gets a notice naming the account by id.
+func TestRequestSelfServiceRecovery_UnmailableStoredAddressStillNotifiesEveryAdmin(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true, refuseNonASCII: true, sendCh: make(chan sentEmail, 4)}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+
+	u := seedUser(t, st, "josé@example.test", "user") // a legacy row: seedUser bypasses the service's validation
+	admin1 := seedUser(t, st, "admin1@example.test", "admin")
+	admin2 := seedUser(t, st, "admin2@example.test", "admin")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	byRecipient := map[string]sentEmail{}
+	for range 3 { // the user, then each admin
+		e := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+		byRecipient[e.to] = e
+	}
+	for _, a := range []store.User{admin1, admin2} {
+		e, ok := byRecipient[a.Email]
+		if !ok {
+			t.Fatalf("admin %s was never sent the notice; sends: %v", a.Email, mailer.Sent())
+		}
+		if !email.IsASCII(e.body) {
+			t.Errorf("admin notice body is not ASCII, so the transport would refuse it: %q", e.body)
+		}
+		if !strings.Contains(e.body, u.ID) {
+			t.Errorf("admin notice body %q does not name the account id %q", e.body, u.ID)
+		}
+	}
+
+	// Exactly one failure row, for the user's own unmailable address. Before
+	// the fold there were three: the user plus one per admin.
+	pollForAuditRows(t, st, EventEmailSendFailed, 1, 5*time.Second)
+	time.Sleep(100 * time.Millisecond) // let any further (wrong) rows land before counting
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: EventEmailSendFailed}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].TargetID != u.ID {
+		t.Fatalf("email.send_failed rows = %+v, want exactly one, for the user %s", page.Rows, u.ID)
 	}
 }

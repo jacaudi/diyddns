@@ -24,10 +24,10 @@ type Channel interface {
 	Send(ctx context.Context, d Delivery) error
 }
 
-// Mailer is the mail seam this package needs, declared here at its consumer.
-// Satisfied structurally by an email.Mailer value, so stale never imports
-// internal/email; noopMailer's always-nil Send gives design §9's last row
-// for free.
+// Mailer is the mail seam this package needs, declared here at its consumer
+// and satisfied structurally by an email.Mailer value; noopMailer's always-nil
+// Send gives design §9's last row for free. The package imports internal/email
+// only for ASCIIFold, in mail.go (#184), never for the transport.
 type Mailer interface {
 	Send(ctx context.Context, to, subject, body string) error
 }

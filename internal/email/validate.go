@@ -136,11 +136,12 @@ func IsASCII(s string) bool {
 // 0x20, or 0x7F). Printable ASCII passes through unchanged, so the result
 // always satisfies IsASCII and contains no CR or LF.
 //
-// A display concession for one transport, applied where a user-controlled
-// value (a device label, #132) is rendered into a message body. Nothing
-// stored changes. Folding control characters is a choice, not a transport
-// rule: checkSendable does not CR/LF-check a body, but a label must not be
-// able to forge a line of the notice.
+// A display concession for one transport, applied wherever a user-controlled
+// value (an address, a device label) is rendered into a subject or body: the
+// renderers in templates.go and internal/server/stale's mail channel (#132,
+// #90, #184). Nothing stored changes. Folding control characters is a choice,
+// not a transport rule: checkSendable does not CR/LF-check a body, but a
+// user-controlled value must not be able to forge a line of the notice.
 func ASCIIFold(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))

@@ -473,13 +473,21 @@ func TestRecoveryLinkBody_ContainsLink(t *testing.T) {
 }
 
 func TestAdminNotifyBody_ContainsEmail(t *testing.T) {
-	const userEmail = "someone@example.com"
-	subject, body := email.AdminNotifyBody(userEmail)
+	const (
+		userEmail = "someone@example.com"
+		userID    = "0192f0c1-7a2b-7c3d-8e4f-000000000001"
+	)
+	subject, body := email.AdminNotifyBody(userEmail, userID)
 	if subject == "" {
 		t.Error("subject is empty")
 	}
 	if !strings.Contains(body, userEmail) {
 		t.Errorf("body = %q, want to contain email %q", body, userEmail)
+	}
+	// A folded address (jos?@example.test) can be ambiguous; the id names
+	// exactly one account (#90, design D4).
+	if !strings.Contains(body, userID) {
+		t.Errorf("body = %q, want to contain user id %q", body, userID)
 	}
 }
 
@@ -568,7 +576,8 @@ func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
 //
 // The body case is the important one. from and to are both ASCII there, and the
 // non-ASCII text is in the BODY -- exactly what AdminNotifyBody(u.Email)
-// produces, and exactly what a from/to-only check would pass. That path is
+// produced before #90 folded the address, and exactly what a from/to-only
+// check would pass. That path is
 // pre-auth and attacker-driveable: api/passkey.go -> RequestSelfServiceRecovery
 // -> doSelfServiceRecovery.
 //

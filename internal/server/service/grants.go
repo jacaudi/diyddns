@@ -611,7 +611,7 @@ func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u 
 		s.log.Error("self-service recovery: list admins failed", "error", err)
 		return
 	}
-	adminSubj, adminBody := email.AdminNotifyBody(u.Email)
+	adminSubj, adminBody := email.AdminNotifyBody(u.Email, u.ID)
 	for _, a := range admins {
 		if !a.IsEnabledAdmin() {
 			continue
