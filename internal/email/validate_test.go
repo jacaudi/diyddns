@@ -298,3 +298,53 @@ func TestASCIIFold(t *testing.T) {
 		}
 	}
 }
+
+// TestSplitFrom pins #94's accepted email.from forms and the error contract
+// (design D14): a bare address keeps exactly today's errors, and a display
+// name must be plain ASCII atext words separated by single spaces, written
+// exactly as `Name <address>`, because the transport writes an ASCII name
+// UNQUOTED into the From header (unraid/apprise-go formatMIMEAddress).
+func TestSplitFrom(t *testing.T) {
+	tests := []struct {
+		name, from         string
+		wantName, wantAddr string
+		wantErr            error
+	}{
+		{name: "bare", from: "noreply@example.com", wantAddr: "noreply@example.com"},
+		{name: "display name", from: "DIYDDNS <noreply@example.com>", wantName: "DIYDDNS", wantAddr: "noreply@example.com"},
+		{name: "multi-word name", from: "DIYDDNS Alerts <noreply@example.com>", wantName: "DIYDDNS Alerts", wantAddr: "noreply@example.com"},
+		{name: "atext symbols", from: "O'Brien+Co <noreply@example.com>", wantName: "O'Brien+Co", wantAddr: "noreply@example.com"},
+		{name: "name with domain literal", from: "DIYDDNS <noreply@[192.168.1.1]>", wantName: "DIYDDNS", wantAddr: "noreply@[192.168.1.1]"},
+		{name: "quoted name", from: `"DIYDDNS" <noreply@example.com>`, wantErr: email.ErrAddressNotCanonical},
+		{name: "non-ascii name", from: "Nöreply <noreply@example.com>", wantErr: email.ErrAddressNotCanonical},
+		{name: "dot in name", from: "DIYDDNS.Alerts <noreply@example.com>", wantErr: email.ErrAddressNotCanonical},
+		{name: "double space", from: "DIYDDNS  <noreply@example.com>", wantErr: email.ErrAddressNotCanonical},
+		{name: "no space", from: "DIYDDNS<noreply@example.com>", wantErr: email.ErrAddressNotCanonical},
+		{name: "bare trailing space", from: "noreply@example.com ", wantErr: email.ErrAddressNotCanonical},
+		{name: "bare dot-less domain", from: "noreply@localhost", wantErr: email.ErrAddressUnroutable},
+		{name: "named dot-less domain", from: "DIYDDNS <noreply@localhost>", wantErr: email.ErrAddressUnroutable},
+		{name: "bare non-ascii", from: "nöreply@example.com", wantErr: email.ErrNotASCII},
+		{name: "named non-ascii address", from: "DIYDDNS <nöreply@example.com>", wantErr: email.ErrNotASCII},
+		{name: "bare quoted local part", from: `"john doe"@example.com`, wantErr: email.ErrAddressUnsupported},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotAddr, err := email.SplitFrom(tt.from)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("SplitFrom(%q) err = %v, want it to wrap %v", tt.from, err, tt.wantErr)
+				}
+				if gotName != "" || gotAddr != "" {
+					t.Errorf("SplitFrom(%q) = (%q, %q) with an error, want empty parts", tt.from, gotName, gotAddr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SplitFrom(%q): %v", tt.from, err)
+			}
+			if gotName != tt.wantName || gotAddr != tt.wantAddr {
+				t.Errorf("SplitFrom(%q) = (%q, %q), want (%q, %q)", tt.from, gotName, gotAddr, tt.wantName, tt.wantAddr)
+			}
+		})
+	}
+}

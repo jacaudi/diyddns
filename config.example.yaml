@@ -216,9 +216,10 @@ email:
   username: ""
   # Prefer DIYDDNS_EMAIL_PASSWORD; never logged.
   password: ""
-  # A bare address with a dotted domain; "diyddns@localhost" is rejected at
-  # startup because the transport refuses it.
-  from: "" # e.g. "diyddns@example.com"
+  # A bare address with a dotted domain, optionally behind a plain ASCII
+  # display name; "diyddns@localhost" is rejected at startup because the
+  # transport refuses it. See docs/email.md for the accepted name characters.
+  from: "" # e.g. "diyddns@example.com" or "DIYDDNS <diyddns@example.com>"
   # One of: starttls (default), implicit, none. Any other value is rejected at
   # startup. NOTE: none + a non-empty username above is also rejected at
   # startup unless host is localhost/127.0.0.1/::1 (see username, above).

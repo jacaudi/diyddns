@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	apprise "github.com/unraid/apprise-go"
@@ -57,14 +58,23 @@ type appriseMailer struct {
 	log   *slog.Logger
 	slots chan struct{} // capacity is the in-flight cap; see the type comment
 	send  sendFunc      // production: appriseSend
+	// fromName and fromAddr are cfg.From split once by SplitFrom (#94): the
+	// display name (empty for a bare address) and the bare envelope address.
+	// A From that SplitFrom refuses leaves both empty. config.Load has already
+	// refused such a value at startup, and checkSendable refuses every Send
+	// with it anyway, so nothing is ever sent from the empty fields.
+	fromName, fromAddr string
 }
 
 func newAppriseMailer(cfg config.EmailSection, log *slog.Logger) *appriseMailer {
+	name, addr, _ := SplitFrom(cfg.From) // a refused From: see the fromName/fromAddr comment
 	return &appriseMailer{
-		cfg:   cfg,
-		log:   log,
-		slots: make(chan struct{}, maxInFlightSends),
-		send:  appriseSend,
+		cfg:      cfg,
+		log:      log,
+		slots:    make(chan struct{}, maxInFlightSends),
+		send:     appriseSend,
+		fromName: name,
+		fromAddr: addr,
 	}
 }
 
@@ -265,27 +275,30 @@ func (m *appriseMailer) finish(ctx context.Context, to string, err error) error 
 // password rides in userinfo, percent-encoded by url.URL, and the URL is
 // never logged (see sanitize).
 //
-// Every value here is a bare address (checkSendable has already refused one
-// with a space in it), a mode word or a port that is ours: none contains a
-// space. That matters because the library decodes query values with
-// url.PathUnescape and never turns a '+' back into a space, while
-// url.Values.Encode writes a space AS '+'. A display name in ?from= would
-// arrive as "DIYDDNS+ <addr>". Do not add a value that can contain a space
-// without switching that value to %20 encoding.
+// The From display name travels in ?name= and the bare address in ?from=
+// (#94), so the library never has to split a display name out of ?from=.
+// ?name= is the one value that can contain a space, and that matters: the
+// library decodes query values with url.PathUnescape and never turns a '+'
+// back into a space, while url.Values.Encode writes a space AS '+'. Every
+// '+' left after Encode is therefore rewritten as %20; a literal '+' in any
+// value was already encoded as %2B, so the rewrite is exact.
 //
 // ?to= rather than a path segment: the path is additionally split on '/' and
 // path-unescaped; the query goes through one parser. ?mode= is always
 // explicit so the scheme carries no meaning a reader could misread.
 func (m *appriseMailer) targetURL(to string) string {
 	q := url.Values{}
-	q.Set("from", m.cfg.From)
+	q.Set("from", m.fromAddr)
+	if m.fromName != "" {
+		q.Set("name", m.fromName)
+	}
 	q.Set("to", to)
 	q.Set("format", "text")
 	q.Set("mode", secureMode(m.cfg.TLS))
 	u := url.URL{
 		Scheme:   "mailto",
 		Host:     net.JoinHostPort(m.cfg.Host, strconv.Itoa(m.cfg.Port)),
-		RawQuery: q.Encode(),
+		RawQuery: strings.ReplaceAll(q.Encode(), "+", "%20"),
 	}
 	if m.cfg.Username != "" {
 		u.User = url.UserPassword(m.cfg.Username, m.cfg.Password)

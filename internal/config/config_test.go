@@ -494,8 +494,10 @@ func TestLoad_EmailEnabledRequiresCompleteConfig(t *testing.T) {
 		// raw onto a wire that declares 7bit.
 		{name: "non-ascii from", enabled: true, baseURL: okURL, host: okHost, port: okPort,
 			from: "nöreply@example.com", wantErr: []string{"email.from"}},
-		{name: "display-name from", enabled: true, baseURL: okURL, host: okHost, port: okPort,
-			from: "DIYDDNS <noreply@example.com>", wantErr: []string{"email.from"}},
+		{name: "quoted display-name from", enabled: true, baseURL: okURL, host: okHost, port: okPort,
+			from: `"DIYDDNS" <noreply@example.com>`, wantErr: []string{"email.from"}},
+		{name: "display-name from is accepted", enabled: true, baseURL: okURL, host: okHost, port: okPort,
+			from: "DIYDDNS <noreply@example.com>"},
 		{name: "non-ascii base_url", enabled: true, baseURL: "https://exämple.test", host: okHost,
 			port: okPort, from: okFrom, wantErr: []string{"server.base_url"}},
 
@@ -612,13 +614,21 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 		{name: "cjk", from: "日本@example.com", wantErr: true},
 		{name: "em dash", from: "a—b@example.com", wantErr: true},
 
-		// The canonical half. These are pure ASCII, so an isASCII-only startup
-		// check accepts them — and then internal/email's checkAddress rejects
-		// every single send, so the deployment boots clean and mails nothing.
-		// Measured on the wire: net/smtp emits
-		// `MAIL FROM:<DIYDDNS <noreply@example.com>>` and
-		// `MAIL FROM:<noreply@example.com >` for these, verbatim.
-		{name: "display name", from: "DIYDDNS <noreply@example.com>", wantErr: true},
+		// The form half. A display name is accepted only as plain ASCII atext
+		// words, single-spaced, written exactly `Name <address>` (#94): the
+		// transport writes an ASCII name UNQUOTED into the From header, so a
+		// quoted or comma-bearing name would go out malformed. Everything
+		// here is pure ASCII except one row, so an isASCII-only check would
+		// accept the rest -- and a deployment would boot clean and mail
+		// nothing.
+		{name: "display name", from: "DIYDDNS <noreply@example.com>"},
+		{name: "multi-word display name", from: "DIYDDNS Alerts <noreply@example.com>"},
+		{name: "quoted display name", from: `"DIYDDNS" <noreply@example.com>`, wantErr: true},
+		{name: "comma in display name", from: "DIYDDNS, Inc <noreply@example.com>", wantErr: true},
+		{name: "non-ascii display name", from: "Nöreply <noreply@example.com>", wantErr: true},
+		{name: "double space before address", from: "DIYDDNS  <noreply@example.com>", wantErr: true},
+		{name: "no space before address", from: "DIYDDNS<noreply@example.com>", wantErr: true},
+		{name: "display name with dot-less domain", from: "DIYDDNS <noreply@localhost>", wantErr: true},
 		{name: "trailing space", from: "noreply@example.com ", wantErr: true},
 		{name: "quoted local part", from: `"john doe"@example.com`, wantErr: true},
 
@@ -647,11 +657,12 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 				t.Fatalf("config rejected %q = %v, want %v (err=%v)", tt.from, gotRejected, tt.wantErr, err)
 			}
 			// The email package must agree, decision for decision. This is the
-			// check that actually matters: NormalizeAddress is what the send
-			// path applies, so if config accepts something it rejects, that
-			// deployment boots clean and sends nothing.
-			normalized, normErr := email.NormalizeAddress(tt.from)
-			emailRejects := normErr != nil || normalized != tt.from || !email.IsRoutableFrom(tt.from)
+			// check that actually matters: SplitFrom is exactly what the send
+			// path (checkSendable) applies to From, so if config accepts
+			// something it rejects, that deployment boots clean and sends
+			// nothing.
+			_, _, splitErr := email.SplitFrom(tt.from)
+			emailRejects := splitErr != nil
 			if emailRejects != tt.wantErr {
 				t.Errorf("internal/email %s %q but config %s it — the two sides have diverged",
 					map[bool]string{true: "rejects", false: "accepts"}[emailRejects], tt.from,

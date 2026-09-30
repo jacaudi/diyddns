@@ -475,16 +475,25 @@ func isRoutableFrom(addr string) bool {
 
 var routableFromRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
-// validateFromAddress enforces route 4 (#80) plus the transport's own From
-// rule. It MUST accept exactly what internal/email's send-path check
-// (checkSendable, via checkAddress) accepts, and nothing more: 7-bit, bare
-// addr-spec form, and routable by the transport.
-//
-// The bare-form clause is kept even though the transport would now parse a
-// display name: the boundary and the send path apply one predicate, and
-// widening it is its own change (see the design's follow-ups). The routable
-// clause is new with #129: unraid/apprise-go refuses a From whose domain has
-// no dot ("invalid from email") before anything reaches the wire.
+// displayNameRe deliberately duplicates internal/email's (validate.go), for
+// the reason isASCII duplicates email.IsASCII: internal/config cannot import
+// internal/email. It is one or more RFC 5322 atext words separated by single
+// spaces, the display names the transport writes UNQUOTED into the From
+// header and still produces a well-formed header. Interpreted string, not
+// raw: the pattern contains a backtick.
+var displayNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+( [A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$")
+
+// fromFormErr is the error for an email.from that parses but is in neither
+// accepted form. The accepted symbol set is not spelled out because it
+// contains a backtick; docs/email.md lists it.
+const fromFormErr = `config: email.from must be a bare address or "Name <address>" with a plain ASCII name (letters, digits and simple symbols, words separated by single spaces; no quotes, commas or dots), e.g. "DIYDDNS <diyddns@example.com>", got %q`
+
+// validateFromAddress enforces route 4 (#80), the transport's own From rule,
+// and #94's display-name form. It MUST accept exactly what internal/email's
+// send-path check (checkSendable, via SplitFrom) accepts, and nothing more:
+// a bare address that is 7-bit, canonical and routable, or `Name <address>`
+// with a displayNameRe name, written exactly that way, around such an address.
+// #94 widened it from bare-only, in lockstep with email.SplitFrom.
 //
 // If this check and internal/email's diverge, a From accepted at startup is
 // rejected at send and the deployment sends NOTHING while booting clean — the
@@ -495,14 +504,26 @@ func validateFromAddress(from string) error {
 	if err != nil {
 		return fmt.Errorf("config: email.from is not a valid address: %w", err)
 	}
-	if !isASCII(addr.Address) {
-		return fmt.Errorf(`config: email.from must be 7-bit ASCII (outbound messages declare 7bit and cannot carry it), got %q`, from)
+	if addr.Name == "" {
+		return validateBareFrom(from, addr.Address)
 	}
-	if addr.Address != from {
-		return fmt.Errorf(`config: email.from must be a bare address with no display name or surrounding whitespace, e.g. %q rather than %q`, addr.Address, from)
+	if !isASCII(addr.Name) || !displayNameRe.MatchString(addr.Name) || from != addr.Name+" <"+addr.Address+">" {
+		return fmt.Errorf(fromFormErr, from)
 	}
-	if !isRoutableFrom(from) {
-		return fmt.Errorf(`config: email.from must be a bare address whose domain contains a dot, as the transport requires ("diyddns@localhost" is refused; use the domain your MTA accepts mail from, e.g. "diyddns@example.com"), got %q`, from)
+	return validateBareFrom(addr.Address, addr.Address)
+}
+
+// validateBareFrom applies the bare-address rules to raw, whose parsed
+// addr-spec is parsed: 7-bit, already canonical, routable by the transport.
+func validateBareFrom(raw, parsed string) error {
+	if !isASCII(parsed) {
+		return fmt.Errorf(`config: email.from must be 7-bit ASCII (outbound messages declare 7bit and cannot carry it), got %q`, raw)
+	}
+	if parsed != raw {
+		return fmt.Errorf(fromFormErr, raw)
+	}
+	if !isRoutableFrom(raw) {
+		return fmt.Errorf(`config: email.from must be a bare address whose domain contains a dot, as the transport requires ("diyddns@localhost" is refused; use the domain your MTA accepts mail from, e.g. "diyddns@example.com"), got %q`, raw)
 	}
 	return nil
 }

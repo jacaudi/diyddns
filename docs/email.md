@@ -23,7 +23,7 @@ not necessarily the final outcome (see
 | `email.port` | `DIYDDNS_EMAIL_PORT` | **required** when enabled — 587 starttls · 465 implicit · 25 none |
 | `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH; set it together with `email.password` or not at all; with `tls: none` refuses to start (see below). No leading or trailing whitespace |
 | `email.password` | `DIYDDNS_EMAIL_PASSWORD` | never logged; set it together with `email.username` or not at all. No leading or trailing whitespace |
-| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — envelope sender; a bare address with a dotted domain (`diyddns@example.com`, not `diyddns@localhost`) |
+| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — sender; a bare address with a dotted domain (`diyddns@example.com`, not `diyddns@localhost`), or the same behind a display name: `DIYDDNS <diyddns@example.com>`. The name is ASCII letters, digits and ``!#$%&'*+-/=?^_`{\|}~``, words separated by single spaces; no quotes, commas or dots. The envelope always uses the bare address |
 | `email.tls` | `DIYDDNS_EMAIL_TLS` | `starttls` (default), `implicit`, or `none` |
 
 Enabling email **requires `server.base_url`, `email.host`, `email.port` and `email.from`**; the

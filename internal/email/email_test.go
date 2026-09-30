@@ -850,3 +850,27 @@ func TestDeviceStateChangedByAdminBody(t *testing.T) {
 		t.Errorf("enabled body must not say rejected:\n%s", body)
 	}
 }
+
+// TestMailer_Send_DisplayNameFrom is #94 on the wire: the envelope sender is
+// the bare address, and the From header carries the display name.
+func TestMailer_Send_DisplayNameFrom(t *testing.T) {
+	verifyNoLeak(t)
+	host, port, envelopes := startFakeSMTP(t)
+	cfg := config.EmailSection{Enabled: true, Host: host, Port: port, From: "DIYDDNS Alerts <noreply@example.com>", TLS: "none"}
+	m := email.New(cfg, debugLogger())
+
+	if err := m.Send(t.Context(), "user@example.com", "your recovery link", "click here"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	env := <-envelopes
+	if env.from != "<noreply@example.com>" {
+		t.Errorf("MAIL FROM = %q, want <noreply@example.com>", env.from)
+	}
+	msg, err := mail.ReadMessage(strings.NewReader(env.data))
+	if err != nil {
+		t.Fatalf("parse captured message: %v\n%s", err, env.data)
+	}
+	if got := msg.Header.Get("From"); got != "DIYDDNS Alerts <noreply@example.com>" {
+		t.Errorf("From header = %q, want %q", got, "DIYDDNS Alerts <noreply@example.com>")
+	}
+}

@@ -34,7 +34,7 @@ func TestAdminInviteIsEmailed(t *testing.T) {
 		"DIYDDNS_EMAIL_ENABLED=true",
 		"DIYDDNS_EMAIL_HOST="+host,
 		"DIYDDNS_EMAIL_PORT="+strconv.Itoa(port),
-		"DIYDDNS_EMAIL_FROM=diyddns@x.test",
+		"DIYDDNS_EMAIL_FROM=DIYDDNS Alerts <diyddns@x.test>", // #94: a display name, end to end
 		"DIYDDNS_EMAIL_TLS=none",
 	)
 	waitHealthy(t, baseURL)
@@ -73,6 +73,11 @@ func TestAdminInviteIsEmailed(t *testing.T) {
 		// preventing exactly that is why email.enabled requires base_url.
 		if !strings.Contains(env.data, baseURL+"/register?token=") {
 			t.Errorf("email body carries no absolute registration link:\n%s", env.data)
+		}
+		// #94: a display-name email.from boots the real binary and reaches the
+		// wire as the From header, through the real transport.
+		if !strings.Contains(env.data, "From: DIYDDNS Alerts <diyddns@x.test>") {
+			t.Errorf("From header does not carry the display name:\n%s", env.data)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatalf("no email arrived within 30s\n--- server log ---\n%s", srv.log())
