@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/jacaudi/diyddns/compare/v1.0.0...v1.1.0) (2026-09-30)
+
+
+### Features
+
+* **auth:** invite lifecycle — registration link TTL (default now 15m, was 1h), registration status, re-invite ([#181](https://github.com/jacaudi/diyddns/issues/181)) ([bcf96f6](https://github.com/jacaudi/diyddns/commit/bcf96f684179411e25f1da2aacf919103c3c51ee))
+
 ## [1.0.0](https://github.com/jacaudi/diyddns/compare/v0.6.0...v1.0.0) (2026-09-21)
 
 
