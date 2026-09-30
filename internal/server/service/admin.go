@@ -168,7 +168,7 @@ func (s *AdminService) UpdateUser(ctx context.Context, actorID, targetID string,
 		return store.User{}, fmt.Errorf("service.UpdateUser: %w", err)
 	}
 
-	if err := s.applyRole(ctx, actorID, targetID, u, p); err != nil {
+	if err := s.applyRole(ctx, actorID, targetID, p); err != nil {
 		return store.User{}, fmt.Errorf("service.UpdateUser: %w", err)
 	}
 	if err := s.applyDisabled(ctx, actorID, targetID, u, p); err != nil {
@@ -212,15 +212,14 @@ func (s *AdminService) guardUpdateUser(ctx context.Context, actorID, targetID st
 	return nil
 }
 
-// applyRole writes the role change via Update (which writes all mutable
-// columns) and audits it. u is the target's pre-update row, mutated in place
-// before the write.
-func (s *AdminService) applyRole(ctx context.Context, actorID, targetID string, u store.User, p UpdateUserParams) error {
+// applyRole writes the role change via SetRole and audits it. It writes only
+// the role column: writing back the row UpdateUser read before its guards
+// ran would revert any concurrent disable or email change (#182).
+func (s *AdminService) applyRole(ctx context.Context, actorID, targetID string, p UpdateUserParams) error {
 	if p.Role == nil {
 		return nil
 	}
-	u.Role = *p.Role
-	if err := s.st.Users().Update(ctx, u); err != nil {
+	if err := s.st.Users().SetRole(ctx, targetID, *p.Role); err != nil {
 		return err
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: actorID, EventType: "user.role_change", TargetType: "user", TargetID: targetID})

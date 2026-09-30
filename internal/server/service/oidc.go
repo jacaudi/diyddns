@@ -107,7 +107,7 @@ func (s *OIDCService) LoginOrLink(ctx context.Context, issuer, subject, email st
 // row created before the boundary validations existed that is a repair, not a
 // no-op: a display-name-form address is rejected by email.checkSendable, so
 // such a user receives no invite and no recovery mail until it is rewritten.
-// It costs nothing — the same Update already runs to store the OIDC identity.
+// It costs nothing — the same LinkOIDC write already stores the OIDC identity.
 func (s *OIDCService) linkExisting(ctx context.Context, existing store.User, issuer, subject, canonical string, emailVerified bool) (store.User, error) {
 	if !emailVerified || !s.cfg.AutoLinkByEmail {
 		return store.User{}, s.reject(ctx, "email exists but the claim is unverified or auto-link is off")
@@ -115,12 +115,20 @@ func (s *OIDCService) linkExisting(ctx context.Context, existing store.User, iss
 	if existing.Role == "admin" || existing.OIDCSubject != "" {
 		return store.User{}, s.reject(ctx, "email matches admin or already-linked account") // never auto-link admins or already-linked accounts
 	}
+	// LinkOIDC writes only the identity columns, and only while the row still
+	// matches what the guard above read — address, role, unlinked (#182).
+	// Writing existing back whole would undo a concurrent disable or email
+	// change; skipping the compare would let a promotion racing this login
+	// auto-link an admin. If the row moved under us, reject uniformly.
+	if err := s.st.Users().LinkOIDC(ctx, existing, canonical, issuer, subject); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return store.User{}, s.reject(ctx, "account changed while linking")
+		}
+		return store.User{}, fmt.Errorf("service.linkExisting: %w", err)
+	}
 	existing.Email = canonical
 	existing.OIDCProvider = issuer
 	existing.OIDCSubject = subject
-	if err := s.st.Users().Update(ctx, existing); err != nil {
-		return store.User{}, fmt.Errorf("service.linkExisting: %w", err)
-	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: existing.ID, EventType: "user.oidc.linked", TargetType: "user", TargetID: existing.ID})
 	return existing, nil
 }
