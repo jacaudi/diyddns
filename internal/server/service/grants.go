@@ -330,10 +330,14 @@ func (s *GrantService) IssueInvite(ctx context.Context, actorID string, u store.
 // (#82).
 //
 // The Delivery contract is IssueInvite's: a nil error means the link is valid
-// and the caller MUST present it, whatever Delivery reports.
+// and the caller MUST present it, whatever Delivery reports. The mail goes to
+// the address current after the mint, not u's (see recipientAfterMint).
 //
 // If the delete succeeds and the mint fails, the account is left with no live
 // link and reads link_expired; the caller shows the error and a retry is safe.
+// If re-reading the account after the mint fails, the grant is live but
+// nobody holds it, so the account reads as having a pending link; a retry
+// replaces it.
 func (s *GrantService) ReissueInvite(ctx context.Context, actorID string, u store.User) (string, int64, Delivery, error) {
 	if s.passkeys == nil {
 		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", ErrWebAuthnUnavailable)
@@ -366,7 +370,11 @@ func (s *GrantService) ReissueInvite(ctx context.Context, actorID string, u stor
 		ActorUserID: actorID, EventType: "passkey.invite_issued",
 		TargetType: "user", TargetID: u.ID,
 	})
-	if u.Disabled {
+	cur, err := s.recipientAfterMint(ctx, u.ID)
+	if err != nil {
+		return "", 0, Delivery{}, fmt.Errorf("service.ReissueInvite: %w", err)
+	}
+	if cur.Disabled {
 		return link, expiresAt, Delivery{Suppressed: SuppressUserDisabled}, nil
 	}
 	expiresIn := email.FormatDuration(s.linkTTL)
@@ -374,7 +382,28 @@ func (s *GrantService) ReissueInvite(ctx context.Context, actorID string, u stor
 	if len(handle) > 0 {
 		subject, body = email.ReRegistrationLinkBody(link, expiresIn)
 	}
-	return link, expiresAt, s.deliver(ctx, actorID, u, subject, body), nil
+	return link, expiresAt, s.deliver(ctx, actorID, cur, subject, body), nil
+}
+
+// recipientAfterMint re-reads the account a freshly minted grant belongs to,
+// so the link is mailed to the address current NOW rather than the one on the
+// caller's copy (#131 D8: a live link must never reach an address that has
+// stopped speaking for the account).
+//
+// It must run AFTER the mint. Every email change applied through
+// EmailChangeService saves the new address and then deletes every unused
+// grant (applyChanged), so for any interleaving with such a change: if it
+// landed before this read, the mail goes to the new address; if it lands
+// after, it also lands after the mint, and its delete kills the link — the
+// old address can only ever receive a dead one (barring a failed delete,
+// which applyChanged logs and which degrades to the link TTL). Reading
+// before the mint would leave a window where neither holds.
+func (s *GrantService) recipientAfterMint(ctx context.Context, userID string) (store.User, error) {
+	cur, err := s.st.Users().GetByID(ctx, userID)
+	if err != nil {
+		return store.User{}, fmt.Errorf("recipientAfterMint: %w", err)
+	}
+	return cur, nil
 }
 
 // mintRecoveryGrant creates a single-use "recovery" grant for userID and
@@ -412,8 +441,10 @@ func (s *GrantService) mintRecoveryGrant(ctx context.Context, actorID, userID st
 //
 // It emails the link to u when the mailer is enabled AND u is not disabled;
 // a disabled u still gets the link minted and returned, just not mailed (#82
-// below). The returned Delivery is advisory: a non-nil error means nothing
-// was minted and nothing was sent, and a nil error means the link is valid
+// below). The returned Delivery is advisory: a non-nil error means no link
+// is returned and nothing was sent (a failure re-reading the account after
+// the mint — recipientAfterMint — can leave a minted grant nobody holds; the
+// admin issues another), and a nil error means the link is valid
 // and the caller MUST present it, whatever Delivery reports. A send failure
 // is never this function's error — u's passkeys are already revoked by then,
 // so the on-screen link is the only thing standing between u and a permanent
@@ -444,6 +475,11 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	if err != nil {
 		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
 	}
+	// Mail the address current after the mint, not u's (see recipientAfterMint).
+	cur, err := s.recipientAfterMint(ctx, u.ID)
+	if err != nil {
+		return "", Delivery{}, fmt.Errorf("service.IssueRecovery: %w", err)
+	}
 	// #82: a disabled account cannot sign in (service/passkey.go:240,
 	// auth/session.go:86), so emailing it a registration link invites the user
 	// into a flow that cannot succeed. Mint and reveal exactly as before, but
@@ -457,14 +493,14 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	// The revoke above is unchanged and that is accepted: today the same
 	// DeleteAllByUser happens AND a useless email goes out. Revocation is not
 	// part of what #82 changes.
-	if u.Disabled {
+	if cur.Disabled {
 		return link, Delivery{Suppressed: SuppressUserDisabled}, nil
 	}
 	// AdminRecoveryLinkBody, not RecoveryLinkBody: the self-service body says the
 	// link "was requested" and can be "safely ignored", and both are false here —
 	// DeleteAllByUser above has already locked the user out.
 	subject, body := email.AdminRecoveryLinkBody(link, email.FormatDuration(s.linkTTL))
-	return link, s.deliver(ctx, actorID, u, subject, body), nil
+	return link, s.deliver(ctx, actorID, cur, subject, body), nil
 }
 
 // selfServiceRecoveryTimeout bounds the detached goroutine
