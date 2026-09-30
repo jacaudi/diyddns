@@ -251,7 +251,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	mailer := email.New(cfg.Email, log)
 	sw := buildSweeper(cfg, st, fan, mailer, log)
 
-	grantSvc := service.NewGrantService(st, passkeySvc, mailer, cfg.Server.BaseURL, audit, log)
+	grantSvc := service.NewGrantService(st, passkeySvc, mailer, cfg.Server.BaseURL, audit, log, cfg.Auth.RegistrationLinkTTL)
 
 	// #131: one construction site for every path that changes an address.
 	// Built after the mailer (it sends the confirmation and notices) and before

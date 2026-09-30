@@ -26,7 +26,7 @@ func TestAdminUserEmail_SetsImmediatelyAndShowsNotice(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (rendered in-response so the notice can show); body=%s", rec.Code, body)
 	}
-	if !strings.Contains(body, "Address changed. The previous address was notified.") || !strings.Contains(body, "issue a recovery link below") {
+	if !strings.Contains(body, "Address changed. The previous address was notified.") || !strings.Contains(body, "send it a new registration link from the Registration card below") {
 		t.Errorf("notice missing or wrong:\n%s", body)
 	}
 	if !strings.Contains(body, "<h1>new@example.com</h1>") {
@@ -44,6 +44,31 @@ func TestAdminUserEmail_SetsImmediatelyAndShowsNotice(t *testing.T) {
 	}
 	if len(page.Rows) != 1 || page.Rows[0].ActorUserID != admin.ID {
 		t.Errorf("audit rows = %+v, want one by the admin", page.Rows)
+	}
+}
+
+// TestAdminUserEmail_RegisteredTargetOmitsRegistrationCardHint covers the
+// Registration card hint being gated on the card actually being shown: the
+// card renders only for an unregistered target (admin-user.html:41), so a
+// registered target's notice must not point at it.
+func TestAdminUserEmail_RegisteredTargetOmitsRegistrationCardHint(t *testing.T) {
+	deps, st := testDeps(t)
+	mailer := &recordingMailer{}
+	deps.EmailChange = service.NewEmailChangeService(st, mailer, deps.Cfg.Server.BaseURL, service.NewAuditWriter(st), deps.Log)
+	h, _ := New(deps)
+	admin := seedUser(t, st, "admin@example.com", "admin")
+	target := seedUser(t, st, "old2@example.com", "user")
+	seedPasskey(t, st, target.ID, "k")
+	cookie := signIn(t, deps, admin)
+	sess := sessionFor(t, deps, cookie)
+
+	rec := postForm(t, h, cookie, "/admin/users/"+target.ID+"/email", url.Values{"csrf": {sess.CSRFToken}, "email": {"new2@example.com"}})
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, body)
+	}
+	if strings.Contains(body, "Registration card") {
+		t.Errorf("registered target's notice points at the Registration card, which is hidden for it:\n%s", body)
 	}
 }
 

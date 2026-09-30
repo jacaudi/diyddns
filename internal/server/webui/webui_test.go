@@ -67,7 +67,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log)
+	grants := service.NewGrantService(st, passkeys, nil, cfg.Server.BaseURL, audit, log, 15*time.Minute)
 	apiKeys := service.NewAPIKeyService(st, audit)
 
 	// allowed (nil = no private destinations, the same "empty allow-list"
@@ -2209,7 +2209,7 @@ func TestAdminUserInvite_FailureSaysTheAccountMayExist(t *testing.T) {
 	if strings.Contains(body, "Please try again.") {
 		t.Error("the invite failure page says \"try again\" — a retry hits a duplicate-email conflict")
 	}
-	for _, want := range []string{"may already have been created", "recovery link"} {
+	for _, want := range []string{"may already have been created", "new registration link"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("invite failure page missing %q:\n%s", want, body)
 		}
@@ -2876,7 +2876,7 @@ func TestAdminUserInvite_RevealsLinkOnce(t *testing.T) {
 			rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"/register?token=", "Shown once", "one hour"} {
+	for _, want := range []string{"/register?token=", "Shown once", "15 minutes"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("invite reveal missing %q", want)
 		}
@@ -2910,7 +2910,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log)
+	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log, 15*time.Minute)
 	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
@@ -3210,7 +3210,7 @@ func TestAdminUserRecovery_RevokesPasskeysAndRevealsLink(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"https://ddns.test/register?token=", "revoked", "one hour"} {
+	for _, want := range []string{"https://ddns.test/register?token=", "revoked", "15 minutes"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("recovery reveal missing %q", want)
 		}
@@ -3558,7 +3558,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log)
+	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log, 15*time.Minute)
 	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
@@ -3642,7 +3642,7 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
-	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log)
+	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log, 15*time.Minute)
 	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 

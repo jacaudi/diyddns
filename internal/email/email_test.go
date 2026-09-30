@@ -463,7 +463,7 @@ func TestMailer_Send_RespectsCanceledContext(t *testing.T) {
 
 func TestRecoveryLinkBody_ContainsLink(t *testing.T) {
 	const link = "https://ddns.example.com/recover/abc123"
-	subject, body := email.RecoveryLinkBody(link)
+	subject, body := email.RecoveryLinkBody(link, "15 minutes")
 	if subject == "" {
 		t.Error("subject is empty")
 	}
@@ -527,7 +527,7 @@ func TestMailer_Send_StalledServerHonorsContextDeadline(t *testing.T) {
 }
 
 func TestInviteLinkBody(t *testing.T) {
-	subject, body := email.InviteLinkBody("https://d.example.com/register?token=abc")
+	subject, body := email.InviteLinkBody("https://d.example.com/register?token=abc", "15 minutes")
 	if subject == "" {
 		t.Error("InviteLinkBody: empty subject")
 	}
@@ -541,7 +541,7 @@ func TestInviteLinkBody(t *testing.T) {
 // "safely ignored" — both false when an admin has already revoked every passkey
 // on the account, which is exactly when this body is sent.
 func TestAdminRecoveryLinkBody_DoesNotTellUserToIgnoreIt(t *testing.T) {
-	subject, body := email.AdminRecoveryLinkBody("https://d.example.com/register?token=xyz")
+	subject, body := email.AdminRecoveryLinkBody("https://d.example.com/register?token=xyz", "15 minutes")
 	if subject == "" {
 		t.Error("AdminRecoveryLinkBody: empty subject")
 	}
@@ -690,7 +690,7 @@ func TestMailer_Send_LongLinkSurvivesQuotedPrintable(t *testing.T) {
 	m := email.New(cfg, debugLogger())
 
 	const link = "https://ddns.example.com/register?token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
-	subject, body := email.InviteLinkBody(link)
+	subject, body := email.InviteLinkBody(link, "15 minutes")
 	if err := m.Send(t.Context(), "user@example.com", subject, body); err != nil {
 		t.Fatalf("Send: %v", err)
 	}

@@ -110,7 +110,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	mailer := fakeMailer{}
-	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log)
+	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log, 15*time.Minute)
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
 	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
 	feedSvc := service.NewFeedService(st, feed.New(), discardAgentAudit{})

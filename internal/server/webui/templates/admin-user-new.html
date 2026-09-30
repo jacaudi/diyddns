@@ -8,7 +8,7 @@
     <div class="callout warn">
       <strong>⚠ Shown once</strong>
       This registration link is displayed a single time. Send it to the user out of band.
-      It expires in one hour and can be redeemed once.
+      It expires in {{.LinkTTL}} and can be redeemed once.
     </div>
     {{template "errorBanner" .LinkWarning}}
     <div class="field">

@@ -15,7 +15,7 @@
 <div class="card">
   <div class="table-wrap">
     <table class="grid-table responsive">
-      <thead><tr><th>Email</th><th>Role</th><th>State</th><th>Auth</th><th></th></tr></thead>
+      <thead><tr><th>Email</th><th>Role</th><th>State</th><th>Registration</th><th>Auth</th><th></th></tr></thead>
       <tbody>
         {{range .Users}}
         <tr>
@@ -23,6 +23,7 @@
             {{if .IsSelf}}<span class="muted">(you)</span>{{end}}</td>
           <td data-label="Role"><span class="tag {{if eq .Role "admin"}}accent{{else}}neutral{{end}} role-badge">{{.Role}}</span></td>
           <td data-label="State">{{if .Disabled}}<span class="tag danger">Disabled</span>{{else}}<span class="tag ok">Active</span>{{end}}</td>
+          <td data-label="Registration"><span class="tag {{.RegistrationTag}}">{{.Registration}}</span></td>
           <td data-label="Auth"><span class="muted">{{.Auth}}</span></td>
           <td class="actions">
             <form method="post" action="/admin/users/{{.ID}}/enabled">

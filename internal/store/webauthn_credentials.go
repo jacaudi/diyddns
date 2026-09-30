@@ -203,3 +203,30 @@ func (r *WebAuthnCredentialRepo) CountWebAuthnCredentials(ctx context.Context, u
 	}
 	return n, nil
 }
+
+// CountAllByUser returns the number of WebAuthn credentials per user, in one
+// query, for the admin users list's registration status (#177). A user with
+// no credentials is absent from the map; read it as zero.
+func (r *WebAuthnCredentialRepo) CountAllByUser(ctx context.Context) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT user_id, COUNT(*) FROM webauthn_credentials GROUP BY user_id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn_credentials.CountAllByUser: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var userID string
+		var n int
+		if err := rows.Scan(&userID, &n); err != nil {
+			return nil, fmt.Errorf("webauthn_credentials.CountAllByUser: scan: %w", err)
+		}
+		counts[userID] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webauthn_credentials.CountAllByUser: rows: %w", err)
+	}
+	return counts, nil
+}

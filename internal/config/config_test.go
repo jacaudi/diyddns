@@ -1273,3 +1273,60 @@ func TestLoad_FeedExpireEnvBinding(t *testing.T) {
 		t.Fatalf("ExpireAfterDays = %d, want 30 from env", got)
 	}
 }
+
+// TestLoad_RegistrationLinkTTL covers #179: one key for every invite and
+// recovery link, default 15 minutes, env-bindable, and a floor of one minute.
+func TestLoad_RegistrationLinkTTL(t *testing.T) {
+	t.Run("default is 15m", func(t *testing.T) {
+		cfg := mustLoadWithDB(t)
+		if cfg.Auth.RegistrationLinkTTL != 15*time.Minute {
+			t.Errorf("RegistrationLinkTTL = %v, want 15m", cfg.Auth.RegistrationLinkTTL)
+		}
+	})
+	t.Run("env var binds", func(t *testing.T) {
+		t.Setenv("DIYDDNS_AUTH_REGISTRATION_LINK_TTL", "1h")
+		cfg := mustLoadWithDB(t)
+		if cfg.Auth.RegistrationLinkTTL != time.Hour {
+			t.Errorf("RegistrationLinkTTL = %v, want 1h (env var DIYDDNS_AUTH_REGISTRATION_LINK_TTL was dropped)", cfg.Auth.RegistrationLinkTTL)
+		}
+	})
+	for _, bad := range []string{"0s", "-5m", "30s", "59s"} {
+		t.Run("rejects "+bad, func(t *testing.T) {
+			t.Setenv("DIYDDNS_AUTH_REGISTRATION_LINK_TTL", bad)
+			_, err := loadWithDB(t)
+			if err == nil {
+				t.Fatalf("Load accepted registration_link_ttl=%s, want an error", bad)
+			}
+			if !strings.Contains(err.Error(), "auth.registration_link_ttl") {
+				t.Errorf("error %q does not name the key", err)
+			}
+		})
+	}
+	t.Run("accepts exactly 1m", func(t *testing.T) {
+		t.Setenv("DIYDDNS_AUTH_REGISTRATION_LINK_TTL", "1m")
+		cfg := mustLoadWithDB(t)
+		if cfg.Auth.RegistrationLinkTTL != time.Minute {
+			t.Errorf("RegistrationLinkTTL = %v, want 1m", cfg.Auth.RegistrationLinkTTL)
+		}
+	})
+}
+
+// TestLoad_RegistrationLinkTTL_BareYAMLIntegerIsRejected pins the design
+// gate's B1 finding: viper decodes a unit-less YAML integer as NANOSECONDS,
+// so "900" (meant as seconds) would mint links that are dead on arrival.
+// The one-minute floor turns that into a startup failure naming the key.
+func TestLoad_RegistrationLinkTTL_BareYAMLIntegerIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	yaml := "database:\n  path: \"/tmp/x.db\"\nauth:\n  registration_link_ttl: 900\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.Load(viper.New(), path)
+	if err == nil {
+		t.Fatal("Load accepted a bare integer registration_link_ttl (900ns), want an error")
+	}
+	if !strings.Contains(err.Error(), "auth.registration_link_ttl") || !strings.Contains(err.Error(), "unit") {
+		t.Errorf("error %q must name the key and say a unit is required", err)
+	}
+}

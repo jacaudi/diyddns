@@ -117,6 +117,10 @@ type Auth struct {
 	OIDC             OIDCCfg
 	WebAuthn         WebAuthnCfg
 	HideLocalLoginUI bool `mapstructure:"hide_local_login_ui"`
+	// RegistrationLinkTTL is how long an admin invite or passkey-recovery
+	// link stays redeemable after it is issued (#179). validateAuth enforces
+	// a one-minute floor.
+	RegistrationLinkTTL time.Duration `mapstructure:"registration_link_ttl"`
 }
 
 // SessionCfg holds browser session cookie settings.
@@ -237,6 +241,7 @@ var keyDefaults = map[string]any{
 	"auth.webauthn.rp_display_name":          "DIYDDNS",
 	"auth.webauthn.timeout":                  "120s",
 	"auth.hide_local_login_ui":               false,
+	"auth.registration_link_ttl":             "15m",
 	"email.enabled":                          false,
 	"email.host":                             "",
 	"email.port":                             0,
@@ -340,9 +345,8 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 	if cfg.Database.Path == "" {
 		return Server{}, fmt.Errorf("config: database.path is required")
 	}
-	if cfg.Auth.HMAC.NonceTTL < cfg.Auth.HMAC.SkewWindow {
-		return Server{}, fmt.Errorf("config: auth.hmac.nonce_ttl (%s) must be >= auth.hmac.skew_window (%s)",
-			cfg.Auth.HMAC.NonceTTL, cfg.Auth.HMAC.SkewWindow)
+	if err := validateAuth(cfg); err != nil {
+		return Server{}, err
 	}
 	if err := validateOIDC(cfg); err != nil {
 		return Server{}, err
@@ -363,6 +367,28 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 		return Server{}, err
 	}
 	return cfg, nil
+}
+
+// validateAuth enforces the auth.* invariants that are not OIDC's. Extracted
+// from Load to keep Load's cyclomatic complexity under the project's gocyclo
+// threshold (.golangci.yml, min-complexity: 15): Load was at 15, and adding
+// the registration-link TTL check inline (#179) would have made it 16.
+//
+// The TTL floor is one minute. Anything shorter mints links that are dead or
+// nearly dead on arrival, and admin recovery revokes every passkey BEFORE it
+// mints, so a dead link locks the user out. The realistic way to get there is
+// a unit-less YAML value: viper decodes "registration_link_ttl: 900" as 900
+// nanoseconds, with no error.
+func validateAuth(cfg Server) error {
+	if cfg.Auth.HMAC.NonceTTL < cfg.Auth.HMAC.SkewWindow {
+		return fmt.Errorf("config: auth.hmac.nonce_ttl (%s) must be >= auth.hmac.skew_window (%s)",
+			cfg.Auth.HMAC.NonceTTL, cfg.Auth.HMAC.SkewWindow)
+	}
+	if cfg.Auth.RegistrationLinkTTL < time.Minute {
+		return fmt.Errorf("config: auth.registration_link_ttl (%s) must be at least 1m; give it a unit, "+
+			"e.g. \"15m\" or \"1h\" (a bare number is read as nanoseconds)", cfg.Auth.RegistrationLinkTTL)
+	}
+	return nil
 }
 
 // validateOIDC enforces the auth.oidc.* invariants when OIDC is enabled.

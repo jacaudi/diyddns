@@ -180,6 +180,12 @@ func (r *UserRepo) GetByOIDC(ctx context.Context, provider, subject string) (Use
 
 // Update modifies all mutable columns for the given user.
 // Returns ErrNotFound if no row matched, ErrConflict on UNIQUE violation.
+//
+// Production code must not call it (#182). It writes every column from u, so
+// handed a row read earlier in a request it silently reverts any concurrent
+// write to another column — including an admin's disable or email change.
+// Use the column-specific writers instead: SetRole, SetDisabled, SetEmail,
+// LinkOIDC. It remains for tests that set up a row's state in one call.
 func (r *UserRepo) Update(ctx context.Context, u User) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE users
@@ -207,6 +213,56 @@ func (r *UserRepo) Update(ctx context.Context, u User) error {
 	}
 	if n == 0 {
 		return fmt.Errorf("users.Update: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// SetRole writes only the role column (#182: never write back a whole row).
+// Returns ErrNotFound if no row matched.
+func (r *UserRepo) SetRole(ctx context.Context, id, role string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET role = ?, updated_at = ? WHERE id = ?`,
+		role, NowUnix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("users.SetRole: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("users.SetRole: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("users.SetRole: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// LinkOIDC links an OIDC identity to the account matched, and rewrites its
+// address to canonical, touching no other column. It is a compare-and-set
+// (#182) on everything the caller's link decision read from matched: it
+// applies only while the row still has matched's address and role and is not
+// yet linked. A concurrent email change, promotion (the caller refuses to
+// auto-link admins) or link therefore makes it refuse rather than overwrite.
+// Returns ErrConflict when that no longer holds, or when canonical or the
+// identity collides with another account.
+func (r *UserRepo) LinkOIDC(ctx context.Context, matched User, canonical, provider, subject string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET email = ?, oidc_provider = ?, oidc_subject = ?, updated_at = ?
+		  WHERE id = ? AND email = ? AND role = ? AND oidc_subject IS NULL`,
+		canonical, provider, subject, NowUnix(), matched.ID, matched.Email, matched.Role,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("users.LinkOIDC: %w", ErrConflict)
+		}
+		return fmt.Errorf("users.LinkOIDC: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("users.LinkOIDC: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("users.LinkOIDC: %w", ErrConflict)
 	}
 	return nil
 }

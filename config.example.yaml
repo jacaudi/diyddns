@@ -160,6 +160,13 @@ auth:
   # OIDC as the only offered path. The /login route still responds.
   hide_local_login_ui: false
 
+  # How long an admin invite or passkey-recovery link stays redeemable after
+  # it is issued. Default 15m; must be at least 1m. Always give a unit: write
+  # "15m" or "1h", never a bare number -- a bare YAML integer is read as
+  # nanoseconds and rejected at startup. Set "1h" to keep the previous
+  # one-hour window. Env: DIYDDNS_AUTH_REGISTRATION_LINK_TTL.
+  registration_link_ttl: "15m"
+
 
   oidc:
     # Single-provider OpenID Connect. Default false (disabled). When enabled,

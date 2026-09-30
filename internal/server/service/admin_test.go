@@ -42,7 +42,7 @@ func newAdminSvcWithMailer(t *testing.T, mailEnabled bool) (*store.Store, *Admin
 	st := openTestStore(t)
 	audit := NewAuditWriter(st)
 	m := &fakeMailer{enabled: mailEnabled}
-	grants := NewGrantService(st, nil, m, "https://ddns.example.com", audit, discardLogger())
+	grants := NewGrantService(st, nil, m, "https://ddns.example.com", audit, discardLogger(), testLinkTTL)
 	n := &recordingDeviceNotifier{}
 	return st, NewAdminService(st, audit, grants, n, m, discardLogger()), n, m
 }
@@ -55,7 +55,7 @@ func newAdminSvcWithPasskeys(t *testing.T) (*store.Store, *AdminService) {
 	st := openTestStore(t)
 	audit := NewAuditWriter(st)
 	passkeys := newTestPasskeyService(t, st, audit)
-	grants := NewGrantService(st, passkeys, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger())
+	grants := NewGrantService(st, passkeys, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger(), testLinkTTL)
 	return st, NewAdminService(st, audit, grants, NopDeviceNotifier{}, &fakeMailer{}, discardLogger())
 }
 

@@ -5,7 +5,7 @@ import (
 	"text/template"
 )
 
-// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl,
+// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl, reRegistrationTmpl,
 // emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl,
 // adminEmailChangedTmpl (#131, via ChangeConfirmBody, ChangeNoticeBody,
 // ChangedBody and AdminChangedBody) and the two device-state templates (#132,
@@ -21,7 +21,7 @@ import (
 // adminRecoveryTmpl (via AdminRecoveryLinkBody) instead.
 var recoveryTmpl = template.Must(template.New("recovery-link").Parse(
 	"A passkey recovery link was requested for your DIYDDNS account.\r\n\r\n" +
-		"Use the link below to add a new passkey. It expires shortly and can only be used once.\r\n\r\n" +
+		"Use the link below to add a new passkey. It expires in {{.ExpiresIn}} and can only be used once.\r\n\r\n" +
 		"{{.Link}}\r\n\r\n" +
 		"If you did not request this, you can safely ignore this email.\r\n",
 ))
@@ -34,7 +34,7 @@ var adminNotifyTmpl = template.Must(template.New("admin-notify").Parse(
 var inviteTmpl = template.Must(template.New("invite-link").Parse(
 	"An account has been created for you on DIYDDNS.\r\n\r\n" +
 		"Use the link below to finish setting it up by registering a passkey.\r\n" +
-		"It expires shortly and can only be used once.\r\n\r\n" +
+		"It expires in {{.ExpiresIn}} and can only be used once.\r\n\r\n" +
 		"{{.Link}}\r\n\r\n" +
 		"If you were not expecting this, contact the administrator who invited you.\r\n",
 ))
@@ -43,17 +43,31 @@ var adminRecoveryTmpl = template.Must(template.New("admin-recovery-link").Parse(
 	"An administrator has reset the passkeys on your DIYDDNS account.\r\n\r\n" +
 		"Every passkey on the account has already been revoked, so you cannot\r\n" +
 		"sign in until you register a new one. Use the link below to do that;\r\n" +
-		"it expires shortly and can only be used once.\r\n\r\n" +
+		"it expires in {{.ExpiresIn}} and can only be used once.\r\n\r\n" +
 		"{{.Link}}\r\n\r\n" +
 		"If you were not expecting this, contact your administrator. Do not\r\n" +
 		"disregard this message: your existing passkeys no longer work.\r\n",
 ))
 
+// reRegistrationTmpl is the body ReissueInvite sends to an account that HAD
+// registered a passkey and has none now (an admin revoked them), so "an account
+// has been created for you" would be false (#75, design D12).
+var reRegistrationTmpl = template.Must(template.New("re-registration-link").Parse(
+	"An administrator has sent you a new link to register a passkey on your\r\n" +
+		"DIYDDNS account. Any earlier registration link for this account no longer\r\n" +
+		"works.\r\n\r\n" +
+		"Use the link below to register a passkey. It expires in {{.ExpiresIn}} and\r\n" +
+		"can only be used once.\r\n\r\n" +
+		"{{.Link}}\r\n\r\n" +
+		"If you were not expecting this, contact your administrator.\r\n",
+))
+
 // RecoveryLinkBody renders the subject and body of the email sent to a user
 // who requested a passkey recovery link themselves. For an admin-issued
-// recovery link use AdminRecoveryLinkBody.
-func RecoveryLinkBody(link string) (subject, body string) {
-	return renderTemplate(recoveryTmpl, "DIYDDNS passkey recovery link", struct{ Link string }{Link: link})
+// recovery link use AdminRecoveryLinkBody. expiresIn is the link's lifetime,
+// already formatted by FormatDuration.
+func RecoveryLinkBody(link, expiresIn string) (subject, body string) {
+	return renderTemplate(recoveryTmpl, "DIYDDNS passkey recovery link", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
 }
 
 // AdminNotifyBody renders the subject and body of the email sent to
@@ -63,9 +77,10 @@ func AdminNotifyBody(userEmail string) (subject, body string) {
 }
 
 // InviteLinkBody renders the subject and body of the email sent to a user an
-// admin has just created an account for.
-func InviteLinkBody(link string) (subject, body string) {
-	return renderTemplate(inviteTmpl, "You have been invited to DIYDDNS", struct{ Link string }{Link: link})
+// admin has just created an account for. expiresIn is the link's lifetime,
+// already formatted by FormatDuration.
+func InviteLinkBody(link, expiresIn string) (subject, body string) {
+	return renderTemplate(inviteTmpl, "You have been invited to DIYDDNS", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
 }
 
 // AdminRecoveryLinkBody renders the subject and body of the email sent when an
@@ -73,8 +88,18 @@ func InviteLinkBody(link string) (subject, body string) {
 // that body says the link "was requested" and can be "safely ignored", and both
 // are false here — GrantService.IssueRecovery has already revoked every passkey
 // on the account, so disregarding this email leaves the user locked out.
-func AdminRecoveryLinkBody(link string) (subject, body string) {
-	return renderTemplate(adminRecoveryTmpl, "Your DIYDDNS passkeys were reset by an administrator", struct{ Link string }{Link: link})
+// expiresIn is the link's lifetime, already formatted by FormatDuration.
+func AdminRecoveryLinkBody(link, expiresIn string) (subject, body string) {
+	return renderTemplate(adminRecoveryTmpl, "Your DIYDDNS passkeys were reset by an administrator", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
+}
+
+// ReRegistrationLinkBody renders the subject and body of the email sent when an
+// admin sends a new registration link to an account that has registered a
+// passkey before (#75, design D12). A never-registered account gets
+// InviteLinkBody instead. expiresIn is the link's lifetime, already formatted by
+// FormatDuration.
+func ReRegistrationLinkBody(link, expiresIn string) (subject, body string) {
+	return renderTemplate(reRegistrationTmpl, "A new DIYDDNS registration link from your administrator", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
 }
 
 // The four #131 bodies. Every address interpolated below has passed

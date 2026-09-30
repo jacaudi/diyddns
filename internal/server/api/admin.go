@@ -15,8 +15,9 @@ import (
 // ---- user DTOs ----
 
 // adminUserView is an admin's view of a user account: includes role,
-// disabled state, and whether the account is linked to an OIDC identity —
-// keyed off OIDCSubject now that local passwords are gone (design I5).
+// disabled state, whether the account is linked to an OIDC identity —
+// keyed off OIDCSubject now that local passwords are gone (design I5) — and
+// its registration status (#177).
 type adminUserView struct {
 	ID         string `json:"id"`
 	Email      string `json:"email"`
@@ -25,13 +26,45 @@ type adminUserView struct {
 	OIDCLinked bool   `json:"oidc_linked"` // true = account is linked to an OIDC identity
 	CreatedAt  int64  `json:"created_at"`
 	UpdatedAt  int64  `json:"updated_at"`
+	// RegistrationStatus reports whether the account can sign in yet. The
+	// enum tag is OpenAPI documentation only — huma never validates response
+	// bodies — so AdminService.RegistrationStatuses returning an entry for
+	// every user is what keeps this value in range.
+	RegistrationStatus string `json:"registration_status" enum:"registered,invited,recovery_pending,link_expired"`
+	// RegistrationLinkExpiresAt is the unix second the outstanding link stops
+	// working; present only for invited and recovery_pending (design D14).
+	RegistrationLinkExpiresAt int64 `json:"registration_link_expires_at,omitempty"`
 }
 
-func newAdminUserView(u store.User) adminUserView {
+func newAdminUserView(u store.User, reg service.Registration) adminUserView {
 	return adminUserView{
 		ID: u.ID, Email: u.Email, Role: u.Role, Disabled: u.Disabled,
 		OIDCLinked: u.OIDCSubject != "", CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
+		RegistrationStatus: string(reg.Status), RegistrationLinkExpiresAt: reg.LinkExpiresAt,
 	}
+}
+
+// adminUserViews builds the admin view of each user with its registration
+// status, from one RegistrationStatuses call (design D5).
+func adminUserViews(ctx context.Context, deps ServerDeps, users []store.User) ([]adminUserView, error) {
+	regs, err := deps.Admin.RegistrationStatuses(ctx, users, store.NowUnix())
+	if err != nil {
+		return nil, err
+	}
+	views := make([]adminUserView, len(users))
+	for i, u := range users {
+		views[i] = newAdminUserView(u, regs[u.ID])
+	}
+	return views, nil
+}
+
+// adminUserViewFor is adminUserViews for one user.
+func adminUserViewFor(ctx context.Context, deps ServerDeps, u store.User) (adminUserView, error) {
+	views, err := adminUserViews(ctx, deps, []store.User{u})
+	if err != nil {
+		return adminUserView{}, err
+	}
+	return views[0], nil
 }
 
 type listUsersOutput struct{ Body []adminUserView }
@@ -142,6 +175,25 @@ type issueRecoveryResponse struct {
 }
 type issueRecoveryOutput struct{ Body issueRecoveryResponse }
 
+// reissueInviteInput carries the {id} path parameter of POST
+// /api/v1/admin/users/{id}/invite.
+type reissueInviteInput struct {
+	ID string `path:"id"`
+}
+
+// reissueInviteResponse is a fresh registration link for an account that
+// cannot sign in yet (#75). It is its own type, not issueRecoveryResponse, for
+// the reason that type gives: the payloads differ (this one carries the link's
+// expiry and the account's post-mint registration status) and are free to
+// diverge.
+type reissueInviteResponse struct {
+	Link      string        `json:"link"`
+	ExpiresAt int64         `json:"expires_at"`
+	Delivery  deliveryView  `json:"delivery"`
+	User      adminUserView `json:"user"`
+}
+type reissueInviteOutput struct{ Body reissueInviteResponse }
+
 // ---- admin devices DTO (adds user_id to the non-secret device view) ----
 
 // adminDeviceView embeds the owner-scoped deviceView and adds user_id — the
@@ -234,55 +286,19 @@ type serverInfoOutput struct{ Body serverInfoResponse }
 func registerAdminOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method: http.MethodGet, Path: "/api/v1/admin/users", Middlewares: adminReadMW(a, deps),
-	}, func(ctx context.Context, _ *struct{}) (*listUsersOutput, error) {
-		users, err := deps.Admin.ListUsers(ctx)
-		if err != nil {
-			return nil, adminErr(ctx, deps, "list users", err)
-		}
-		views := make([]adminUserView, len(users))
-		for i, u := range users {
-			views[i] = newAdminUserView(u)
-		}
-		return &listUsersOutput{Body: views}, nil
-	})
+	}, adminListUsersHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodGet, Path: "/api/v1/admin/users/{id}", Middlewares: adminReadMW(a, deps),
-	}, func(ctx context.Context, in *getUserInput) (*updateUserOutput, error) {
-		// Same store call issueRecovery's handler already makes for the
-		// identical reason (single-user-by-id lookup with 404 on miss).
-		u, err := deps.Store.Users().GetByID(ctx, in.ID)
-		if err != nil {
-			return nil, adminErr(ctx, deps, "get user", err)
-		}
-		return &updateUserOutput{Body: newAdminUserView(u)}, nil
-	})
+	}, adminGetUserHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodPost, Path: "/api/v1/admin/users", DefaultStatus: http.StatusOK, Middlewares: adminWriteMW(a, deps),
-	}, func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
-		actor := UserFrom(ctx)
-		u, link, delivery, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
-		if err != nil {
-			return nil, adminErr(ctx, deps, "create user", err)
-		}
-		return &createUserOutput{Body: createUserResponse{
-			User: newAdminUserView(u), Link: link, Delivery: newDeliveryView(delivery),
-		}}, nil
-	})
+	}, adminCreateUserHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodPatch, Path: "/api/v1/admin/users/{id}", Middlewares: adminWriteMW(a, deps),
-	}, func(ctx context.Context, in *updateUserInput) (*updateUserOutput, error) {
-		actor := UserFrom(ctx)
-		u, err := deps.Admin.UpdateUser(ctx, actor.ID, in.ID, service.UpdateUserParams{
-			Role: in.Body.Role, Disabled: in.Body.Disabled,
-		})
-		if err != nil {
-			return nil, adminErr(ctx, deps, "update user", err)
-		}
-		return &updateUserOutput{Body: newAdminUserView(u)}, nil
-	})
+	}, adminUpdateUserHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodPatch, Path: "/api/v1/admin/users/{id}/email", Middlewares: adminWriteMW(a, deps),
@@ -317,6 +333,10 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			Link: link, Delivery: newDeliveryView(delivery),
 		}}, nil
 	})
+
+	huma.Register(a, huma.Operation{
+		Method: http.MethodPost, Path: "/api/v1/admin/users/{id}/invite", DefaultStatus: http.StatusOK, Middlewares: adminWriteMW(a, deps),
+	}, adminReissueInviteHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method: http.MethodGet, Path: "/api/v1/admin/devices", Middlewares: adminReadMW(a, deps),
@@ -387,13 +407,110 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	})
 }
 
+// adminListUsersHandler builds the handler for GET /api/v1/admin/users. The
+// four user ops below are named functions, like adminSetUserEmailHandler, to
+// keep registerAdminOps under the repo's gocyclo ceiling (.golangci.yml
+// min-complexity: 15): gocyclo counts every branch inside an inline
+// huma.Register closure toward registerAdminOps, and the registration-status
+// lookups (#177) add one to each.
+func adminListUsersHandler(deps ServerDeps) func(context.Context, *struct{}) (*listUsersOutput, error) {
+	return func(ctx context.Context, _ *struct{}) (*listUsersOutput, error) {
+		users, err := deps.Admin.ListUsers(ctx)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "list users", err)
+		}
+		views, err := adminUserViews(ctx, deps, users)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "list users", err)
+		}
+		return &listUsersOutput{Body: views}, nil
+	}
+}
+
+// adminGetUserHandler builds the handler for GET /api/v1/admin/users/{id}.
+func adminGetUserHandler(deps ServerDeps) func(context.Context, *getUserInput) (*updateUserOutput, error) {
+	return func(ctx context.Context, in *getUserInput) (*updateUserOutput, error) {
+		// Same store call issueRecovery's handler already makes for the
+		// identical reason (single-user-by-id lookup with 404 on miss).
+		u, err := deps.Store.Users().GetByID(ctx, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "get user", err)
+		}
+		view, err := adminUserViewFor(ctx, deps, u)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "get user", err)
+		}
+		return &updateUserOutput{Body: view}, nil
+	}
+}
+
+// adminCreateUserHandler builds the handler for POST /api/v1/admin/users.
+func adminCreateUserHandler(deps ServerDeps) func(context.Context, *createUserInput) (*createUserOutput, error) {
+	return func(ctx context.Context, in *createUserInput) (*createUserOutput, error) {
+		actor := UserFrom(ctx)
+		u, link, delivery, err := deps.Admin.CreateUserInvite(ctx, actor.ID, in.Body.Email, in.Body.Role)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "create user", err)
+		}
+		view, err := adminUserViewFor(ctx, deps, u)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "create user", err)
+		}
+		return &createUserOutput{Body: createUserResponse{
+			User: view, Link: link, Delivery: newDeliveryView(delivery),
+		}}, nil
+	}
+}
+
+// adminUpdateUserHandler builds the handler for PATCH /api/v1/admin/users/{id}.
+func adminUpdateUserHandler(deps ServerDeps) func(context.Context, *updateUserInput) (*updateUserOutput, error) {
+	return func(ctx context.Context, in *updateUserInput) (*updateUserOutput, error) {
+		actor := UserFrom(ctx)
+		u, err := deps.Admin.UpdateUser(ctx, actor.ID, in.ID, service.UpdateUserParams{
+			Role: in.Body.Role, Disabled: in.Body.Disabled,
+		})
+		if err != nil {
+			return nil, adminErr(ctx, deps, "update user", err)
+		}
+		view, err := adminUserViewFor(ctx, deps, u)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "update user", err)
+		}
+		return &updateUserOutput{Body: view}, nil
+	}
+}
+
+// adminReissueInviteHandler builds the handler for POST
+// /api/v1/admin/users/{id}/invite (#75): a fresh registration link for an
+// account that cannot sign in yet. Every earlier unused link for the account
+// stops working, so a client retry cancels the link the first call returned.
+func adminReissueInviteHandler(deps ServerDeps) func(context.Context, *reissueInviteInput) (*reissueInviteOutput, error) {
+	return func(ctx context.Context, in *reissueInviteInput) (*reissueInviteOutput, error) {
+		actor := UserFrom(ctx)
+		target, err := deps.Store.Users().GetByID(ctx, in.ID)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "reissue invite", err)
+		}
+		link, expiresAt, delivery, err := deps.Grants.ReissueInvite(ctx, actor.ID, target)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "reissue invite", err)
+		}
+		view, err := adminUserViewFor(ctx, deps, target)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "reissue invite", err)
+		}
+		return &reissueInviteOutput{Body: reissueInviteResponse{
+			Link: link, ExpiresAt: expiresAt, Delivery: newDeliveryView(delivery), User: view,
+		}}, nil
+	}
+}
+
 // adminSetUserEmailHandler builds the handler for PATCH
-// /api/v1/admin/users/{id}/email. Extracted to a named function -- unlike
-// this file's other ops, which inline their handler directly in the
-// huma.Register call -- solely to keep registerAdminOps under the repo's
-// gocyclo ceiling (.golangci.yml min-complexity: 15): this op's two chained
-// lookups (GetByID, then AdminSet) each need their own error branch, and
-// inlining both pushed registerAdminOps to 17.
+// /api/v1/admin/users/{id}/email. It is a named function, like the four user
+// ops above, solely to keep registerAdminOps under the repo's gocyclo ceiling
+// (.golangci.yml min-complexity: 15): this op's two chained lookups (GetByID,
+// then AdminSet) each need their own error branch, and inlining both pushed
+// registerAdminOps to 17.
 func adminSetUserEmailHandler(deps ServerDeps) func(context.Context, *patchUserEmailInput) (*adminSetEmailOutput, error) {
 	return func(ctx context.Context, in *patchUserEmailInput) (*adminSetEmailOutput, error) {
 		actor := UserFrom(ctx)
@@ -408,8 +525,12 @@ func adminSetUserEmailHandler(deps ServerDeps) func(context.Context, *patchUserE
 		if err != nil {
 			return nil, adminErr(ctx, deps, "set user email", err)
 		}
+		view, err := adminUserViewFor(ctx, deps, updated)
+		if err != nil {
+			return nil, adminErr(ctx, deps, "set user email", err)
+		}
 		out := &adminSetEmailOutput{}
-		out.Body.User = newAdminUserView(updated)
+		out.Body.User = view
 		out.Body.Delivery = newDeliveryView(delivery)
 		return out, nil
 	}
@@ -435,6 +556,8 @@ func adminErr(ctx context.Context, deps ServerDeps, action string, err error) er
 		return huma.Error422UnprocessableEntity("That is already the account's email address.")
 	case errors.Is(err, service.ErrEmailManagedByOIDC):
 		return huma.Error422UnprocessableEntity("This account's email address is managed by its identity provider.")
+	case errors.Is(err, service.ErrAlreadyRegistered):
+		return huma.Error422UnprocessableEntity("account has already registered; use /recovery")
 	case errors.Is(err, service.ErrWebAuthnUnavailable):
 		return huma.Error503ServiceUnavailable("passkey authentication is not configured")
 	default:
