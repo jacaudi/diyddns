@@ -30,9 +30,12 @@ var ErrGrantInvalid = errors.New("service: registration grant invalid, expired, 
 // invite. Maps to HTTP 422.
 var ErrAlreadyRegistered = errors.New("service: account has already registered")
 
-// adminDeliveryTimeout bounds an admin-initiated send as seen by this
-// service: internal/email returns at this deadline whatever the SMTP peer is
-// doing. It sits BELOW server.go's shutdownTimeout
+// adminDeliveryTimeout bounds every send this service makes — both
+// admin-initiated sends and the self-service recovery sends (via
+// sendBounded, in a detached goroutine that graceful shutdown does not
+// track) — as seen by this service: internal/email returns at this deadline
+// whatever the SMTP peer is doing. For the admin request path, it sits BELOW
+// server.go's shutdownTimeout
 // (15s, server.go:41) so a send that begins just before SIGTERM cannot consume
 // the entire graceful-shutdown budget and turn a clean stop into
 // "shutdown: context deadline exceeded".
@@ -217,7 +220,8 @@ type GrantService struct {
 	baseURL  string
 	audit    AuditSink
 	log      *slog.Logger
-	// deliveryTimeout bounds an admin-initiated send (see adminDeliveryTimeout).
+	// deliveryTimeout bounds each send, admin-initiated and self-service
+	// (see adminDeliveryTimeout).
 	// It is a field rather than a bare const so a test can shrink it and prove
 	// the expired-context audit path.
 	//
@@ -627,8 +631,8 @@ func (s *GrantService) enabledAdmins(ctx context.Context) []store.User {
 // sent to all of them, so it carries nothing one account can make unmailable
 // (AdminNotifyBody folds the address, #90). Each send runs on its own bounded
 // context (sendBounded), so a slow mail server on one recipient cannot starve
-// the rest (#83). ctx is used only for the failure audit, which
-// recordSendFailure detaches.
+// the rest (#83). ctx is only ever detached here: sendBounded strips it for
+// each send and recordSendFailure for the audit.
 func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u store.User, admins []store.User, ip string) {
 	adminSubj, adminBody := email.AdminNotifyBody(u.Email, u.ID)
 	for _, a := range admins {

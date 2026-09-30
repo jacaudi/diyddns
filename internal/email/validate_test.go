@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -180,46 +181,56 @@ func TestRenderedMessagesAreASCII(t *testing.T) {
 }
 
 // TestEveryTemplateRendererIsCovered makes the renderers table complete by
-// construction: it parses templates.go and fails for any exported function
-// returning exactly two strings (named or not) that the table does not list,
-// and for any table entry naming no such function.
+// construction: it parses the email package and fails for any exported
+// function returning exactly two strings (named or not) that the table does
+// not list, and for any table entry naming no such function.
 func TestEveryTemplateRendererIsCovered(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "templates.go", nil, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse templates.go: %v", err)
+		t.Fatalf("read package dir: %v", err)
 	}
 	found := map[string]bool{}
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Recv != nil || !fn.Name.IsExported() || fn.Type.Results == nil {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		var types []string
-		for _, field := range fn.Type.Results.List {
-			ident, ok := field.Type.(*ast.Ident)
-			if !ok {
-				types = nil
-				break
-			}
-			for range max(len(field.Names), 1) { // `(subject, body string)` is one field with two names
-				types = append(types, ident.Name)
-			}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
 		}
-		if !slices.Equal(types, []string{"string", "string"}) {
-			continue
-		}
-		found[fn.Name.Name] = true
-		if _, ok := renderers[fn.Name.Name]; !ok {
-			t.Errorf("templates.go renderer %s is missing from the renderers table in validate_test.go", fn.Name.Name)
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !fn.Name.IsExported() || fn.Type.Results == nil {
+				continue
+			}
+			var types []string
+			for _, field := range fn.Type.Results.List {
+				ident, ok := field.Type.(*ast.Ident)
+				if !ok {
+					types = nil
+					break
+				}
+				for range max(len(field.Names), 1) { // `(subject, body string)` is one field with two names
+					types = append(types, ident.Name)
+				}
+			}
+			if !slices.Equal(types, []string{"string", "string"}) {
+				continue
+			}
+			found[fn.Name.Name] = true
+			if _, ok := renderers[fn.Name.Name]; !ok {
+				t.Errorf("the email package renderer %s is missing from the renderers table in validate_test.go", fn.Name.Name)
+			}
 		}
 	}
 	for name := range renderers {
 		if !found[name] {
-			t.Errorf("renderers table lists %s, which is not an exported two-string-returning function in templates.go", name)
+			t.Errorf("renderers table lists %s, which is not an exported two-string-returning function in the email package", name)
 		}
 	}
 	if len(found) == 0 {
-		t.Fatal("found no renderers in templates.go -- the completeness check would pass vacuously")
+		t.Fatal("found no renderers in the email package -- the completeness check would pass vacuously")
 	}
 }
 

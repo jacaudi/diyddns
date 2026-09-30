@@ -623,6 +623,8 @@ func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
 		// nothing.
 		{name: "display name", from: "DIYDDNS <noreply@example.com>"},
 		{name: "multi-word display name", from: "DIYDDNS Alerts <noreply@example.com>"},
+		{name: "atext symbols in display name", from: "O'Brien+Co <noreply@example.com>"},
+		{name: "dot in display name", from: "DIYDDNS.Alerts <noreply@example.com>", wantErr: true},
 		{name: "quoted display name", from: `"DIYDDNS" <noreply@example.com>`, wantErr: true},
 		{name: "comma in display name", from: "DIYDDNS, Inc <noreply@example.com>", wantErr: true},
 		{name: "non-ascii display name", from: "Nöreply <noreply@example.com>", wantErr: true},

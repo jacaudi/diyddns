@@ -1167,8 +1167,8 @@ func TestRequestSelfServiceRecovery_AdminSendOutlivingTheBudgetRunsOnItsOwnConte
 	if err := mailer.LastCtxErr(); err != nil {
 		t.Fatalf("the second admin's send saw ctx.Err() = %v, want nil -- each send must run on its own deliveryTimeout (#83)", err)
 	}
-	if left := mailer.LastDeadlineLeft(); left <= 0 {
-		t.Fatalf("the second admin's send had %v left on entry, want a deadline of its own", left)
+	if left := mailer.LastDeadlineLeft(); left <= selfServiceTestTimeout {
+		t.Fatalf("the second admin's send had %v left on entry, want a deadline of its own, longer than the %v store-work budget", left, selfServiceTestTimeout)
 	}
 
 	// Three rows: the instant user send also returns sendErr. With the admin
