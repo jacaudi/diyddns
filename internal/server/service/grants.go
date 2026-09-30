@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -110,8 +111,8 @@ func (d Delivery) Sent() bool { return d.Attempted && d.Err == nil }
 // audit sink, the logger and the per-send timeout. GrantService and
 // EmailChangeService each hold one (EmailChangeService reaches its audit sink
 // and logger through it for every audit write and log line, not only sends);
-// sendAdvisory and recordSendFailure are package functions over it so the
-// detach-from-cancellation, bound-with-a-timeout,
+// sendBounded, sendAdvisory and recordSendFailure are package functions over
+// it so the detach-from-cancellation, bound-with-a-timeout,
 // audit-on-a-context-that-outlives-the-failure behaviour exists once (#83).
 type mailDeps struct {
 	mailer  email.Mailer
@@ -160,11 +161,8 @@ func sendAdvisory(ctx context.Context, m mailDeps, actorID, targetUserID, to, su
 	if m.mailer == nil || !m.mailer.Enabled() {
 		return Delivery{}
 	}
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.timeout)
-	defer cancel()
-
 	d := Delivery{Attempted: true, To: to}
-	if err := m.mailer.Send(sendCtx, to, subject, body); err != nil {
+	if err := sendBounded(ctx, m, to, subject, body); err != nil {
 		d.Err = err
 		m.log.ErrorContext(ctx, "email delivery failed", "error", err, "user_id", targetUserID)
 		recordSendFailure(ctx, m, store.AuditEntry{
@@ -175,6 +173,18 @@ func sendAdvisory(ctx context.Context, m mailDeps, actorID, targetUserID, to, su
 		})
 	}
 	return d
+}
+
+// sendBounded performs one send on a context detached from ctx's cancellation
+// and bounded by m.timeout, so a caller whose own context is short, already
+// spent, or shared with other work cannot starve this send, and a send cannot
+// starve the caller's other work (#83). The caller checks for a nil or
+// disabled mailer and owns the failure audit, whose row shape differs per
+// path (sendAdvisory, self-service recovery, AdminService.notifyOwner).
+func sendBounded(ctx context.Context, m mailDeps, to, subject, body string) error {
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.timeout)
+	defer cancel()
+	return m.mailer.Send(sendCtx, to, subject, body)
 }
 
 // mail is the mailDeps view of this service, built per call so a test that
@@ -216,10 +226,11 @@ type GrantService struct {
 	// the only construction path in the tree and always sets it; never build a
 	// GrantService with a bare struct literal.
 	deliveryTimeout time.Duration
-	// selfServiceTimeout bounds doSelfServiceRecovery's detached goroutine (see
-	// selfServiceRecoveryTimeout). It is a field for exactly the reason
+	// selfServiceTimeout bounds doSelfServiceRecovery's STORE work (see
+	// selfServiceRecoveryTimeout); every send there carries its own
+	// deliveryTimeout (sendBounded, #83). It is a field for exactly the reason
 	// deliveryTimeout is: so a test can shrink it and prove the audit write
-	// survives a context the send has already exhausted (#81).
+	// survives a budget that has already expired (#81).
 	//
 	// It must always be set. A zero value makes context.WithTimeout return an
 	// already-expired context, so the goroutine would do nothing at all --
@@ -503,10 +514,11 @@ func (s *GrantService) IssueRecovery(ctx context.Context, actorID string, u stor
 	return link, s.deliver(ctx, actorID, cur, subject, body), nil
 }
 
-// selfServiceRecoveryTimeout bounds the detached goroutine
-// RequestSelfServiceRecovery spawns to perform its account-existence-
-// sensitive work: generous enough for a real SMTP round-trip, but bounded so
-// the goroutine can never leak forever if a downstream call wedges.
+// selfServiceRecoveryTimeout bounds the store work of the detached goroutine
+// RequestSelfServiceRecovery spawns: the lookup, the passkey count, the mint
+// and the admin list, all of which run before any send. Each send carries its
+// own deliveryTimeout instead (sendBounded), so a slow mail server cannot
+// consume this budget and starve the admin notice (#83).
 const selfServiceRecoveryTimeout = 30 * time.Second
 
 // RequestSelfServiceRecovery is the pre-auth "Lost your passkey?" entry
@@ -573,50 +585,54 @@ func (s *GrantService) doSelfServiceRecovery(targetEmail, ip string) {
 		s.log.Error("self-service recovery: issue failed", "error", err)
 		return
 	}
+	// The admin list is the LAST store read, taken before any send (#83,
+	// design D12): ctx bounds store work only, and every send below carries
+	// its own deliveryTimeout, so no send can starve another send or this read.
+	admins := s.enabledAdmins(ctx)
 
 	subj, body := email.RecoveryLinkBody(link, email.FormatDuration(s.linkTTL))
-	if err := s.mailer.Send(ctx, u.Email, subj, body); err != nil {
+	if err := sendBounded(ctx, s.mail(), u.Email, subj, body); err != nil {
 		s.auditSendFailure(ctx, store.AuditEntry{
 			EventType: EventEmailSendFailed, TargetType: "user", TargetID: u.ID, IP: ip,
 		})
 	}
 
-	s.notifyAdminsOfSelfServiceRecovery(ctx, u, ip)
+	s.notifyAdminsOfSelfServiceRecovery(ctx, u, admins, ip)
 }
 
-// notifyAdminsOfSelfServiceRecovery mails every enabled admin that a
-// self-service recovery link was issued for u. It shares the caller's
-// delivery budget: ctx is the same bounded context the user's send ran on.
-func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u store.User, ip string) {
-	admins, err := s.st.Users().List(ctx)
+// enabledAdmins returns every enabled admin, for the self-service recovery
+// notice. On failure it logs why and returns nil, and the caller still sends
+// the user's own link. It runs BEFORE any send, so an exhausted ctx here means
+// the store work itself was slow; a slow mail server can no longer cause it
+// (#83). The two log lines stay distinct so an exhausted budget is never
+// reported as a store failure (#83a).
+func (s *GrantService) enabledAdmins(ctx context.Context) []store.User {
+	users, err := s.st.Users().List(ctx)
 	if err != nil {
-		// Distinguish an exhausted budget from a genuine store failure. The
-		// canonical case is a stalled SMTP peer consuming the whole budget at
-		// the user's send in the caller, after which this call fails on an
-		// already-dead context — and the old message pointed a debugger at a
-		// database that was perfectly healthy.
-		//
 		// errors.Is / ctx.Err(), never `err == context.DeadlineExceeded`:
 		// errorlint runs with comparison: true and rejects that form.
-		//
-		// Re-basing this function on a fresh context so a slow first recipient
-		// cannot starve the admin notifications is #83b, deferred to its own
-		// design. This line stays useful afterwards: other causes of a dead
-		// context remain.
 		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-			s.log.Error("self-service recovery: delivery budget exhausted before notifying admins; admins were NOT notified",
+			s.log.Error("self-service recovery: budget exhausted before listing admins; admins will NOT be notified",
 				"error", err, "budget", s.selfServiceTimeout)
-			return
+			return nil
 		}
 		s.log.Error("self-service recovery: list admins failed", "error", err)
-		return
+		return nil
 	}
+	return slices.DeleteFunc(users, func(u store.User) bool { return !u.IsEnabledAdmin() })
+}
+
+// notifyAdminsOfSelfServiceRecovery mails every admin in admins that a
+// self-service recovery link was issued for u. The body is rendered ONCE and
+// sent to all of them, so it carries nothing one account can make unmailable
+// (AdminNotifyBody folds the address, #90). Each send runs on its own bounded
+// context (sendBounded), so a slow mail server on one recipient cannot starve
+// the rest (#83). ctx is used only for the failure audit, which
+// recordSendFailure detaches.
+func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u store.User, admins []store.User, ip string) {
 	adminSubj, adminBody := email.AdminNotifyBody(u.Email, u.ID)
 	for _, a := range admins {
-		if !a.IsEnabledAdmin() {
-			continue
-		}
-		if err := s.mailer.Send(ctx, a.Email, adminSubj, adminBody); err != nil {
+		if err := sendBounded(ctx, s.mail(), a.Email, adminSubj, adminBody); err != nil {
 			s.auditSendFailure(ctx, store.AuditEntry{
 				EventType: EventEmailSendFailed, TargetType: "user", TargetID: a.ID, IP: ip,
 			})

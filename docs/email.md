@@ -64,7 +64,10 @@ At most 32 email sends are in flight at once. If a peer mail server accepts the
 connection and then goes quiet — wedged, slow, or otherwise unresponsive — the
 slot it holds stays occupied until that conversation ends. Once all 32 slots are
 occupied, a new send fails immediately with a loud `ERROR`-level log rather than
-queuing or blocking behind the stuck ones.
+queuing or blocking behind the stuck ones. A self-service recovery request sends
+once to the user and once to each enabled administrator, each with its own
+12-second limit, so while a mail server is slow a single request can hold more
+than one slot.
 
 A send this system reports as failed because its deadline passed can still
 complete afterward and deliver the message — including a single-use registration
