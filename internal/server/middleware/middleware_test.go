@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -293,6 +294,219 @@ func TestRecover_ConvertsPanicTo500(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "panic") {
 		t.Errorf("panic not logged: %s", buf.String())
+	}
+	if responseStarted(t, buf.String()) {
+		t.Errorf("response_started = true for a panic before any write: %s", buf.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer the server goroutine can write while the test
+// goroutine reads, so a log captured from a real listener stays race-free.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// logRecord returns the first JSON log record whose msg is msg.
+func logRecord(t *testing.T, logs, msg string) map[string]any {
+	t.Helper()
+	for line := range strings.SplitSeq(strings.TrimSpace(logs), "\n") {
+		var got map[string]any
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("log line is not JSON: %v: %q", err, line)
+		}
+		if got["msg"] == msg {
+			return got
+		}
+	}
+	t.Fatalf("no %q record in logs: %s", msg, logs)
+	return nil
+}
+
+// responseStarted reads the response_started attribute of the "panic
+// recovered" record, failing the test when it is absent or not a bool.
+func responseStarted(t *testing.T, logs string) bool {
+	t.Helper()
+	got, ok := logRecord(t, logs, "panic recovered")["response_started"].(bool)
+	if !ok {
+		t.Fatalf("panic record has no bool response_started: %s", logs)
+	}
+	return got
+}
+
+// headerCounter counts the WriteHeader calls that reach it, so a test can see
+// a second one that a recording writer would swallow.
+type headerCounter struct {
+	http.ResponseWriter
+	calls int
+}
+
+func (c *headerCounter) WriteHeader(code int) {
+	c.calls++
+	c.ResponseWriter.WriteHeader(code)
+}
+
+// A panic after the response started must not write a second status line:
+// the client already has the first one.
+func TestRecover_PanicAfterWriteDoesNotWriteHeaderAgain(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	var counter *headerCounter
+	countHeaders := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			counter = &headerCounter{ResponseWriter: w}
+			next.ServeHTTP(counter, r)
+		})
+	}
+	h := middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		panic("boom")
+	}), countHeaders, middleware.Recover(log))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if counter.calls != 1 {
+		t.Errorf("WriteHeader calls = %d, want 1", counter.calls)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if !responseStarted(t, buf.String()) {
+		t.Errorf("response_started = false after WriteHeader and Write: %s", buf.String())
+	}
+}
+
+// websocket.Accept writes the 101 through the wrapper and then hijacks. A
+// panic after that point must leave net/http's error log clean: a second
+// WriteHeader on the hijacked connection is what it complains about.
+func TestRecover_PanicAfterHijackLeavesServerErrorLogClean(t *testing.T) {
+	var appLog, serverLog syncBuffer
+	log := slog.New(slog.NewJSONHandler(&appLog, nil))
+	done := make(chan struct{})
+	// signalDone is outermost, so it fires after Recover has run.
+	signalDone := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(done)
+			next.ServeHTTP(w, r)
+		})
+	}
+	h := middleware.Chain(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusSwitchingProtocols)
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		panic("boom after hijack")
+	}), signalDone, middleware.RequestID("X-Request-Id"), middleware.AccessLog(log), middleware.Recover(log))
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ErrorLog = slog.NewLogLogger(slog.NewTextHandler(&serverLog, nil), slog.LevelError)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not finish")
+	}
+
+	for _, bad := range []string{"superfluous response.WriteHeader", "on hijacked connection"} {
+		if strings.Contains(serverLog.String(), bad) {
+			t.Errorf("server error log contains %q: %s", bad, serverLog.String())
+		}
+	}
+	if !responseStarted(t, appLog.String()) {
+		t.Errorf("response_started = false after the 101: %s", appLog.String())
+	}
+}
+
+// attrString returns the string value of the attribute named key.
+func attrString(attrs []attribute.KeyValue, key string) (string, bool) {
+	for _, kv := range attrs {
+		if string(kv.Key) == key {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
+}
+
+// Recover marks the request span, which Trace put in the request context, so
+// tracing still flags a panic whose 500 the client never received.
+func TestRecover_MarksSpanOnPanic(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		handler       http.HandlerFunc
+		wantStatus    int
+		wantSpan      codes.Code
+		wantErrorType string
+	}{
+		{"panic after the response started", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("partial"))
+			panic("boom")
+		}, http.StatusOK, codes.Error, "panic"},
+		{"panic before any write", func(http.ResponseWriter, *http.Request) {
+			panic("boom")
+		}, http.StatusInternalServerError, codes.Error, "panic"},
+		{"no panic", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}, http.StatusOK, codes.Unset, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exp := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exp)))
+			t.Cleanup(func() { _ = tp.Shutdown(t.Context()) })
+			var buf bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&buf, nil))
+			h := middleware.Chain(tc.handler,
+				middleware.RequestID("X-Request-Id"),
+				middleware.Trace(tp.Tracer("test"), noop.Float64Histogram{}),
+				middleware.AccessLog(log),
+				middleware.Recover(log),
+			)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("client status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if got := logRecord(t, buf.String(), "request")["status"]; got != float64(tc.wantStatus) {
+				t.Errorf("access log status = %v, want %d", got, tc.wantStatus)
+			}
+			spans := exp.GetSpans()
+			if len(spans) != 1 {
+				t.Fatalf("got %d spans, want 1", len(spans))
+			}
+			if got := spans[0].Status.Code; got != tc.wantSpan {
+				t.Errorf("span status = %v, want %v", got, tc.wantSpan)
+			}
+			got, ok := attrString(spans[0].Attributes, "error.type")
+			if got != tc.wantErrorType || ok != (tc.wantErrorType != "") {
+				t.Errorf("error.type = %q (present %v), want %q", got, ok, tc.wantErrorType)
+			}
+		})
 	}
 }
 

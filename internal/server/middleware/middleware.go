@@ -171,20 +171,42 @@ func AccessLog(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// Recover converts a handler panic into a 500 and logs it, keeping the process
-// alive.
+// Recover turns a handler panic into a logged event and keeps the process
+// alive. The "panic recovered" line carries response_started, and the request
+// span (put in the context by Trace) is marked Error with error.type=panic.
+//
+// It writes a 500 only when the response has not started, meaning no status has
+// gone through the writer. Once one has, the client holds that status, and a
+// second WriteHeader is superfluous, or on a hijacked connection (a WebSocket
+// upgrade writes its 101 and then hijacks), logged as an error by net/http.
+// The started response is left alone rather than aborted: re-panicking with
+// http.ErrAbortHandler would skip the access-log line and the span attributes,
+// because Recover is the innermost middleware. AccessLog then records the
+// status the client received, and the span marking above is what still flags
+// the panic.
 func Recover(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The SAME statusRecorder AccessLog and Trace use, so Unwrap and
+			// the Hijacker walk are unchanged (see its comment).
+			rec := &statusRecorder{ResponseWriter: w}
 			defer func() {
-				if rec := recover(); rec != nil {
+				if p := recover(); p != nil {
+					started := rec.status != 0
 					log.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
-						slog.Any("panic", rec),
+						slog.Any("panic", p),
+						slog.Bool("response_started", started),
 					)
-					w.WriteHeader(http.StatusInternalServerError)
+					// A no-op span when no tracer is in the chain.
+					span := trace.SpanFromContext(r.Context())
+					span.SetStatus(codes.Error, "panic")
+					span.SetAttributes(semconv.ErrorTypeKey.String("panic"))
+					if !started {
+						rec.WriteHeader(http.StatusInternalServerError)
+					}
 				}
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rec, r)
 		})
 	}
 }
