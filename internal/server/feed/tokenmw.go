@@ -67,7 +67,7 @@ func TokenMiddleware(auth Authenticator, log *slog.Logger) func(http.Handler) ht
 			case errors.Is(err, store.ErrNotFound):
 				reject("unknown_token")
 				return
-			case r.Context().Err() != nil, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			case store.Cancelled(r.Context(), err):
 				// The request went away mid-lookup (or the store reported the
 				// cancellation): not a store failure, and not worth an operator's
 				// attention as one.
