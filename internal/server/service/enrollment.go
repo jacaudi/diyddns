@@ -138,8 +138,10 @@ func (s *EnrollmentService) createSealedDevice(ctx context.Context, userID, labe
 //
 // A code that cannot be redeemed (unknown, expired, used, or lost to a
 // concurrent redeem) is logged with its reason at Info and returned as a
-// wrapped store.ErrNotFound, so the response stays uniform. The code itself is
-// never logged.
+// wrapped store.ErrNotFound, so the response stays uniform. A valid code whose
+// label is already taken on the account is logged the same way (label_conflict)
+// and returned as a wrapped store.ErrConflict, leaving the code unconsumed. The
+// code itself is never logged.
 func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta ClientMeta) (EnrollResult, error) {
 	c, err := s.st.EnrollmentCodes().Get(ctx, code)
 	if err != nil {
@@ -160,11 +162,16 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 
 	dev, secret, err := s.createSealedDevice(ctx, c.UserID, c.Label, meta)
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			// The label is already in use on this account. The insert failed
+			// before Consume, so the code is left unconsumed.
+			logRejected(ctx, s.log, codeRejectedMsg, rejectLabelConflict, c.UserID)
+		}
 		return EnrollResult{}, fmt.Errorf("service.ConsumeCode: %w", err)
 	}
 
 	if _, err := s.st.EnrollmentCodes().Consume(ctx, code, dev.ID, now); err != nil {
-		_ = s.st.Devices().Delete(ctx, dev.ID) // compensating-delete: no orphan device on a failed consume
+		s.rollbackDevice(ctx, dev.ID) // compensating delete: no orphan device on a failed consume
 		if errors.Is(err, store.ErrNotFound) {
 			// The pre-check passed, so a concurrent redeem won the atomic Consume.
 			logRejected(ctx, s.log, codeRejectedMsg, rejectLostRace, c.UserID)
@@ -179,6 +186,19 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 		TargetID:    dev.ID,
 	})
 	return EnrollResult{DeviceID: dev.ID, Secret: secret}, nil
+}
+
+// rollbackDevice is ConsumeCode's compensating delete. It runs on a context
+// that survives cancellation: a Consume that failed because the request's
+// context ended would otherwise make this delete fail for the same reason and
+// leave an orphan device, which the next redeem of the same code would then
+// meet as a label conflict. A failed delete is logged at Error with the device
+// id, never discarded: an orphan device is a real, operator-visible fault.
+func (s *EnrollmentService) rollbackDevice(ctx context.Context, deviceID string) {
+	if err := s.st.Devices().Delete(context.WithoutCancel(ctx), deviceID); err != nil {
+		s.log.LogAttrs(ctx, slog.LevelError, "enrollment compensating delete failed",
+			slog.String("device_id", deviceID), slog.Any("error", err))
+	}
 }
 
 // EnrollForUser mints and seals a fresh device for an already-authenticated
