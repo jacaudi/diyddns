@@ -39,7 +39,7 @@ var ErrWebAuthnUnavailable = errors.New("service: webauthn service unavailable")
 // check failed. It is returned unwrapped, deliberately: wrapping an
 // underlying store.ErrNotFound (e.g. from an unresolvable webauthn_handle)
 // with %w would let a caller unwrap through to it and leak account
-// existence, mirroring errInvalidCreds in auth.go.
+// existence.
 var ErrPasskeyVerification = errors.New("service: passkey verification failed")
 
 // webauthnAAD domain-separates the sealed WebAuthn challenge cookie from the

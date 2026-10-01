@@ -446,24 +446,22 @@ func (s *AdminService) SetDeviceEnabled(ctx context.Context, actor store.Session
 // (#132 D10, D17). The send is synchronous in the admin's request, exactly as
 // the invite and recovery sends are.
 //
-// The send itself stays inline rather than going through sendAdvisory:
-// sendAdvisory's failure row carries only ActorUserID/TargetType/TargetID, not
-// the device_id detail or IP this notice needs. The failure-audit half,
-// though, reuses recordSendFailure (grants.go) — the same helper
-// EmailChangeService uses — so a future change to that write's discipline
-// (timeout, context handling) reaches this path too.
+// It does not go through sendAdvisory: sendAdvisory's failure row carries only
+// ActorUserID/TargetType/TargetID, not the device_id detail or IP this notice
+// needs. The send goes through sendBounded and the failure audit through
+// recordSendFailure (grants.go), the same helpers the other mail paths use, so
+// a future change to either discipline (timeout, context handling) reaches
+// this path too.
 func (s *AdminService) notifyOwner(ctx context.Context, actor store.Session, owner store.User, dev store.Device, disabled bool) {
 	if s.mailer == nil || !s.mailer.Enabled() {
 		return
 	}
 	subject, body := emailpkg.DeviceStateChangedByAdminBody(dev.Label, dev.ID, disabled)
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), adminDeliveryTimeout)
-	defer cancel()
-	if err := s.mailer.Send(sendCtx, owner.Email, subject, body); err != nil {
+	m := mailDeps{mailer: s.mailer, audit: s.audit, log: s.log, timeout: adminDeliveryTimeout}
+	if err := sendBounded(ctx, m, owner.Email, subject, body); err != nil {
 		s.log.ErrorContext(ctx, "device state notice delivery failed",
 			"error", err, "user_id", owner.ID, "device_id", dev.ID)
 		details, _ := json.Marshal(map[string]string{"device_id": dev.ID})
-		m := mailDeps{mailer: s.mailer, audit: s.audit, log: s.log, timeout: adminDeliveryTimeout}
 		recordSendFailure(ctx, m, store.AuditEntry{
 			ActorUserID: actor.UserID, EventType: EventEmailSendFailed,
 			TargetType: "user", TargetID: owner.ID, DetailsJSON: string(details), IP: actor.IP,

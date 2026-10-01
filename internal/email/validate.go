@@ -43,8 +43,9 @@ var ErrNotASCII = errors.New("email: value is not 7-bit ASCII")
 var ErrAddressUnsupported = errors.New("email: address form is not supported by this transport")
 
 // ErrAddressNotCanonical reports an address that parses and is ASCII but is not
-// already in bare addr-spec form — "Bob <bob@example.test>" or a
-// whitespace-padded address. It is pure ASCII, so the charset check alone
+// already in bare addr-spec form — "Bob <bob@example.test>" as a recipient, or
+// a whitespace-padded address — or a From whose display name is not in the one
+// form SplitFrom accepts (#94). It is pure ASCII, so the charset check alone
 // does not catch it, and no transport this package has used carries it
 // correctly: the net/smtp client put it on the wire verbatim as a malformed
 // RCPT TO, and the current transport splits it on its list delimiters and
@@ -63,8 +64,8 @@ var ErrAddressNotCanonical = errors.New("email: address is not in canonical addr
 // current transport RFC 2047-encodes the subject, which neutralises that;
 // the check stays as the transport-independent guarantee this package makes
 // about what it hands to ANY transport. checkSendable applies it to the
-// Subject only — never to From/To (already constrained to a canonical
-// addr-spec by checkAddress, which cannot contain CR/LF) or to the body
+// Subject only — never to From/To (To is a canonical addr-spec; From is one,
+// optionally behind a displayNameRe name; neither can contain CR/LF) or to the body
 // (which legitimately contains \n).
 var ErrHeaderInjection = errors.New("email: header value contains a CR or LF")
 
@@ -94,14 +95,50 @@ var (
 	libraryRecipientRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 )
 
+// displayNameRe is the display-name form email.from may carry (#94): one or
+// more RFC 5322 atext words separated by single spaces, ASCII only. It is the
+// set of names the transport writes UNQUOTED into the From header and still
+// produces a well-formed header (unraid/apprise-go formatMIMEAddress writes an
+// ASCII name as `name <addr>` with no quoting), so a quote, a comma or a dot
+// is refused rather than mangled. internal/config carries an identical copy
+// (validateFromAddress); TestFromValidationMatchesTheEmailPackage pins the
+// two. Interpreted string, not raw: the pattern contains a backtick.
+var displayNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+( [A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$")
+
+// SplitFrom validates an email.from value and returns its display name (empty
+// for a bare address) and its bare address, the one the envelope uses.
+//
+// A bare address is held to exactly checkAddress("From", …) and returns its
+// errors unchanged. `Name <address>` is accepted only when Name matches
+// displayNameRe and the value is written exactly that way (one space, no
+// quotes, no comments). A name or form violation wraps ErrAddressNotCanonical;
+// the address part is then held to checkAddress like a bare one. Exported so
+// internal/config's lockstep test can pin its own copy against this one.
+func SplitFrom(from string) (name, addr string, err error) {
+	parsed, perr := mail.ParseAddress(from)
+	if perr != nil || parsed.Name == "" {
+		if err := checkAddress("From", from); err != nil {
+			return "", "", err
+		}
+		return "", from, nil
+	}
+	if !IsASCII(parsed.Name) || !displayNameRe.MatchString(parsed.Name) || from != parsed.Name+" <"+parsed.Address+">" {
+		return "", "", fmt.Errorf("%w: From header display name must be plain ASCII words separated by single spaces, written as Name <address>", ErrAddressNotCanonical)
+	}
+	if err := checkAddress("From", parsed.Address); err != nil {
+		return "", "", err
+	}
+	return parsed.Name, parsed.Address, nil
+}
+
 // IsRoutable reports whether the transport would carry addr as a RECIPIENT
 // exactly as written: after the library splits it on its list delimiters,
 // exactly one element must survive, it must be the whole input, and it must
 // match the library's recipient predicate. It is at least as strict as the
 // library (a value the library would mangle rather than drop, such as one
 // with a trailing space, is also refused; checkAddress rejects those
-// earlier anyway). Exported for the external test package; IsRoutableFrom
-// is the one internal/config pins its duplicate against.
+// earlier anyway). Exported for the external test package; SplitFrom is
+// the one internal/config pins its From duplicate against.
 func IsRoutable(addr string) bool {
 	parts := libraryListDelims.Split(addr, -1)
 	parts = slices.DeleteFunc(parts, func(p string) bool { return p == "" })
@@ -136,11 +173,12 @@ func IsASCII(s string) bool {
 // 0x20, or 0x7F). Printable ASCII passes through unchanged, so the result
 // always satisfies IsASCII and contains no CR or LF.
 //
-// A display concession for one transport, applied where a user-controlled
-// value (a device label, #132) is rendered into a message body. Nothing
-// stored changes. Folding control characters is a choice, not a transport
-// rule: checkSendable does not CR/LF-check a body, but a label must not be
-// able to forge a line of the notice.
+// A display concession for one transport, applied wherever a user-controlled
+// value (an address, a device label) is rendered into a subject or body: the
+// renderers in templates.go and internal/server/stale's mail channel (#132,
+// #90, #184). Nothing stored changes. Folding control characters is a choice,
+// not a transport rule: checkSendable does not CR/LF-check a body, but a
+// user-controlled value must not be able to forge a line of the notice.
 func ASCIIFold(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -210,7 +248,8 @@ func checkAddress(field, addr string) error {
 
 // checkSendable rejects the Send arguments this package refuses to hand to
 // the transport: non-ASCII anywhere, a non-canonical or unroutable address,
-// a subject with a line break. It covers ALL FOUR arguments, not just the
+// a subject with a line break. From may carry a plain display name
+// (SplitFrom, #94); To may not. It covers ALL FOUR arguments, not just the
 // addresses: AdminNotifyBody interpolates a user-controlled email address
 // into the BODY, so a check on from/to alone passes the highest-severity
 // vector (design §5.5). It does NOT guarantee the transport can carry
@@ -223,7 +262,7 @@ func checkAddress(field, addr string) error {
 // a body can carry a live one-time registration link. The field name is enough
 // to diagnose, and Send already logs the recipient.
 func checkSendable(from, to, subject, body string) error {
-	if err := checkAddress("From", from); err != nil {
+	if _, _, err := SplitFrom(from); err != nil {
 		return err
 	}
 	if err := checkAddress("To", to); err != nil {

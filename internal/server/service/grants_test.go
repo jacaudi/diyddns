@@ -37,9 +37,8 @@ type fakeMailer struct {
 	// context expire before Send returns.
 	sendDelay time.Duration
 	// delayFromCall, when > 1, applies sendDelay only from the Nth Send onward
-	// (1-based), so a test can let an EARLY send complete inside the budget and a
-	// LATER one exhaust it. That is the only way to reach the admin-notify
-	// auditSendFailure site: an exhausted budget kills Users().List first.
+	// (1-based), so a test can let an EARLY send (the user's) return at once
+	// and make only LATER ones (the admins') stall.
 	// Zero and one both mean "every call", so existing literals are unaffected.
 	delayFromCall int
 	// sendErrFromCtx, when true, makes Send return ctx.Err() (nil when the
@@ -50,6 +49,11 @@ type fakeMailer struct {
 	// makes the failure depend on whether sendCtx genuinely expired during
 	// sendDelay, which only a live read of the timeout does.
 	sendErrFromCtx bool
+	// refuseNonASCII, when true, makes Send return email.ErrNotASCII for a
+	// non-ASCII recipient, subject or body -- the clauses of internal/email's
+	// send-path check (checkSendable) a rendered message can fail. The call is
+	// still recorded, so a test can see what was attempted.
+	refuseNonASCII bool
 	// calls counts Send invocations, guarded by mu, for delayFromCall.
 	calls int
 	// sendCh, when non-nil, additionally receives every sentEmail so a test
@@ -69,6 +73,11 @@ type fakeMailer struct {
 	// lastCtxErr records ctx.Err() as observed INSIDE Send, so a test can prove
 	// the send context is not the caller's canceled request context.
 	lastCtxErr error
+	// lastDeadlineLeft records how long the most recent Send's context had
+	// left when Send was entered, or -1 when it carried no deadline. A test
+	// uses it to prove a send is bounded, and bounded by its own
+	// deliveryTimeout rather than a shorter shared budget (#83).
+	lastDeadlineLeft time.Duration
 }
 
 type sentEmail struct{ to, subject, body string }
@@ -79,9 +88,14 @@ func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
 	if m.onSend != nil {
 		m.onSend()
 	}
+	left := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		left = time.Until(deadline)
+	}
 	m.mu.Lock()
 	m.calls++
 	n := m.calls
+	m.lastDeadlineLeft = left
 	m.mu.Unlock()
 	if m.sendDelay > 0 && n >= max(m.delayFromCall, 1) {
 		time.Sleep(m.sendDelay)
@@ -94,6 +108,9 @@ func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
 	if m.sendCh != nil {
 		m.sendCh <- e
 	}
+	if m.refuseNonASCII && (!email.IsASCII(to) || !email.IsASCII(subject) || !email.IsASCII(body)) {
+		return email.ErrNotASCII
+	}
 	if m.sendErrFromCtx {
 		return ctx.Err()
 	}
@@ -105,6 +122,14 @@ func (m *fakeMailer) LastCtxErr() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastCtxErr
+}
+
+// LastDeadlineLeft reports how long the most recent Send's context had left
+// when Send was entered, or -1 when it carried no deadline.
+func (m *fakeMailer) LastDeadlineLeft() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeadlineLeft
 }
 
 // Sent returns a snapshot of every email recorded so far, safe to call
@@ -1027,90 +1052,45 @@ func pollForAuditRows(t *testing.T, st *store.Store, eventType string, want int,
 }
 
 // selfServiceTestTimeout is the shrunk budget the #81 tests run on. It is a
-// MEASUREMENT, not a guess: on this branch, the pre-send work (GetByEmail,
-// CountWebAuthnCredentials, mintRecoveryGrant) was measured at 0.888-1.155ms
+// MEASUREMENT, not a guess: the pre-send work of the time (GetByEmail,
+// CountWebAuthnCredentials, mintRecoveryGrant; Users().List has joined it
+// since #83, design D12) was measured at 0.888-1.155ms
 // under -race on go1.25.13 (see the #81 commit body), so this is ~216x the
 // worst observation. Too small a value makes the flow stop BEFORE the send,
 // which would pass for the wrong reason and pin nothing.
 const selfServiceTestTimeout = 250 * time.Millisecond
 
-// selfServiceTestStall is how long fakeMailer sleeps in the #81/#83a tests
+// selfServiceTestStall is how long fakeMailer sleeps in the #81/#83 tests
 // that need Send to outlast selfServiceTestTimeout. The margin (100ms) is the
-// shared knowledge across all three call sites: too small and a slow CI
+// shared knowledge across both call sites: too small and a slow CI
 // runner could let Send return before the budget actually expires, which
 // would pass for the wrong reason and pin nothing.
 const selfServiceTestStall = selfServiceTestTimeout + 100*time.Millisecond
 
-// TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend
-// pins grants.go's FIRST doSelfServiceRecovery auditSendFailure call -- the one
-// for the user's own recovery link.
+// TestRequestSelfServiceRecovery_UserSendOutlivingTheBudgetStillNotifiesAdmins
+// pins #83 and #81 together.
 //
-// It must run on a context.WithoutCancel-derived context, so the
-// email.send_failed row survives the very failure it exists to record:
-// internal/email derives the CONNECTION deadline from that context, so a stalled
-// peer returns at exactly the moment it expires, and database/sql rejects an
-// expired context before reaching the driver.
+// #83: every send runs on its own deliveryTimeout (sendBounded), not on the
+// store-work budget. The user's send here outlasts that budget
+// (selfServiceTestStall > selfServiceTestTimeout), yet its own context must
+// still be live when it returns, and the admin notice must still go out,
+// because the admin list was read before any send (design D12). With the old
+// shared budget, the send saw a dead context and List failed after it, so no
+// admin was ever notified.
 //
-// Mutation-verified at ac4d56c: replacing BOTH doSelfServiceRecovery sites with
-// s.audit.Log(ctx, ...) left the whole suite GREEN. deliver's third site is
-// already pinned by TestDeliver_SurvivesCanceledRequestContext.
-//
-// The send must actually be REACHED. Asserting only that the flow ended would
-// let a test that stopped early pass for the wrong reason.
-func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheUserSend(t *testing.T) {
+// #81: the email.send_failed rows are written after the store-work budget has
+// expired, so they survive only because recordSendFailure detaches with
+// context.WithoutCancel. database/sql rejects an expired context before
+// reaching the driver. Mutation-verified: replacing auditSendFailure with
+// s.audit.Log(ctx, ...) at either doSelfServiceRecovery site must turn this red.
+func TestRequestSelfServiceRecovery_UserSendOutlivingTheBudgetStillNotifiesAdmins(t *testing.T) {
 	st := openTestStore(t)
 	passkeys := newTestPasskeyService(t, st, discardAudit{})
 	mailer := &fakeMailer{
-		enabled: true,
-		sendErr: errors.New("peer stalled"),
-		// Longer than the shrunk budget, so the send exhausts it and the
-		// auditSendFailure call runs on an already-dead context.
-		sendDelay: selfServiceTestStall,
+		enabled:   true,
+		sendErr:   errors.New("peer stalled"),
+		sendDelay: selfServiceTestStall, // every send outlasts the store-work budget
 		sendCh:    make(chan sentEmail, 4),
-	}
-	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
-	grants.selfServiceTimeout = selfServiceTestTimeout
-
-	u := seedUser(t, st, "alice@example.test", "user")
-	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
-
-	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
-		t.Fatalf("RequestSelfServiceRecovery: %v", err)
-	}
-
-	// The send was reached -- without this the test could pass by stopping early.
-	if sent := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout); sent.to != u.Email {
-		t.Fatalf("sent to %q, want %q", sent.to, u.Email)
-	}
-
-	// Pin the invariant directly: the same ctx Send just saw is the ctx
-	// auditSendFailure is about to be handed, so it must already be dead here
-	// -- not merely inferred from the row surviving downstream.
-	if err := mailer.LastCtxErr(); err == nil {
-		t.Fatal("Send saw ctx.Err() = nil, want a deadline error -- the budget must already be exhausted at the audit site")
-	}
-
-	pollForAuditRows(t, st, EventEmailSendFailed, 1, 5*time.Second)
-}
-
-// TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNotify
-// pins the SECOND site -- the admin-notify loop -- which the test above can
-// never reach.
-//
-// Why a second test is unavoidable: when the budget is exhausted at the user
-// send, Users().List(ctx) in notifyAdminsOfSelfServiceRecovery fails on the dead context and the
-// function returns before the admin loop, so it never executes. Here the user send
-// is INSTANT (delayFromCall: 2) and succeeds inside the budget, List runs on a
-// live context, and only the admin send stalls past the deadline.
-func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNotify(t *testing.T) {
-	st := openTestStore(t)
-	passkeys := newTestPasskeyService(t, st, discardAudit{})
-	mailer := &fakeMailer{
-		enabled:       true,
-		sendErr:       errors.New("peer stalled"),
-		sendDelay:     selfServiceTestStall,
-		delayFromCall: 2, // send 1 (the user) is instant; send 2 (the admin) stalls
-		sendCh:        make(chan sentEmail, 4),
 	}
 	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
 	grants.selfServiceTimeout = selfServiceTestTimeout
@@ -1122,24 +1102,78 @@ func TestRequestSelfServiceRecovery_AuditsWhenTheBudgetExpiresDuringTheAdminNoti
 	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
 		t.Fatalf("RequestSelfServiceRecovery: %v", err)
 	}
-	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout) // the user send
-	// The admin send -- proves the loop was REACHED and actually reached an
-	// admin, not merely that a second send of any kind occurred (a mutant that
-	// re-mails the user here would pass without this assertion).
+
+	if sent := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout); sent.to != u.Email {
+		t.Fatalf("first send went to %q, want the user %q", sent.to, u.Email)
+	}
+	if err := mailer.LastCtxErr(); err != nil {
+		t.Fatalf("the user's send saw ctx.Err() = %v, want nil -- it must run on its own deliveryTimeout, not the %v store-work budget (#83)", err, selfServiceTestTimeout)
+	}
+	// Bounded, and by its own deliveryTimeout: a send with no deadline could
+	// hang on a stalled peer, and one on the shared budget has less than
+	// selfServiceTestTimeout left. (The admin send may already have started and
+	// overwritten this; it is held to the same rule, so the check is sound.)
+	if left := mailer.LastDeadlineLeft(); left <= selfServiceTestTimeout {
+		t.Fatalf("send context had %v left on entry, want a deadline of its own, longer than the %v store-work budget (#83)", left, selfServiceTestTimeout)
+	}
 	if sent := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout); sent.to != admin.Email {
-		t.Fatalf("admin send went to %q, want %q", sent.to, admin.Email)
+		t.Fatalf("second send went to %q, want the admin %q -- a slow user send must not starve the admin notice (#83)", sent.to, admin.Email)
 	}
 
-	// Pin the invariant directly: the same ctx Send just saw is the ctx
-	// auditSendFailure is about to be handed, so it must already be dead here
-	// -- not merely inferred from two rows surviving downstream.
-	if err := mailer.LastCtxErr(); err == nil {
-		t.Fatal("Send saw ctx.Err() = nil, want a deadline error -- the budget must already be exhausted at the audit site")
-	}
-
-	// Two rows: one per failed send. With the admin site reverted to
-	// s.audit.Log(ctx, ...) only the first survives.
+	// One row per failed send, both written after the budget expired (#81).
 	pollForAuditRows(t, st, EventEmailSendFailed, 2, 5*time.Second)
+}
+
+// TestRequestSelfServiceRecovery_AdminSendOutlivingTheBudgetRunsOnItsOwnContext
+// pins the admin-notify send site. The user's send is instant, and each of two
+// admin sends outlasts the store-work budget.
+//
+//   - #83, per send: deliveryTimeout is 500ms, above one stall (350ms) and
+//     below two. A context shared across the admin loop would be dead by the
+//     second admin's send; one context per send is still live.
+//   - #81: the failure rows are written after the store-work budget expired,
+//     and must survive.
+func TestRequestSelfServiceRecovery_AdminSendOutlivingTheBudgetRunsOnItsOwnContext(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{
+		enabled:       true,
+		sendErr:       errors.New("peer stalled"),
+		sendDelay:     selfServiceTestStall,
+		delayFromCall: 2, // send 1 (the user) is instant; every admin send stalls
+		sendCh:        make(chan sentEmail, 4),
+	}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+	grants.selfServiceTimeout = selfServiceTestTimeout
+	grants.deliveryTimeout = 500 * time.Millisecond // > one selfServiceTestStall, < two
+
+	u := seedUser(t, st, "alice@example.test", "user")
+	admin1 := seedUser(t, st, "admin1@example.test", "admin")
+	admin2 := seedUser(t, st, "admin2@example.test", "admin")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout) // the user send
+	got := map[string]bool{}
+	for range 2 {
+		got[waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout).to] = true
+	}
+	if !got[admin1.Email] || !got[admin2.Email] {
+		t.Fatalf("admin sends went to %v, want both %s and %s", got, admin1.Email, admin2.Email)
+	}
+	// The SECOND admin's send: live only if it had a context of its own.
+	if err := mailer.LastCtxErr(); err != nil {
+		t.Fatalf("the second admin's send saw ctx.Err() = %v, want nil -- each send must run on its own deliveryTimeout (#83)", err)
+	}
+	if left := mailer.LastDeadlineLeft(); left <= selfServiceTestTimeout {
+		t.Fatalf("the second admin's send had %v left on entry, want a deadline of its own, longer than the %v store-work budget", left, selfServiceTestTimeout)
+	}
+
+	// Three rows: the instant user send also returns sendErr. With the admin
+	// site reverted to s.audit.Log(ctx, ...) only the first survives.
+	pollForAuditRows(t, st, EventEmailSendFailed, 3, 5*time.Second)
 }
 
 // syncBuffer is a bytes.Buffer safe for a slog handler on the detached
@@ -1162,50 +1196,51 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// pollForLog waits until buf contains want, or fails. The line is written by
-// the detached goroutine after the send returns, so polling is what makes this
-// deterministic.
-func pollForLog(t *testing.T, buf *syncBuffer, want string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if strings.Contains(buf.String(), want) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("log never contained %q within %v; got:\n%s", want, timeout, buf.String())
-}
-
-// TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase is #83a.
-// A stalled peer consumes the whole budget at the user's send, so
-// Users().List(ctx) then fails on an already-dead context and the old line
-// pointed a future debugger at a database that is perfectly healthy.
-func TestDoSelfServiceRecovery_ExhaustedBudgetIsNotBlamedOnTheDatabase(t *testing.T) {
+// TestEnabledAdmins_ExhaustedBudgetIsNotBlamedOnTheDatabase is #83a, moved with
+// the List call (design D12, D13). The admin list is now read before any send,
+// so an exhausted budget there means the store work itself was slow. It still
+// must not be reported as a store failure.
+//
+// Driven directly with an already-expired context: database/sql rejects it
+// before reaching the driver (see TestDeliver_SurvivesCanceledRequestContext),
+// so List fails deterministically, without relying on a mailer that ignores its
+// context.
+func TestEnabledAdmins_ExhaustedBudgetIsNotBlamedOnTheDatabase(t *testing.T) {
 	st := openTestStore(t)
-	passkeys := newTestPasskeyService(t, st, discardAudit{})
 	var buf syncBuffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	mailer := &fakeMailer{
-		enabled:   true,
-		sendErr:   errors.New("peer stalled"),
-		sendDelay: selfServiceTestStall,
-		sendCh:    make(chan sentEmail, 4),
+	grants := NewGrantService(st, nil, &fakeMailer{enabled: true}, "https://ddns.example.com", NewAuditWriter(st), log, testLinkTTL)
+	seedUser(t, st, "admin@example.test", "admin")
+
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if got := grants.enabledAdmins(ctx); got != nil {
+		t.Fatalf("enabledAdmins on an expired context = %v, want nil", got)
 	}
-	grants := NewGrantService(st, passkeys, mailer, "https://ddns.example.com", NewAuditWriter(st), log, testLinkTTL)
-	grants.selfServiceTimeout = selfServiceTestTimeout
-
-	u := seedUser(t, st, "alice@example.test", "user")
-	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
-
-	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
-		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	out := buf.String()
+	if !strings.Contains(out, "budget exhausted before listing admins") {
+		t.Errorf("log does not name the exhausted budget; got:\n%s", out)
 	}
-	waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+	if strings.Contains(out, "list admins failed") {
+		t.Errorf("an exhausted budget must not be reported as a store failure; got:\n%s", out)
+	}
+}
 
-	pollForLog(t, &buf, "delivery budget exhausted before notifying admins", 5*time.Second)
-	if got := buf.String(); strings.Contains(got, "list admins failed") {
-		t.Errorf("an exhausted budget must not be reported as a store failure; got:\n%s", got)
+// TestEnabledAdmins_ReturnsOnlyEnabledAdmins: the filter moved out of the send
+// loop with the List call, so it is pinned here, both halves of IsEnabledAdmin.
+func TestEnabledAdmins_ReturnsOnlyEnabledAdmins(t *testing.T) {
+	st := openTestStore(t)
+	grants := newTestGrantService(t, st, nil, &fakeMailer{enabled: true}, NewAuditWriter(st))
+	admin := seedUser(t, st, "admin@example.test", "admin")
+	seedUser(t, st, "user@example.test", "user")
+	disabled := seedUser(t, st, "disabled-admin@example.test", "admin")
+	if err := st.Users().SetDisabled(t.Context(), disabled.ID, true); err != nil {
+		t.Fatalf("SetDisabled: %v", err)
+	}
+
+	got := grants.enabledAdmins(t.Context())
+	if len(got) != 1 || got[0].ID != admin.ID {
+		t.Fatalf("enabledAdmins = %+v, want exactly the enabled admin %s", got, admin.ID)
 	}
 }
 
@@ -1278,5 +1313,56 @@ func TestSendAdvisory_MailsTheRecipientItIsGiven(t *testing.T) {
 	}
 	if len(page.Rows) != 1 || page.Rows[0].TargetID != "target-1" || page.Rows[0].ActorUserID != "actor-1" {
 		t.Fatalf("audit rows = %+v, want one email.send_failed for target-1 by actor-1", page.Rows)
+	}
+}
+
+// TestRequestSelfServiceRecovery_UnmailableStoredAddressStillNotifiesEveryAdmin
+// is #90. A row stored before #80's boundary validations can hold a non-ASCII
+// address. The admin notice is ONE body sent to every admin, so before the fold
+// that address made the transport refuse the notice for every admin, on a
+// pre-auth path. Now only the user's own send fails (its To is unmailable), and
+// every admin gets a notice naming the account by id.
+func TestRequestSelfServiceRecovery_UnmailableStoredAddressStillNotifiesEveryAdmin(t *testing.T) {
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	mailer := &fakeMailer{enabled: true, refuseNonASCII: true, sendCh: make(chan sentEmail, 4)}
+	grants := newTestGrantService(t, st, passkeys, mailer, NewAuditWriter(st))
+
+	u := seedUser(t, st, "josé@example.test", "user") // a legacy row: seedUser bypasses the service's validation
+	admin1 := seedUser(t, st, "admin1@example.test", "admin")
+	admin2 := seedUser(t, st, "admin2@example.test", "admin")
+	registerPasskey(t, passkeys, u.ID, "Existing Key", testRP())
+
+	if err := grants.RequestSelfServiceRecovery(t.Context(), u.Email, "1.2.3.4"); err != nil {
+		t.Fatalf("RequestSelfServiceRecovery: %v", err)
+	}
+	byRecipient := map[string]sentEmail{}
+	for range 3 { // the user, then each admin
+		e := waitForSend(t, mailer.sendCh, selfServiceRecoveryWaitTimeout)
+		byRecipient[e.to] = e
+	}
+	for _, a := range []store.User{admin1, admin2} {
+		e, ok := byRecipient[a.Email]
+		if !ok {
+			t.Fatalf("admin %s was never sent the notice; sends: %v", a.Email, mailer.Sent())
+		}
+		if !email.IsASCII(e.body) {
+			t.Errorf("admin notice body is not ASCII, so the transport would refuse it: %q", e.body)
+		}
+		if !strings.Contains(e.body, u.ID) {
+			t.Errorf("admin notice body %q does not name the account id %q", e.body, u.ID)
+		}
+	}
+
+	// Exactly one failure row, for the user's own unmailable address. Before
+	// the fold there were three: the user plus one per admin.
+	pollForAuditRows(t, st, EventEmailSendFailed, 1, 5*time.Second)
+	time.Sleep(100 * time.Millisecond) // let any further (wrong) rows land before counting
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: EventEmailSendFailed}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].TargetID != u.ID {
+		t.Fatalf("email.send_failed rows = %+v, want exactly one, for the user %s", page.Rows, u.ID)
 	}
 }

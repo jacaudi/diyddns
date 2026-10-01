@@ -395,3 +395,41 @@ func waitForCalls(t *testing.T, calls *atomic.Int32, want int32) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TestTargetURL_DisplayNameTravelsInNameWithPercentTwentySpaces pins #94's
+// transport half. The bare address goes in ?from= and the display name in
+// ?name=. A space must be %20: the library decodes query values with
+// url.PathUnescape, which never turns '+' back into a space, while
+// url.Values.Encode writes a space as '+'.
+func TestTargetURL_DisplayNameTravelsInNameWithPercentTwentySpaces(t *testing.T) {
+	cfg := config.EmailSection{
+		Enabled: true, Host: "smtp.example.test", Port: 2525, TLS: "starttls",
+		From: "DIYDDNS Alerts <noreply@example.test>",
+	}
+	u, err := url.Parse(email.TargetURLForTest(cfg, "user+tag@example.test"))
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	if strings.Contains(u.RawQuery, "+") {
+		t.Errorf("raw query %q contains '+', which the library would not decode to a space", u.RawQuery)
+	}
+	if !strings.Contains(u.RawQuery, "name=DIYDDNS%20Alerts") {
+		t.Errorf("raw query %q does not carry name=DIYDDNS%%20Alerts", u.RawQuery)
+	}
+	q := u.Query()
+	if got := q.Get("from"); got != "noreply@example.test" {
+		t.Errorf("from = %q, want the bare address", got)
+	}
+	if got := q.Get("to"); got != "user+tag@example.test" {
+		t.Errorf("to = %q, want user+tag@example.test (a literal '+' must survive as %%2B)", got)
+	}
+
+	cfg.From = "noreply@example.test"
+	bare, err := url.Parse(email.TargetURLForTest(cfg, "user@example.test"))
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	if bare.Query().Has("name") {
+		t.Errorf("a bare From must not emit ?name=; query %q", bare.RawQuery)
+	}
+}

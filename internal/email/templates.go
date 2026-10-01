@@ -27,7 +27,7 @@ var recoveryTmpl = template.Must(template.New("recovery-link").Parse(
 ))
 
 var adminNotifyTmpl = template.Must(template.New("admin-notify").Parse(
-	"A passkey recovery link was issued for the account {{.Email}}.\r\n\r\n" +
+	"A passkey recovery link was issued for the account {{.Email}} (user {{.ID}}).\r\n\r\n" +
 		"No action is required unless this was unexpected.\r\n",
 ))
 
@@ -70,10 +70,14 @@ func RecoveryLinkBody(link, expiresIn string) (subject, body string) {
 	return renderTemplate(recoveryTmpl, "DIYDDNS passkey recovery link", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
 }
 
-// AdminNotifyBody renders the subject and body of the email sent to
-// administrators when a user's passkey recovery link is issued.
-func AdminNotifyBody(userEmail string) (subject, body string) {
-	return renderTemplate(adminNotifyTmpl, "DIYDDNS passkey recovery issued", struct{ Email string }{Email: userEmail})
+// AdminNotifyBody renders the mail sent to every administrator when a user's
+// passkey recovery link is issued. It is ONE body for many recipients, so a
+// value in it that the transport refuses would suppress the notice to every
+// admin (#90): userEmail is folded to 7-bit ASCII (ASCIIFold), and userID
+// names the account unambiguously even when folding made the address lossy.
+func AdminNotifyBody(userEmail, userID string) (subject, body string) {
+	return renderTemplate(adminNotifyTmpl, "DIYDDNS passkey recovery issued",
+		struct{ Email, ID string }{Email: ASCIIFold(userEmail), ID: userID})
 }
 
 // InviteLinkBody renders the subject and body of the email sent to a user an
@@ -103,9 +107,11 @@ func ReRegistrationLinkBody(link, expiresIn string) (subject, body string) {
 }
 
 // The four #131 bodies. Every address interpolated below has passed
-// NormalizeAddress at the service boundary, so it is 7-bit ASCII and
-// checkSendable's body check cannot reject the message; no body function
-// ever receives a raw input (design §5.4).
+// NormalizeAddress at the service boundary, so it is 7-bit ASCII already. The
+// three that interpolate one fold it anyway (ASCIIFold, a no-op on ASCII), so
+// "no renderer emits a user-controlled value the transport refuses" holds
+// without an exception (#90), and TestRenderedMessagesAreASCII can state it
+// for every renderer.
 
 var emailChangeConfirmTmpl = template.Must(template.New("email-change-confirm").Parse(
 	"A request was made to change the email address on your DIYDDNS account\r\n" +
@@ -150,7 +156,7 @@ func ChangeConfirmBody(link string) (subject, body string) {
 // self-service change is requested, naming the requested address and the two
 // ways to react.
 func ChangeNoticeBody(newEmail string) (subject, body string) {
-	return renderTemplate(emailChangeNoticeTmpl, "A DIYDDNS email address change was requested", struct{ NewEmail string }{NewEmail: newEmail})
+	return renderTemplate(emailChangeNoticeTmpl, "A DIYDDNS email address change was requested", struct{ NewEmail string }{NewEmail: ASCIIFold(newEmail)})
 }
 
 // ChangedBody renders the notice sent to the OLD address once a change
@@ -158,7 +164,7 @@ func ChangeNoticeBody(newEmail string) (subject, body string) {
 // effect. For an admin-made change use AdminChangedBody: this body's
 // closing line assumes the reader could have made the change themselves.
 func ChangedBody(newEmail string) (subject, body string) {
-	return renderTemplate(emailChangedTmpl, "Your DIYDDNS email address was changed", struct{ NewEmail string }{NewEmail: newEmail})
+	return renderTemplate(emailChangedTmpl, "Your DIYDDNS email address was changed", struct{ NewEmail string }{NewEmail: ASCIIFold(newEmail)})
 }
 
 // AdminChangedBody renders the notice sent to the OLD address once an
@@ -166,7 +172,7 @@ func ChangedBody(newEmail string) (subject, body string) {
 // the reason AdminRecoveryLinkBody gives: the closing lines say opposite
 // things.
 func AdminChangedBody(newEmail string) (subject, body string) {
-	return renderTemplate(adminEmailChangedTmpl, "Your DIYDDNS email address was changed by an administrator", struct{ NewEmail string }{NewEmail: newEmail})
+	return renderTemplate(adminEmailChangedTmpl, "Your DIYDDNS email address was changed by an administrator", struct{ NewEmail string }{NewEmail: ASCIIFold(newEmail)})
 }
 
 // deviceDisabledByAdminTmpl and deviceEnabledByAdminTmpl are the owner

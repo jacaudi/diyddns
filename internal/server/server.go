@@ -385,7 +385,7 @@ func buildSweeper(cfg config.Server, st *store.Store, fan *fanout, mailer email.
 			stale.NewMailChannel(mailer),
 			func(ctx context.Context) ([]store.User, error) {
 				// Same rule as the admin fan-out in
-				// GrantService.notifyAdminsOfSelfServiceRecovery
+				// GrantService.enabledAdmins
 				// (internal/server/service/grants.go): enabled admins only.
 				us, err := st.Users().List(ctx)
 				if err != nil {

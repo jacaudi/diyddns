@@ -23,7 +23,7 @@ not necessarily the final outcome (see
 | `email.port` | `DIYDDNS_EMAIL_PORT` | **required** when enabled — 587 starttls · 465 implicit · 25 none |
 | `email.username` | `DIYDDNS_EMAIL_USERNAME` | empty skips SMTP AUTH; set it together with `email.password` or not at all; with `tls: none` refuses to start (see below). No leading or trailing whitespace |
 | `email.password` | `DIYDDNS_EMAIL_PASSWORD` | never logged; set it together with `email.username` or not at all. No leading or trailing whitespace |
-| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — envelope sender; a bare address with a dotted domain (`diyddns@example.com`, not `diyddns@localhost`) |
+| `email.from` | `DIYDDNS_EMAIL_FROM` | **required** when enabled — sender; a bare address with a dotted domain (`diyddns@example.com`, not `diyddns@localhost`), or the same behind a display name: `DIYDDNS <diyddns@example.com>`. The name is ASCII letters, digits and ``!#$%&'*+-/=?^_`{\|}~``, words separated by single spaces; no quotes, commas or dots. The envelope always uses the bare address |
 | `email.tls` | `DIYDDNS_EMAIL_TLS` | `starttls` (default), `implicit`, or `none` |
 
 Enabling email **requires `server.base_url`, `email.host`, `email.port` and `email.from`**; the
@@ -64,7 +64,10 @@ At most 32 email sends are in flight at once. If a peer mail server accepts the
 connection and then goes quiet — wedged, slow, or otherwise unresponsive — the
 slot it holds stays occupied until that conversation ends. Once all 32 slots are
 occupied, a new send fails immediately with a loud `ERROR`-level log rather than
-queuing or blocking behind the stuck ones.
+queuing or blocking behind the stuck ones. A self-service recovery request sends
+once to the user and once to each enabled administrator, each with its own
+12-second limit, so while a mail server is slow a single request can hold more
+than one slot.
 
 A send this system reports as failed because its deadline passed can still
 complete afterward and deliver the message — including a single-use registration
