@@ -254,7 +254,7 @@ func sessionOrAPIKeyMiddleware(api huma.API, keys *service.APIKeyService, sessio
 		case errors.Is(err, store.ErrNotFound):
 			reject("unknown_key")
 			return
-		case ctx.Context().Err() != nil, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		case store.Cancelled(ctx.Context(), err):
 			reject("cancelled")
 			return
 		default:
