@@ -20,7 +20,10 @@ import (
 //     has already logged the reason.
 //   - store.ErrConflict can only come from Devices().Create, so it means the
 //     code's label is already in use on the account: a state the user created,
-//     not a bad code, so 409 (and the code is left unconsumed).
+//     not a bad code, so 409 (and the code is left unconsumed). The service
+//     answers a code lost to a concurrent redeem with ErrNotFound (401), except
+//     in a narrow window between the winner's insert and its consume, where the
+//     loser also gets this 409.
 //   - A cancelled request is the client's doing, not an infrastructure failure:
 //     499, logged at Info.
 //   - Anything else is a real failure: logged at Error, 500.

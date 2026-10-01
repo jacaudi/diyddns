@@ -138,10 +138,11 @@ func (s *EnrollmentService) createSealedDevice(ctx context.Context, userID, labe
 //
 // A code that cannot be redeemed (unknown, expired, used, or lost to a
 // concurrent redeem) is logged with its reason at Info and returned as a
-// wrapped store.ErrNotFound, so the response stays uniform. A valid code whose
-// label is already taken on the account is logged the same way (label_conflict)
-// and returned as a wrapped store.ErrConflict, leaving the code unconsumed. The
-// code itself is never logged.
+// wrapped store.ErrNotFound, so the response stays uniform. A valid, unused
+// code whose label is already taken on the account is logged the same way
+// (label_conflict) and returned as a wrapped store.ErrConflict, leaving the code
+// unconsumed; see conflictRejection for how that is told apart from a lost
+// race. The code itself is never logged.
 func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta ClientMeta) (EnrollResult, error) {
 	c, err := s.st.EnrollmentCodes().Get(ctx, code)
 	if err != nil {
@@ -163,9 +164,7 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 	dev, secret, err := s.createSealedDevice(ctx, c.UserID, c.Label, meta)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			// The label is already in use on this account. The insert failed
-			// before Consume, so the code is left unconsumed.
-			logRejected(ctx, s.log, codeRejectedMsg, rejectLabelConflict, c.UserID)
+			return EnrollResult{}, s.conflictRejection(ctx, code, c, err)
 		}
 		return EnrollResult{}, fmt.Errorf("service.ConsumeCode: %w", err)
 	}
@@ -186,6 +185,31 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 		TargetID:    dev.ID,
 	})
 	return EnrollResult{DeviceID: dev.ID, Secret: secret}, nil
+}
+
+// conflictRejection classifies a store.ErrConflict from creating the code's
+// device and returns the error ConsumeCode must return. A conflict has two
+// causes. A same-code race looks like one: two requests redeem one code, both
+// pass the pre-check, and the winner's device already holds the (user, label),
+// so the loser's insert fails before it reaches Consume. A real label clash is
+// a different code (or device) holding the label. They are told apart by
+// re-reading the code, which happens only on this conflict path: if it is now
+// used, a concurrent redeem of this same code won, so the reason is lost_race and
+// the error is a wrapped store.ErrNotFound (the uniform 401). Otherwise the
+// reason is label_conflict and the original conflict is returned wrapped (the
+// 409); a failed re-read is treated the same way.
+//
+// Residual window: between the winner's insert and its consume the code still
+// reads as unused, so a loser landing in that instant is answered 409. Closing
+// it needs the insert and the consume in one store transaction, which is
+// outside this change.
+func (s *EnrollmentService) conflictRejection(ctx context.Context, code string, c store.EnrollmentCode, err error) error {
+	if fresh, getErr := s.st.EnrollmentCodes().Get(ctx, code); getErr == nil && fresh.UsedAt != 0 {
+		logRejected(ctx, s.log, codeRejectedMsg, rejectLostRace, c.UserID)
+		return fmt.Errorf("service.ConsumeCode: %w", store.ErrNotFound)
+	}
+	logRejected(ctx, s.log, codeRejectedMsg, rejectLabelConflict, c.UserID)
+	return fmt.Errorf("service.ConsumeCode: %w", err)
 }
 
 // rollbackDevice is ConsumeCode's compensating delete. It runs on a context
