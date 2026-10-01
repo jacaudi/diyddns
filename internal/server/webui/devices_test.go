@@ -217,7 +217,10 @@ func TestDeviceList_NoCountdownWhenExpiryDisabled(t *testing.T) {
 func TestDeviceList_CountdownUsesTheSameWindowAsTheSweep(t *testing.T) {
 	h := newWebUIFixture(t)
 	h.setFeed(t, config.FeedSection{Enabled: true, ExpireAfterDays: 10})
-	h.seedConfirmedAt(t, h.now-4*86400) // 6 days left at W=10
+	h.seedConfirmedAt(t, h.now-4*86400+43200) // 6.5 days left at W=10
+	// Half a day of slack, not 6 days exactly: the handler reads time.Now()
+	// after h.now was taken, and HumanDays truncates, so an exact boundary
+	// renders "5 days" whenever a second ticks over in between.
 
 	if body := h.get(t, "/devices"); !strings.Contains(body, "expires in 6 days") {
 		t.Errorf("countdown missing or the wrong window was used:\n%s", body)
@@ -415,7 +418,10 @@ func TestDevicesList_HeaderMatchesTheCells(t *testing.T) {
 func TestDeviceDetail_ShowsCountdownForALiveFamily(t *testing.T) {
 	h := newWebUIFixture(t)
 	h.setFeed(t, config.FeedSection{Enabled: true, ExpireAfterDays: 10})
-	id := h.seedConfirmedAt(t, h.now-4*86400) // 6 days left at W=10
+	id := h.seedConfirmedAt(t, h.now-4*86400+43200) // 6.5 days left at W=10
+	// Half a day of slack, not 6 days exactly: the handler reads time.Now()
+	// after h.now was taken, and HumanDays truncates, so an exact boundary
+	// renders "5 days" whenever a second ticks over in between.
 
 	body := h.get(t, "/devices/"+id)
 	if !strings.Contains(body, "expires in 6 days") {
