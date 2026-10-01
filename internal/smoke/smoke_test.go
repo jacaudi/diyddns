@@ -145,8 +145,8 @@ func beginClaim(t *testing.T, c *http.Client, baseURL, token string) *virtualweb
 // finishClaim posts the signed attestation. The name is merged into the
 // attestation JSON rather than sent alongside it because the handler reads
 // both the ceremony response and its own fields off one raw body. No token
-// is sent: a token here would route to the grant-redeem path instead of the
-// bootstrap claim.
+// is sent: a claim finish needs none. Which flow this is comes from the "claim."
+// tag register/begin put on the challenge cookie, not from the body.
 func finishClaim(t *testing.T, c *http.Client, baseURL, attResp string) {
 	t.Helper()
 	status, respBody := postRaw(t, c, baseURL+"/api/v1/register/finish",

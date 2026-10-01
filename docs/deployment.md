@@ -58,9 +58,8 @@ binaries directly, with no Docker.
    production default, and the server does not create its parent directory.
 3. `./bin/diyddns-server serve --config config.yaml`
 4. The startup log prints `BOOTSTRAP_TOKEN=…` once. Copy it.
-5. Open `/register`, enter the token **and an admin email** — the email is what
-   selects first-run setup over an invite redeem — then register a passkey.
-   This signs you in.
+5. Open `/register`, enter the token and the admin's email, then register a
+   passkey. This signs you in.
 6. Mint an enrollment code at `/devices/new`.
 
 Passkeys require a **secure context**: browse to `localhost`, or terminate TLS

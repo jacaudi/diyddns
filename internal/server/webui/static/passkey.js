@@ -147,9 +147,12 @@
     setStatus(status, "Passkey added.");
   }
 
-  // Token register: shared by the bootstrap, invite, and recovery flows —
-  // token (+ email, bootstrap only) identifies which of the three the
-  // service layer routes to; this page never has to know which one it is.
+  // Token register: shared by the bootstrap, invite, and recovery flows. The
+  // server decides which of the three this is from the token, never from what
+  // is sent here: begin classifies the token and tags the challenge cookie,
+  // and finish follows the tag. The email is sent only when the page has an
+  // Email field (first-run setup, where it names the new admin); a grant
+  // redeem ignores it.
   async function registerWithToken(token, email, name) {
     const status = document.getElementById("register-status");
     setStatus(status, "Waiting for your passkey...");
@@ -157,13 +160,9 @@
     const opts = await api("POST", "/api/v1/register/begin", beginBody);
     const publicKey = decodeCreationOptions(opts.publicKey);
     const cred = await navigator.credentials.create({ publicKey: publicKey });
-    // The finish endpoint routes on the token exactly as begin routes on the
-    // email: a token means "redeem a grant", its absence means "bootstrap
-    // claim". Sending it unconditionally put the bootstrap flow into the
-    // grant path, which then failed with ErrGrantInvalid. Keep the two calls
-    // agreeing about which flow they are in.
-    const finishBody = Object.assign(encodeCredential(cred), { name: name });
-    if (!email) finishBody.token = token;
+    // The token always goes on finish: a grant redeem needs it for its atomic
+    // single-use consume, and a bootstrap claim ignores it.
+    const finishBody = Object.assign(encodeCredential(cred), { name: name, token: token });
     await api("POST", "/api/v1/register/finish", finishBody);
     setStatus(status, "Passkey created. Signing you in...");
     window.location.href = "/account";
@@ -294,9 +293,11 @@
     if (registerForm) {
       registerForm.addEventListener("submit", function (evt) {
         evt.preventDefault();
+        // Only the first-run form has an Email field.
+        const emailField = registerForm.elements.email;
         registerWithToken(
           registerForm.elements.token.value,
-          registerForm.elements.email.value,
+          emailField ? emailField.value : "",
           registerForm.elements.name.value
         ).catch(function (err) {
           setStatus(document.getElementById("register-status"), err.message || "Registration failed", true);
