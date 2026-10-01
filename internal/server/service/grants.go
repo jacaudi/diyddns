@@ -644,25 +644,115 @@ func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u 
 	}
 }
 
+// rejectReason is why a registration grant or an enrollment code was
+// rejected. One vocabulary serves both, so the two services cannot drift.
+type rejectReason string
+
+// The reasons a grant or an enrollment code is rejected. They share one const
+// block so a member that is not yet used (rejectUserMissing, rejectLostRace,
+// rejectLabelConflict) raises no unused finding.
+const (
+	rejectMissing       rejectReason = "missing"        // no token was sent
+	rejectUnknown       rejectReason = "unknown"        // no such row
+	rejectExpired       rejectReason = "expired"        // the row exists and its expiry has passed
+	rejectUsed          rejectReason = "used"           // the row exists and is already consumed
+	rejectUserMissing   rejectReason = "user_missing"   // a live grant whose user row was not found
+	rejectLostRace      rejectReason = "lost_race"      // the atomic Consume matched no row after the pre-check passed
+	rejectLabelConflict rejectReason = "label_conflict" // the code is valid but its label is taken
+)
+
+// RegisterState is which registration flow a /register token belongs to.
+type RegisterState string
+
+// The three states ClassifyRegistration can report. (revive needs this block
+// comment: a trailing comment on an exported constant does not satisfy it.)
+const (
+	RegisterGrant    RegisterState = "grant"     // a live invite or recovery grant
+	RegisterFirstRun RegisterState = "first_run" // no admin exists yet
+	RegisterDead     RegisterState = "dead"      // an admin exists and the token is not a live grant
+)
+
+// RegisterTarget is ClassifyRegistration's answer. Reason and Email are set
+// only for RegisterGrant.
+type RegisterTarget struct {
+	State  RegisterState
+	Reason string // "invite" | "recovery"
+	Email  string // the grant's account
+}
+
+// lookupGrant reads token's grant. reason is "" when the grant is live. The
+// error is non-nil only for a store failure or a cancelled context; "no such
+// row" is rejectUnknown. It is the single place a grant's status is decided.
+func (s *GrantService) lookupGrant(ctx context.Context, token string) (grant store.RecoveryToken, reason rejectReason, err error) {
+	if token == "" {
+		return store.RecoveryToken{}, rejectMissing, nil
+	}
+	grant, err = s.st.AccountRecovery().Get(ctx, auth.HashToken(token))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.RecoveryToken{}, rejectUnknown, nil
+		}
+		return store.RecoveryToken{}, "", fmt.Errorf("service.lookupGrant: %w", err)
+	}
+	switch {
+	case grant.UsedAt != 0:
+		return grant, rejectUsed, nil
+	case grant.ExpiresAt <= store.NowUnix():
+		return grant, rejectExpired, nil
+	}
+	return grant, "", nil
+}
+
 // validGrant looks up token's grant and reports whether it is currently
-// redeemable (exists, not expired, not consumed). This is a non-atomic
-// pre-check — Consume remains the sole atomic single-use gate (design C1);
-// validGrant exists so RedeemBegin can reject a dead token before spending
-// an authenticator ceremony on it, and so RedeemFinish can resolve the
-// target user before verifying.
+// redeemable (exists, not expired, not consumed): ErrGrantInvalid when it is
+// not, a wrapped error when the store failed or the context ended. This is a
+// non-atomic pre-check — Consume remains the sole atomic single-use gate
+// (design C1); validGrant exists so RedeemBegin can reject a dead token
+// before spending an authenticator ceremony on it, and so RedeemFinish can
+// resolve the target user before verifying.
 //
 // The Get lookup is keyed by the token's exact HashToken(token) primary key,
 // so a returned row inherently authenticates the token — no separate
 // constant-time VerifyToken is needed (it would always re-compare equal).
 func (s *GrantService) validGrant(ctx context.Context, token string) (store.RecoveryToken, error) {
-	grant, err := s.st.AccountRecovery().Get(ctx, auth.HashToken(token))
+	grant, reason, err := s.lookupGrant(ctx, token)
 	if err != nil {
-		return store.RecoveryToken{}, ErrGrantInvalid
+		return store.RecoveryToken{}, fmt.Errorf("service.validGrant: %w", err)
 	}
-	if grant.UsedAt != 0 || grant.ExpiresAt <= store.NowUnix() {
+	if reason != "" {
 		return store.RecoveryToken{}, ErrGrantInvalid
 	}
 	return grant, nil
+}
+
+// ClassifyRegistration decides which registration flow token belongs to: a
+// live grant, first-run setup (no admin exists), or neither. It checks the
+// grant first, then whether an admin exists. A live grant whose user row is
+// gone is treated as not live. The error is non-nil only for a store failure
+// or a cancelled context.
+func (s *GrantService) ClassifyRegistration(ctx context.Context, token string) (RegisterTarget, error) {
+	grant, reason, err := s.lookupGrant(ctx, token)
+	if err != nil {
+		return RegisterTarget{}, fmt.Errorf("service.ClassifyRegistration: %w", err)
+	}
+	if reason == "" {
+		u, err := s.st.Users().GetByID(ctx, grant.UserID)
+		switch {
+		case err == nil:
+			return RegisterTarget{State: RegisterGrant, Reason: grant.Reason, Email: u.Email}, nil
+		case !errors.Is(err, store.ErrNotFound):
+			return RegisterTarget{}, fmt.Errorf("service.ClassifyRegistration: %w", err)
+		}
+		// The user row is gone (rejectUserMissing): not live, so fall through.
+	}
+	has, err := adminExists(ctx, s.st)
+	if err != nil {
+		return RegisterTarget{}, fmt.Errorf("service.ClassifyRegistration: %w", err)
+	}
+	if has {
+		return RegisterTarget{State: RegisterDead}, nil
+	}
+	return RegisterTarget{State: RegisterFirstRun}, nil
 }
 
 // RedeemBegin validates token and starts a registration ceremony for its
@@ -725,7 +815,10 @@ func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie str
 	}
 
 	if _, err := s.st.AccountRecovery().Consume(ctx, auth.HashToken(token), store.NowUnix()); err != nil {
-		return store.User{}, ErrGrantInvalid
+		if errors.Is(err, store.ErrNotFound) {
+			return store.User{}, ErrGrantInvalid
+		}
+		return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)
 	}
 
 	if grant.Reason == "recovery" {

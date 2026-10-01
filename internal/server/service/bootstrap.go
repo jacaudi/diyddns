@@ -94,7 +94,13 @@ func (s *BootstrapService) logToken(token string) {
 
 // AdminExists reports whether any user with role "admin" exists.
 func (s *BootstrapService) AdminExists(ctx context.Context) (bool, error) {
-	users, err := s.st.Users().List(ctx)
+	return adminExists(ctx, s.st)
+}
+
+// adminExists is the single definition of "an admin exists", shared by
+// BootstrapService and GrantService.ClassifyRegistration.
+func adminExists(ctx context.Context, st *store.Store) (bool, error) {
+	users, err := st.Users().List(ctx)
 	if err != nil {
 		return false, fmt.Errorf("service.AdminExists: %w", err)
 	}
