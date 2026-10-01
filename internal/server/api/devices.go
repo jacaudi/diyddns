@@ -301,6 +301,10 @@ func registerDeviceMgmtOps(a huma.API, deps ServerDeps) {
 	})
 }
 
+// errDeviceLabelTaken is the 409 message for a device label already in use on
+// the account, shared by deviceMgmtErr and enrollErr.
+const errDeviceLabelTaken = "a device with that label already exists"
+
 // deviceMgmtErr maps a service error to the right huma response: ownership /
 // missing → 404, label conflict → 409, everything else → logged 500.
 func deviceMgmtErr(ctx context.Context, deps ServerDeps, action, userID, deviceID string, err error) error {
@@ -308,7 +312,7 @@ func deviceMgmtErr(ctx context.Context, deps ServerDeps, action, userID, deviceI
 	case errors.Is(err, store.ErrNotFound):
 		return huma.Error404NotFound("device not found")
 	case errors.Is(err, store.ErrConflict):
-		return huma.Error409Conflict("a device with that label already exists")
+		return huma.Error409Conflict(errDeviceLabelTaken)
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed",
 			slog.String("user_id", userID), slog.String("device_id", deviceID), slog.Any("error", err))
