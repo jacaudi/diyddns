@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/store"
@@ -120,5 +121,58 @@ func TestEnrollmentService_ConsumeCode_LogsAFailedCompensatingDelete(t *testing.
 	if got, _ := rec["error"].(string); got == "" {
 		t.Errorf("error attribute = %v, want the cause", rec["error"])
 	}
+	assertNoSecrets(t, buf, code)
+}
+
+// TestEnrollmentService_ConflictRejection_UsedCodeIsALostRace: two requests
+// redeem one code and both pass the pre-check. The winner's device already
+// holds the label, so the loser's insert fails with ErrConflict before it
+// reaches Consume. The code now reads as used, so it is a lost race (the
+// uniform ErrNotFound), not a label clash.
+func TestEnrollmentService_ConflictRejection_UsedCodeIsALostRace(t *testing.T) {
+	st, svc, buf := newLoggedEnrollment(t)
+	user := seedUser(t, st, "bob@example.com", "user")
+	code, _, err := svc.CreateCode(t.Context(), user.ID, "laptop")
+	if err != nil {
+		t.Fatalf("CreateCode: %v", err)
+	}
+	read, err := st.EnrollmentCodes().Get(t.Context(), code) // as the loser read it, before the winner redeemed
+	if err != nil {
+		t.Fatalf("EnrollmentCodes.Get: %v", err)
+	}
+	if _, err := svc.ConsumeCode(t.Context(), code, ClientMeta{}); err != nil {
+		t.Fatalf("winner ConsumeCode: %v", err)
+	}
+	buf.reset()
+
+	got := svc.conflictRejection(t.Context(), code, read, fmt.Errorf("devices.Create: %w", store.ErrConflict))
+
+	if !errors.Is(got, store.ErrNotFound) || errors.Is(got, store.ErrConflict) {
+		t.Errorf("err = %v, want ErrNotFound and not ErrConflict", got)
+	}
+	wantRejection(t, buf, msgCodeRejected, rejectLostRace, user.ID)
+	assertNoSecrets(t, buf, code)
+}
+
+// TestEnrollmentService_ConflictRejection_UnusedCodeIsALabelConflict: the code
+// is still unused, so the label is held by some other device: a real clash.
+func TestEnrollmentService_ConflictRejection_UnusedCodeIsALabelConflict(t *testing.T) {
+	st, svc, buf := newLoggedEnrollment(t)
+	user := seedUser(t, st, "bob@example.com", "user")
+	code, _, err := svc.CreateCode(t.Context(), user.ID, "laptop")
+	if err != nil {
+		t.Fatalf("CreateCode: %v", err)
+	}
+	read, err := st.EnrollmentCodes().Get(t.Context(), code)
+	if err != nil {
+		t.Fatalf("EnrollmentCodes.Get: %v", err)
+	}
+
+	got := svc.conflictRejection(t.Context(), code, read, fmt.Errorf("devices.Create: %w", store.ErrConflict))
+
+	if !errors.Is(got, store.ErrConflict) || errors.Is(got, store.ErrNotFound) {
+		t.Errorf("err = %v, want ErrConflict and not ErrNotFound", got)
+	}
+	wantRejection(t, buf, msgCodeRejected, rejectLabelConflict, user.ID)
 	assertNoSecrets(t, buf, code)
 }
