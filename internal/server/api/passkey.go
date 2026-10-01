@@ -31,7 +31,11 @@ const webauthnChallengeCookieName = "diyddns_webauthn_challenge"
 // #49, broke the same way). The tag only chooses between the grant opener and
 // the claim opener, which seal under different AADs, so it needs no
 // authentication: a forged tag sends the value to an opener that rejects it.
-// Only register/begin and register/finish use it; the login and add-passkey
+// The one exception is a login or add-passkey cookie retagged "grant.", which
+// opens under the same AAD; that gives the client no choice it did not already
+// have, since any such cookie could already be sent to register/finish, and it
+// still needs a live grant token to do anything (design D4). Only
+// register/begin and register/finish use it; the login and add-passkey
 // ceremonies keep their untagged cookies.
 type registerFlow string
 
@@ -68,6 +72,9 @@ func splitChallenge(value string) (flow registerFlow, sealed string, ok bool) {
 // lacked credentials. webui declares its own copy: the two adapters share no
 // HTTP-layer package.
 const statusClientClosedRequest = 499
+
+// msgClientClosedRequest is the detail sent with statusClientClosedRequest.
+const msgClientClosedRequest = "client closed request"
 
 // webauthnChallengeCookieMaxAge bounds how long an unconsumed challenge
 // cookie lingers client-side. It is generous relative to the ceremony's own
@@ -205,10 +212,12 @@ func decodeCredID(id string) ([]byte, error) {
 // ceremony sentinels (login, account registration, grant redeem, bootstrap
 // claim) and passkey-management sentinels (List/Rename/Remove) alike — to
 // the right huma response, mirroring adminErr's one-mapper-per-file
-// convention (admin.go). Anything unrecognized is an unexpected internal
-// failure: logged and reported as a generic 500, never collapsed into the
-// uniform 401 (that would hide real infrastructure problems behind a message
-// meant only for ceremony verification failures).
+// convention (admin.go). A request whose context ended (store.Cancelled) is
+// the client's doing: logged at Info and answered 499 "client closed request".
+// Anything unrecognized is an unexpected internal failure: logged and reported
+// as a generic 500, never collapsed into the uniform 401 (that would hide real
+// infrastructure problems behind a message meant only for ceremony
+// verification failures).
 func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) error {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -231,7 +240,7 @@ func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) 
 		// The client went away mid-request (or the store reported it): not an
 		// infrastructure failure, so Info, not Error, and not a 5xx.
 		deps.Log.LogAttrs(ctx, slog.LevelInfo, action+" cancelled", slog.Any("error", err))
-		return huma.NewError(statusClientClosedRequest, "client closed request")
+		return huma.NewError(statusClientClosedRequest, msgClientClosedRequest)
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)

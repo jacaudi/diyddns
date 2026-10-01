@@ -60,8 +60,8 @@ func TestEnrollmentService_ConsumeCode_LogsALabelConflict(t *testing.T) {
 // failed on a cancelled request context would make an ordinary delete fail for
 // the same reason and leave an orphan device, which the next redeem of the code
 // would then meet as a 409. rollbackDevice therefore deletes on a context that
-// survives cancellation. It is tested directly: nothing can cancel a context
-// between the insert and Consume inside one ConsumeCode call.
+// survives cancellation. It is tested directly: a test cannot inject a
+// cancellation between the insert and Consume inside one ConsumeCode call.
 func TestEnrollmentService_RollbackDevice_SurvivesACancelledContext(t *testing.T) {
 	st, svc, buf := newLoggedEnrollment(t)
 	user := seedUser(t, st, "bob@example.com", "user")
