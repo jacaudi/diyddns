@@ -33,26 +33,32 @@ func recordsAt(t *testing.T, buf *bytes.Buffer, level string) []map[string]any {
 	return out
 }
 
-// TestPasskeyErr_CancelledRequest is a white-box test: a request that was
-// cancelled cannot be sent through the HTTP harness deterministically, so the
-// mapper is driven directly. A cancelled request is the client's doing, not an
-// infrastructure failure: 499, one Info line, no Error line. The sentinel
-// cases still win, so a wrapped store.ErrNotFound stays a 404.
+// TestPasskeyErr_CancelledRequest drives the mapper directly, so the status
+// literal and the sentinel-before-cancelled order are pinned without a server.
+// The HTTP path is TestRegister_BeginForACancelledRequest. A cancelled request
+// is the client's doing, not an infrastructure failure: 499, one Info line, no
+// Error line. The sentinel cases still win, so a wrapped store.ErrNotFound
+// stays a 404.
 func TestPasskeyErr_CancelledRequest(t *testing.T) {
 	tests := []struct {
 		name       string
 		err        error
+		cancelled  bool
 		wantStatus int
 		wantInfo   int
 	}{
-		{"wrapped context.Canceled", fmt.Errorf("account_recovery.Get: %w", context.Canceled), 499, 1}, // the literal: a changed constant must fail this
-		{"sentinel wins over cancellation", fmt.Errorf("get: %w", store.ErrNotFound), 404, 0},
+		{"wrapped context.Canceled", fmt.Errorf("account_recovery.Get: %w", context.Canceled), true, 499, 1}, // the literal: a changed constant must fail this
+		{"error alone, live context", fmt.Errorf("account_recovery.Get: %w", context.Canceled), false, 499, 1},
+		{"sentinel wins over cancellation", fmt.Errorf("get: %w", store.ErrNotFound), true, 404, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			log, buf := captureLogger()
 			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
+			if tt.cancelled {
+				cancel()
+			}
+			defer cancel()
 
 			err := passkeyErr(ctx, ServerDeps{Log: log}, "begin registration", tt.err)
 

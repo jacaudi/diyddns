@@ -648,16 +648,15 @@ func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u 
 // rejected. One vocabulary serves both, so the two services cannot drift.
 type rejectReason string
 
-// The reasons a grant or an enrollment code is rejected. They share one const
-// block so a member that is not yet used (rejectUserMissing, rejectLostRace,
-// rejectLabelConflict) raises no unused finding.
+// The reasons a grant or an enrollment code is rejected. One const block, so
+// both services draw from one vocabulary (design §4.2).
 const (
 	rejectMissing       rejectReason = "missing"        // no token was sent
 	rejectUnknown       rejectReason = "unknown"        // no such row
 	rejectExpired       rejectReason = "expired"        // the row exists and its expiry has passed
 	rejectUsed          rejectReason = "used"           // the row exists and is already consumed
 	rejectUserMissing   rejectReason = "user_missing"   // a live grant whose user row was not found
-	rejectLostRace      rejectReason = "lost_race"      // the atomic Consume matched no row after the pre-check passed
+	rejectLostRace      rejectReason = "lost_race"      // the pre-check passed but a concurrent redeem (or, for a grant, the clock) won: Consume matched no row, or the code reads as used on the conflict re-read
 	rejectLabelConflict rejectReason = "label_conflict" // the code is valid but its label is taken
 )
 

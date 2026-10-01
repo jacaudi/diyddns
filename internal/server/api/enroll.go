@@ -35,7 +35,7 @@ func enrollErr(ctx context.Context, deps ServerDeps, err error) error {
 		return huma.Error409Conflict(errDeviceLabelTaken)
 	case store.Cancelled(ctx, err):
 		deps.Log.LogAttrs(ctx, slog.LevelInfo, "enroll device cancelled", slog.Any("error", err))
-		return huma.NewError(statusClientClosedRequest, "client closed request")
+		return huma.NewError(statusClientClosedRequest, msgClientClosedRequest)
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, "enroll device failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to enroll device")
