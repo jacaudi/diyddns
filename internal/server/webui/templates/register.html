@@ -1,7 +1,21 @@
 {{define "content"}}
 <div class="card auth-card">
-  <h1>Create your passkey</h1>
-  <p class="muted">Used for the first-run admin setup, an invited account, or recovering a lost passkey.</p>
+{{if .IsGrant}}
+  <h1>{{if .IsRecovery}}Recover your passkey{{else}}Finish setting up your account{{end}}</h1>
+  <p class="muted">Account: <strong>{{.AccountEmail}}</strong></p>
+  {{if .IsRecovery}}<p class="muted">Creating this passkey removes the passkeys already on this account.</p>{{end}}
+  <form id="register-form">
+    <input type="hidden" id="register-token" name="token" value="{{.Token}}">
+    <div class="field">
+      <label for="register-name">Passkey name</label>
+      <input class="input" id="register-name" name="name" type="text" autocomplete="off" placeholder="e.g. MacBook Pro" required>
+    </div>
+    <button class="btn primary block" type="submit">Create passkey</button>
+  </form>
+  <p id="register-status" class="status" role="status" aria-live="polite"></p>
+{{else if .IsFirstRun}}
+  <h1>Set up the first admin</h1>
+  <p class="muted">Enter the bootstrap token from the server log and the email the admin account should use.</p>
   <form id="register-form">
     <div class="field">
       <label for="register-token">Registration token</label>
@@ -9,13 +23,7 @@
     </div>
     <div class="field">
       <label for="register-email">Email</label>
-      <input class="input" id="register-email" name="email" type="email" autocomplete="email"
-             placeholder="you@example.com — required for first-run admin setup">
-      <p class="muted small">
-        Leave blank only if you followed an invite or recovery link. Setting up
-        the first admin? Enter the email the account should use — it is what
-        tells the server this is first-run setup rather than a redeem.
-      </p>
+      <input class="input" id="register-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
     </div>
     <div class="field">
       <label for="register-name">Passkey name</label>
@@ -24,5 +32,16 @@
     <button class="btn primary block" type="submit">Create passkey</button>
   </form>
   <p id="register-status" class="status" role="status" aria-live="polite"></p>
+{{else if .Token}}
+  <h1>This link can't be used</h1>
+  <p class="muted">It is invalid, has expired, or was already used.</p>
+  <p><strong>Ask an administrator for a new link.</strong></p>
+  {{if .MailEnabled}}<p class="muted">If you requested this link yourself from the sign-in page, you can request another one there.</p>{{end}}
+  <p class="muted center"><a href="/login">Go to sign in</a></p>
+{{else}}
+  <h1>You need a registration link</h1>
+  <p class="muted">Open the invite or recovery link you were sent.</p>
+  <p class="muted center"><a href="/login">Go to sign in</a></p>
+{{end}}
 </div>
 {{end}}

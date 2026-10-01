@@ -4,9 +4,9 @@
 //
 // Why this exists, when internal/smoke already covers the same flow: the Go
 // harness speaks to the API directly, so it never executes passkey.js or
-// ui.js. A bug in passkey.js — sending the grant token on a bootstrap-claim
-// finish — made first-run admin setup impossible in a browser while every Go
-// test stayed green. Nothing else in this repo runs the browser client, and
+// ui.js. A bug in passkey.js — a finish body that disagreed with its begin
+// about which registration flow it was in — made first-run admin setup
+// impossible in a browser while every Go test stayed green. Nothing else in this repo runs the browser client, and
 // nothing else in this repo can see rendered CSS geometry: a stylesheet-text
 // assertion can prove a rule exists, only a browser can prove two elements
 // line up (see the topbar brand/nav centre-line check below, added after two
@@ -40,6 +40,26 @@ import { execFileSync } from "node:child_process";
 const [, , BASE_URL, TOKEN, CLIENT_BIN, CREDS_PATH, DISCOVERY] = process.argv;
 const EMAIL = "browser-admin@example.com";
 const PASSKEY_NAME = "Browser Test Key";
+const INVITEE_EMAIL = "browser-invitee@example.com";
+const INVITEE_PASSKEY_NAME = "Invitee Test Key";
+
+// A virtual authenticator via CDP. Without one navigator.credentials.create()
+// would wait forever for hardware that isn't there. Every browser context that
+// registers a passkey needs its own.
+const addVirtualAuthenticator = async (ctx, pg) => {
+  const cdp = await ctx.newCDPSession(pg);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true, // discoverable credentials — login has no username field
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+};
 
 if (!BASE_URL || !TOKEN || !CLIENT_BIN || !CREDS_PATH || !DISCOVERY) {
   console.error("usage: smoke.mjs <base-url> <bootstrap-token> <client-bin> <creds-path> <discover|skip-discovery>");
@@ -65,21 +85,8 @@ page.on("console", (m) => {
 });
 
 try {
-  // A virtual authenticator via CDP. Without this navigator.credentials.create()
-  // would wait forever for hardware that isn't there.
   step("attach a virtual authenticator");
-  const client = await context.newCDPSession(page);
-  await client.send("WebAuthn.enable");
-  await client.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true, // discoverable credentials — login has no username field
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  });
+  await addVirtualAuthenticator(context, page);
 
   step("GET /register");
   await page.goto(`${BASE_URL}/register`, { waitUntil: "domcontentloaded" });
@@ -444,6 +451,62 @@ try {
   await page.goto(`${BASE_URL}/admin/audit?event_type=device.enroll.code`, { waitUntil: "domcontentloaded" });
   if (!(await page.textContent("main")).includes("device.enroll.code")) {
     fail("the audit filter did not find the enrollment event");
+  }
+
+  // Regression guard for #188: /register used to decide between first-run setup
+  // and an invite redeem on whether the Email field was filled in, so an
+  // invitee whose browser autofilled it was told "bootstrap already completed".
+  // The invite page now has no Email field at all and carries the token in a
+  // hidden input. Only a browser running the real passkey.js can prove the
+  // whole round trip, so an invited user registers here, in a browser context of
+  // their own (a context shares cookies, and the admin session must not leak
+  // into the invitee's) with its own virtual authenticator.
+  step("invite a user through /admin/users/new and read the revealed link");
+  await page.goto(`${BASE_URL}/admin/users/new`, { waitUntil: "domcontentloaded" });
+  await page.fill("#email", INVITEE_EMAIL);
+  await page.click('form[action="/admin/users/new"] button[type=submit]');
+  await page.waitForSelector("main code", { timeout: 10000 }).catch(() =>
+    fail("the invite reveal never showed a link"));
+  const inviteLink = new URL((await page.locator("main code").first().textContent()).trim());
+  if (inviteLink.pathname !== "/register" || !inviteLink.searchParams.get("token")) {
+    fail(`the revealed invite link is not a /register?token= link: ${inviteLink}`);
+  }
+
+  step("open the invite link in a fresh browser context with its own authenticator");
+  const inviteeContext = await browser.newContext();
+  const inviteePage = await inviteeContext.newPage();
+  inviteePage.on("pageerror", (e) => pageErrors.push(String(e)));
+  inviteePage.on("console", (m) => {
+    if (m.type() === "error") pageErrors.push(m.text());
+  });
+  await addVirtualAuthenticator(inviteeContext, inviteePage);
+  // Use the link's path and query on BASE_URL: its host is server.base_url, which
+  // need not be the address this script reaches the server on.
+  await inviteePage.goto(`${BASE_URL}${inviteLink.pathname}${inviteLink.search}`, { waitUntil: "domcontentloaded" });
+
+  step("the invite page has no Email field, and the token rides in a hidden input");
+  if ((await inviteePage.locator("#register-email").count()) !== 0) {
+    fail("the invite page still has an Email field (#register-email)");
+  }
+  if ((await inviteePage.locator("#register-form input[type=hidden][name=token]").count()) !== 1) {
+    fail("the invite page has no hidden token input");
+  }
+  if (!(await inviteePage.textContent("main")).includes(INVITEE_EMAIL)) {
+    fail("the invite page does not name the account being set up");
+  }
+
+  step("register the invitee's passkey and land on /account, signed in");
+  await inviteePage.fill("#register-name", INVITEE_PASSKEY_NAME);
+  await inviteePage.click("#register-form button[type=submit]");
+  try {
+    await inviteePage.waitForURL(`${BASE_URL}/account`, { timeout: 15000 });
+  } catch {
+    const status = (await inviteePage.textContent("#register-status").catch(() => null)) ?? "(no status)";
+    fail(`the invitee did not reach /account. status="${status.trim()}" url=${inviteePage.url()}` +
+      (pageErrors.length ? ` pageErrors=${JSON.stringify(pageErrors)}` : ""));
+  }
+  if (!(await inviteePage.textContent("main")).includes(INVITEE_EMAIL)) {
+    fail("the invitee's /account page does not show their own address");
   }
 
   if (pageErrors.length) {

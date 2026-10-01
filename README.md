@@ -159,9 +159,8 @@ DIYDDNS_AUTH_HMAC_SECRET_KEY=<output of: head -c 32 /dev/urandom | base64>
 3. `docker compose logs diyddns | grep BOOTSTRAP_TOKEN` — the startup log
    prints it once. Copy it.
 
-4. Open `https://ddns.example.com/register`, enter the token **and an admin
-   email** — the email is what selects first-run setup over an invite
-   redeem — then register a passkey. This signs you in.
+4. Open `https://ddns.example.com/register`, enter the token and the admin's
+   email, then register a passkey. This signs you in.
 
 5. Mint an enrollment code at `/devices/new`.
 

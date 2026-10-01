@@ -124,8 +124,7 @@ auth:
   #   1. Start the server. It mints a single-use token and logs
   #        BOOTSTRAP_TOKEN=<token> claim the first admin at /register ...
   #      The plaintext is printed exactly once and cannot be reprinted.
-  #   2. Open /register in a browser, enter the token AND an admin email
-  #      (the email is what selects first-run setup over an invite redeem),
+  #   2. Open /register in a browser, enter the token and the admin's email,
   #      and register a passkey.
   #
   # This cannot be driven by curl: a WebAuthn ceremony needs an authenticator

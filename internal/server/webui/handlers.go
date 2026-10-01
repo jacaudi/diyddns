@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -197,15 +198,64 @@ func (h *handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, "login", data)
 }
 
-// registerData is register.html's template data.
+// registerData is register.html's template data. The page renders one of five
+// states from State, Reason and Token (see handleRegister).
 type registerData struct {
 	pageData
-	Token string // from ?token=; "" for a bootstrap claim (no invite/recovery link exists yet)
+	State        service.RegisterState
+	Reason       string // the grant's reason, "invite" | "recovery"; a grant render only
+	AccountEmail string // the grant's account; a grant render only
+	Token        string // from ?token=: the hidden input on a grant render, pre-fills first-run, and tells the dead page whether a link was given
+	MailEnabled  bool   // email.enabled: the dead page mentions requesting another link from the sign-in page only then
 }
 
-// handleRegister renders /register, shared by the bootstrap, recovery, and
-// invite token-redeem ceremonies (they differ only in the JSON body
-// static/passkey.js sends to /api/v1/register/begin, not in this page).
+// IsGrant reports a live invite or recovery grant: the form has no Email field
+// and carries the token in a hidden input.
+func (d registerData) IsGrant() bool { return d.State == service.RegisterGrant }
+
+// IsFirstRun reports first-run admin setup: the form asks for token, email and
+// passkey name.
+func (d registerData) IsFirstRun() bool { return d.State == service.RegisterFirstRun }
+
+// IsRecovery reports a recovery grant, whose redeem removes the account's
+// existing passkeys.
+func (d registerData) IsRecovery() bool { return d.Reason == "recovery" }
+
+// statusClientClosedRequest is the status for a request whose client went away
+// before the page was rendered (nginx's 499). net/http has no constant for it.
+// api declares its own copy: the two adapters share no HTTP-layer package.
+const statusClientClosedRequest = 499
+
+// handleRegister renders /register from GrantService.ClassifyRegistration, so
+// the page and POST /api/v1/register/begin can never disagree about which flow
+// a token is in (#188): a live grant names its flow and account (no Email
+// field, the token in a hidden input), first-run setup shows the claim form,
+// and anything else is a dead end with no form. Every render is a 200. The
+// render is never a security boundary and changes no state; Consume stays the
+// only single-use gate.
+//
+// A request whose client has gone away gets a 499 with no body. It must write a
+// status: a client that half-closes is still reading, and returning silently
+// would hand it an empty 200. Any other classifier failure is a store failure:
+// logged, and the shared error page.
 func (h *handler) handleRegister(w http.ResponseWriter, r *http.Request) {
-	h.render(w, r, "register", registerData{Token: r.URL.Query().Get("token")})
+	ctx := r.Context()
+	token := r.URL.Query().Get("token")
+	target, err := h.deps.Grants.ClassifyRegistration(ctx, token)
+	if err != nil {
+		if store.Cancelled(ctx, err) {
+			h.deps.Log.LogAttrs(ctx, slog.LevelInfo, "webui: register cancelled", slog.Any("error", err))
+			w.WriteHeader(statusClientClosedRequest)
+			return
+		}
+		h.logAndFail(w, r, store.User{}, "classify registration", err)
+		return
+	}
+	h.render(w, r, "register", registerData{
+		State:        target.State,
+		Reason:       target.Reason,
+		AccountEmail: target.Email,
+		Token:        token,
+		MailEnabled:  h.deps.Cfg.Email.Enabled,
+	})
 }
