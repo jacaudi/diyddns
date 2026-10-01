@@ -87,7 +87,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Cfg:         cfg,
 		Log:         log,
 		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
-		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit),
+		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit, log),
 		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}, nil, log),
 		Grants:      grants,
 		EmailChange: emailChange,

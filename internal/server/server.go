@@ -264,7 +264,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 	// layer, and a dependency added to a service later must not silently exist
 	// twice.
 	devicesSvc := service.NewDeviceService(st, key, verifier, audit, devNotifier)
-	enrollSvc := service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit)
+	enrollSvc := service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit, log)
 	adminSvc := service.NewAdminService(st, audit, grantSvc, devNotifier, mailer, log)
 
 	mux := http.NewServeMux()

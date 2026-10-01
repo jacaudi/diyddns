@@ -81,7 +81,8 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		key[i] = byte(i)
 	}
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
-	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
 	checkinSvc := service.NewCheckinService(st, service.NopNotifier{})
 	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{}, service.NopDeviceNotifier{})
 
@@ -98,7 +99,6 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	}
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Session.TTL, cfg.Session.SlideWindow)
 	authSvc := service.NewAuthService(sessions, discardAgentAudit{})
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// One 32-byte master key seals both the agent HMAC envelope (via
 	// verifier) and every AEAD-sealed browser cookie (session challenge,

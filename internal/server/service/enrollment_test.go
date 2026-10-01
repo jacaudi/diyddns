@@ -55,7 +55,7 @@ func seedUser(t *testing.T, st *store.Store, email, role string) store.User {
 func TestCreateCode_InsertsCode(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
+	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
 
 	code, expiresAt, err := svc.CreateCode(t.Context(), usr.ID, "laptop")
 	if err != nil {
@@ -80,7 +80,7 @@ func TestCreateCode_InsertsCode(t *testing.T) {
 func TestConsumeCode_HappyPath(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
+	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
 
 	code, _, err := svc.CreateCode(t.Context(), usr.ID, "laptop")
 	if err != nil {
@@ -151,7 +151,7 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 			name: "already used",
 			seed: func(t *testing.T, st *store.Store, usr store.User) (string, int) {
 				t.Helper()
-				svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
+				svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
 				code, _, err := svc.CreateCode(t.Context(), usr.ID, "x")
 				if err != nil {
 					t.Fatalf("CreateCode: %v", err)
@@ -177,7 +177,7 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 			usr := seedUser(t, st, "a@b.co", "user")
 			code, wantDevicesBefore := tt.seed(t, st, usr)
 
-			svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
+			svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
 			if _, err := svc.ConsumeCode(t.Context(), code, ClientMeta{}); err == nil {
 				t.Fatal("expected error consuming invalid code")
 			}
@@ -196,7 +196,7 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 func TestEnrollForUser_MintsSealedDeviceWithAudit(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "u@x.com", "user")
-	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{})
+	svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
 
 	res, err := svc.EnrollForUser(t.Context(), usr.ID, "device.enroll.oidc", ClientMeta{Hostname: "homelab"})
 	if err != nil {
