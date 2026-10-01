@@ -661,6 +661,22 @@ const (
 	rejectLabelConflict rejectReason = "label_conflict" // the code is valid but its label is taken
 )
 
+// grantRejectedMsg is the log message for a rejected registration grant.
+const grantRejectedMsg = "registration grant rejected"
+
+// logRejected records why a registration grant or an enrollment code was
+// rejected: Info, because an anonymous caller can cause it, with the request
+// context so the line carries the request id. userID is "" when no row was
+// found. It never takes the token, its hash or the code: none of them belongs
+// in a log.
+func logRejected(ctx context.Context, log *slog.Logger, msg string, reason rejectReason, userID string) {
+	attrs := []slog.Attr{slog.String("reason", string(reason))}
+	if userID != "" {
+		attrs = append(attrs, slog.String("user_id", userID))
+	}
+	log.LogAttrs(ctx, slog.LevelInfo, msg, attrs...)
+}
+
 // RegisterState is which registration flow a /register token belongs to.
 type RegisterState string
 
@@ -720,6 +736,7 @@ func (s *GrantService) validGrant(ctx context.Context, token string) (store.Reco
 		return store.RecoveryToken{}, fmt.Errorf("service.validGrant: %w", err)
 	}
 	if reason != "" {
+		logRejected(ctx, s.log, grantRejectedMsg, reason, grant.UserID)
 		return store.RecoveryToken{}, ErrGrantInvalid
 	}
 	return grant, nil
@@ -730,6 +747,10 @@ func (s *GrantService) validGrant(ctx context.Context, token string) (store.Reco
 // grant first, then whether an admin exists. A live grant whose user row is
 // gone is treated as not live. The error is non-nil only for a store failure
 // or a cancelled context.
+//
+// A token that ends up dead is logged with its reason, exactly like validGrant
+// does. A bare /register visit (no token) and first-run setup (the bootstrap
+// token is not a grant, so it is "unknown" here by design) log nothing.
 func (s *GrantService) ClassifyRegistration(ctx context.Context, token string) (RegisterTarget, error) {
 	grant, reason, err := s.lookupGrant(ctx, token)
 	if err != nil {
@@ -743,13 +764,17 @@ func (s *GrantService) ClassifyRegistration(ctx context.Context, token string) (
 		case !errors.Is(err, store.ErrNotFound):
 			return RegisterTarget{}, fmt.Errorf("service.ClassifyRegistration: %w", err)
 		}
-		// The user row is gone (rejectUserMissing): not live, so fall through.
+		// The user row is gone: not live, so fall through.
+		reason = rejectUserMissing
 	}
 	has, err := adminExists(ctx, s.st)
 	if err != nil {
 		return RegisterTarget{}, fmt.Errorf("service.ClassifyRegistration: %w", err)
 	}
 	if has {
+		if token != "" {
+			logRejected(ctx, s.log, grantRejectedMsg, reason, grant.UserID)
+		}
 		return RegisterTarget{State: RegisterDead}, nil
 	}
 	return RegisterTarget{State: RegisterFirstRun}, nil
@@ -816,6 +841,9 @@ func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie str
 
 	if _, err := s.st.AccountRecovery().Consume(ctx, auth.HashToken(token), store.NowUnix()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			// The pre-check passed, so another redeem (or the clock) got here
+			// first: for a grant, lost_race covers both.
+			logRejected(ctx, s.log, grantRejectedMsg, rejectLostRace, grant.UserID)
 			return store.User{}, ErrGrantInvalid
 		}
 		return store.User{}, fmt.Errorf("service.RedeemFinish: %w", err)

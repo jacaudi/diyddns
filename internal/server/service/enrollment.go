@@ -8,12 +8,17 @@ package service
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/store"
 )
+
+// codeRejectedMsg is the log message for a rejected enrollment code.
+const codeRejectedMsg = "enrollment code rejected"
 
 // ClientMeta captures device-identifying details reported by a client during
 // enrollment or check-in.
@@ -65,13 +70,15 @@ type EnrollmentService struct {
 	key     []byte
 	codeTTL time.Duration
 	audit   AuditSink
+	log     *slog.Logger
 }
 
 // NewEnrollmentService constructs an EnrollmentService. key is the 32-byte
 // AEAD key used to seal device secrets (see auth.SealSecret); codeTTL is how
-// long a freshly-minted enrollment code stays valid.
-func NewEnrollmentService(st *store.Store, key []byte, codeTTL time.Duration, audit AuditSink) *EnrollmentService {
-	return &EnrollmentService{st: st, key: key, codeTTL: codeTTL, audit: audit}
+// long a freshly-minted enrollment code stays valid; log receives the reason
+// ConsumeCode rejects a code.
+func NewEnrollmentService(st *store.Store, key []byte, codeTTL time.Duration, audit AuditSink, log *slog.Logger) *EnrollmentService {
+	return &EnrollmentService{st: st, key: key, codeTTL: codeTTL, audit: audit, log: log}
 }
 
 // CreateCode mints a single-use enrollment code for userID, valid for the
@@ -128,13 +135,26 @@ func (s *EnrollmentService) createSealedDevice(ctx context.Context, userID, labe
 // Consume fails after the device was created, the device is
 // compensating-deleted so a failed code-consume never leaves an orphan
 // device behind.
+//
+// A code that cannot be redeemed (unknown, expired, used, or lost to a
+// concurrent redeem) is logged with its reason at Info and returned as a
+// wrapped store.ErrNotFound, so the response stays uniform. The code itself is
+// never logged.
 func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta ClientMeta) (EnrollResult, error) {
 	c, err := s.st.EnrollmentCodes().Get(ctx, code)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			logRejected(ctx, s.log, codeRejectedMsg, rejectUnknown, "")
+		}
 		return EnrollResult{}, fmt.Errorf("service.ConsumeCode: %w", err) // ErrNotFound flows up
 	}
 	now := store.NowUnix()
-	if c.UsedAt != 0 || c.ExpiresAt <= now {
+	switch {
+	case c.UsedAt != 0:
+		logRejected(ctx, s.log, codeRejectedMsg, rejectUsed, c.UserID)
+		return EnrollResult{}, fmt.Errorf("service.ConsumeCode: %w", store.ErrNotFound)
+	case c.ExpiresAt <= now:
+		logRejected(ctx, s.log, codeRejectedMsg, rejectExpired, c.UserID)
 		return EnrollResult{}, fmt.Errorf("service.ConsumeCode: %w", store.ErrNotFound)
 	}
 
@@ -145,6 +165,10 @@ func (s *EnrollmentService) ConsumeCode(ctx context.Context, code string, meta C
 
 	if _, err := s.st.EnrollmentCodes().Consume(ctx, code, dev.ID, now); err != nil {
 		_ = s.st.Devices().Delete(ctx, dev.ID) // compensating-delete: no orphan device on a failed consume
+		if errors.Is(err, store.ErrNotFound) {
+			// The pre-check passed, so a concurrent redeem won the atomic Consume.
+			logRejected(ctx, s.log, codeRejectedMsg, rejectLostRace, c.UserID)
+		}
 		return EnrollResult{}, fmt.Errorf("service.ConsumeCode: %w", err)
 	}
 

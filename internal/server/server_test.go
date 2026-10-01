@@ -445,7 +445,7 @@ func TestVerifier_SurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Users().Create: %v", err)
 	}
-	enroll := service.NewEnrollmentService(st1, key, 15*time.Minute, service.NewAuditWriter(st1))
+	enroll := service.NewEnrollmentService(st1, key, 15*time.Minute, service.NewAuditWriter(st1), slog.New(slog.DiscardHandler))
 	result, err := enroll.EnrollForUser(ctx, u.ID, "device.enroll.oidc", service.ClientMeta{Hostname: "restart-host"})
 	if err != nil {
 		t.Fatalf("EnrollForUser: %v", err)
