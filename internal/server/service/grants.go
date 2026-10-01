@@ -797,11 +797,11 @@ func (s *GrantService) RedeemFinish(ctx context.Context, token, sealedCookie str
 		return store.User{}, err
 	}
 
-	sess, err := s.passkeys.openSession(sealedCookie)
+	sess, err := s.passkeys.openSession(ctx, sealedCookie)
 	if err != nil {
 		return store.User{}, err
 	}
-	if !s.passkeys.claimChallenge(sess.Challenge, sess.Expires) {
+	if !s.passkeys.claimChallenge(ctx, sess.Challenge, sess.Expires) {
 		return store.User{}, ErrPasskeyVerification
 	}
 
