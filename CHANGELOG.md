@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/jacaudi/diyddns/compare/v1.1.0...v1.2.0) (2026-10-01)
+
+
+### Features
+
+* **email:** display-name email.from; one bad value or slow peer no longer suppresses others' mail ([#185](https://github.com/jacaudi/diyddns/issues/185)) ([1ab3928](https://github.com/jacaudi/diyddns/commit/1ab3928c2f350a9056f182a800b016016bd2f64c))
+
 ## [1.1.0](https://github.com/jacaudi/diyddns/compare/v1.0.0...v1.1.0) (2026-09-30)
 
 
