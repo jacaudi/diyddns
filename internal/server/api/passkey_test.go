@@ -319,8 +319,9 @@ func TestRecoveryRequest_UniformlyReturns200(t *testing.T) {
 // whose existing passkey was just revoked at issue (design D10), then the
 // user redeems the link's token through the shared /api/v1/register/begin +
 // /finish grant-redeem path (design §7's "one token, one redeem flow"),
-// proving passkey.go's discriminator correctly routes a token-bearing body
-// to GrantService rather than BootstrapService.
+// proving register/begin classifies a live grant token as a grant redeem (not
+// a bootstrap claim) and register/finish follows the "grant." tag begin put on
+// the challenge cookie.
 func TestAdminRecovery_IssuedLinkRedeemsViaRegisterEndpoint(t *testing.T) {
 	h := newFullHarness(t)
 	seedUser(t, h.st, "admin@example.com", "admin")
@@ -376,12 +377,13 @@ func TestAdminRecovery_IssuedLinkRedeemsViaRegisterEndpoint(t *testing.T) {
 
 // TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint drives the
 // passkey-based first-admin claim end to end through the shared
-// /api/v1/register/begin + /finish pair (design D9): a token+email body at
-// begin routes to BootstrapService.BeginClaim (not GrantService), the sealed
-// bootstrap-claim cookie round-trips through webauthnMetaMiddleware, and a
-// token-less finish body routes to FinishClaim — proving the begin/finish
-// discriminator and the bootstrap-AAD cookie both work through the huma
-// adapter. This is the ONLY path that mints the first admin, so it is
+// /api/v1/register/begin + /finish pair (design D9): with no admin yet and a
+// token that is not a live grant, begin routes to BootstrapService.BeginClaim
+// (not GrantService) and tags the challenge cookie "claim."; the sealed
+// bootstrap-claim cookie round-trips through webauthnMetaMiddleware, and
+// finish follows the tag to FinishClaim, which needs no token in its body —
+// proving the classifier, the cookie tag and the bootstrap-AAD cookie all work
+// through the huma adapter. This is the ONLY path that mints the first admin, so it is
 // covered at the HTTP layer here (abandoned-claim / atomic-gate properties
 // are covered at the service layer in bootstrap_test.go).
 func TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint(t *testing.T) {
@@ -409,7 +411,8 @@ func TestBootstrapClaim_RegistersFirstAdminViaRegisterEndpoint(t *testing.T) {
 	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
 	authr.AddCredential(cred)
 	attResp := virtualwebauthn.CreateAttestationResponse(rp, authr, cred, *attOpts)
-	// No token merged in — a token-less finish body routes to FinishClaim.
+	// No token merged in: a claim finish does not need one (the "claim." cookie
+	// tag routes it to FinishClaim).
 	finishBody := mergeField(t, attResp, "name", "First Admin Key")
 
 	status, finishHeader, finishRespBody := jarPost(t, client, h.srv.URL+"/api/v1/register/finish", json.RawMessage(finishBody), "")
