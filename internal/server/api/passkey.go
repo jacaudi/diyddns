@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -23,6 +24,50 @@ import (
 // round-trips (design D6) — distinct from the browser session cookie
 // (cfg.Session.CookieName).
 const webauthnChallengeCookieName = "diyddns_webauthn_challenge"
+
+// registerFlow tags the challenge cookie register/begin sets, so
+// register/finish routes on what begin decided rather than on anything the
+// client sends (issue #188; an earlier client-coordinated discriminator, PR
+// #49, broke the same way). The tag only chooses between the grant opener and
+// the claim opener, which seal under different AADs, so it needs no
+// authentication: a forged tag sends the value to an opener that rejects it.
+// Only register/begin and register/finish use it; the login and add-passkey
+// ceremonies keep their untagged cookies.
+type registerFlow string
+
+// The two flows a register/begin cookie can be tagged with.
+const (
+	registerFlowGrant registerFlow = "grant" // an invite or recovery redeem (GrantService)
+	registerFlowClaim registerFlow = "claim" // the first-run admin claim (BootstrapService)
+)
+
+// tagChallenge prefixes a sealed challenge with flow. The separator is "."
+// because auth.SealWithAAD returns base64.StdEncoding, whose alphabet has none.
+func tagChallenge(flow registerFlow, sealed string) string {
+	return string(flow) + "." + sealed
+}
+
+// splitChallenge undoes tagChallenge. ok is false for an untagged value and for
+// an unknown tag.
+func splitChallenge(value string) (flow registerFlow, sealed string, ok bool) {
+	tag, sealed, found := strings.Cut(value, ".")
+	if !found {
+		return "", "", false
+	}
+	switch f := registerFlow(tag); f {
+	case registerFlowGrant, registerFlowClaim:
+		return f, sealed, true
+	}
+	return "", "", false
+}
+
+// statusClientClosedRequest is the status for a request whose client went away
+// before the server finished it (nginx's 499, which Google's API mapping uses
+// for a cancelled operation). net/http has no constant for it. It is a 4xx, so
+// the trace span stays unset, and unlike 401 it does not claim the caller
+// lacked credentials. webui declares its own copy: the two adapters share no
+// HTTP-layer package.
+const statusClientClosedRequest = 499
 
 // webauthnChallengeCookieMaxAge bounds how long an unconsumed challenge
 // cookie lingers client-side. It is generous relative to the ceremony's own
@@ -182,6 +227,11 @@ func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) 
 		return huma.Error401Unauthorized("registration link invalid, expired, or already used")
 	case errors.Is(err, service.ErrPasskeyVerification):
 		return huma.Error401Unauthorized(errPasskeyVerification)
+	case store.Cancelled(ctx, err):
+		// The client went away mid-request (or the store reported it): not an
+		// infrastructure failure, so Info, not Error, and not a 5xx.
+		deps.Log.LogAttrs(ctx, slog.LevelInfo, action+" cancelled", slog.Any("error", err))
+		return huma.NewError(statusClientClosedRequest, "client closed request")
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)
@@ -229,12 +279,14 @@ type deletePasskeyInput struct {
 // deletePasskeyOutput carries no body; huma emits 204 via DefaultStatus.
 type deletePasskeyOutput struct{}
 
-// registerGrantBeginInput is the body of POST /api/v1/register/begin: Token
-// alone drives a registration-grant redeem (invite or recovery,
-// GrantService.RedeemBegin); Token+Email together drive a bootstrap claim
-// (BootstrapService.BeginClaim, design D9) — a grant redeem already knows
-// its target user from the token, but a bootstrap claim does not, since no
-// admin user row exists yet for BeginClaim to read an email back from.
+// registerGrantBeginInput is the body of POST /api/v1/register/begin. Token
+// is a registration-grant token (invite or recovery) or the bootstrap token;
+// the server decides which (GrantService.ClassifyRegistration), never the
+// presence of Email. Email is read only by a bootstrap claim
+// (BootstrapService.BeginClaim, design D9): a grant redeem already knows its
+// target user from the token, but a bootstrap claim does not, since no admin
+// user row exists yet for BeginClaim to read an email back from. A grant
+// redeem ignores it, so a browser that autofills the field is harmless.
 type registerGrantBeginInput struct {
 	Body struct {
 		Token string `json:"token"`
@@ -402,21 +454,7 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Path:          "/api/v1/register/begin",
 		DefaultStatus: http.StatusOK,
 		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
-	}, func(ctx context.Context, in *registerGrantBeginInput) (*passkeyOptionsOutput, error) {
-		meta := loginMetaFrom(ctx)
-		var opts []byte
-		var sealed string
-		var err error
-		if in.Body.Email != "" {
-			sealed, opts, err = deps.Bootstrap.BeginClaim(ctx, in.Body.Token, in.Body.Email)
-		} else {
-			_, opts, sealed, err = deps.Grants.RedeemBegin(ctx, in.Body.Token)
-		}
-		if err != nil {
-			return nil, passkeyErr(ctx, deps, "begin registration", err)
-		}
-		return passkeyOptions(opts, passkeyChallengeCookie(deps.Cfg.Session, sealed, webauthnChallengeCookieMaxAge, meta.tls)), nil
-	})
+	}, registerBeginHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method:        http.MethodPost,
@@ -426,15 +464,49 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 	}, registerFinishHandler(deps))
 }
 
+// registerBeginHandler starts a grant redeem or a first-run admin claim.
+// GrantService.ClassifyRegistration decides which from the token (design D1,
+// D2); the email takes no part in routing, only BeginClaim reads it. Anything
+// that is neither a live grant nor first-run is "link invalid". The challenge
+// cookie is tagged with the flow begin chose, which is what register/finish
+// routes on. Extracted from registerPasskeyOps to keep that function under the
+// project's gocyclo threshold (.golangci.yml, min-complexity: 15).
+func registerBeginHandler(deps ServerDeps) func(context.Context, *registerGrantBeginInput) (*passkeyOptionsOutput, error) {
+	return func(ctx context.Context, in *registerGrantBeginInput) (*passkeyOptionsOutput, error) {
+		meta := loginMetaFrom(ctx)
+		target, err := deps.Grants.ClassifyRegistration(ctx, in.Body.Token)
+		if err != nil {
+			return nil, passkeyErr(ctx, deps, "begin registration", err)
+		}
+		var opts []byte
+		var sealed string
+		var flow registerFlow
+		switch target.State {
+		case service.RegisterGrant:
+			flow = registerFlowGrant
+			_, opts, sealed, err = deps.Grants.RedeemBegin(ctx, in.Body.Token)
+		case service.RegisterFirstRun:
+			flow = registerFlowClaim
+			sealed, opts, err = deps.Bootstrap.BeginClaim(ctx, in.Body.Token, in.Body.Email)
+		default:
+			err = service.ErrGrantInvalid
+		}
+		if err != nil {
+			return nil, passkeyErr(ctx, deps, "begin registration", err)
+		}
+		return passkeyOptions(opts, passkeyChallengeCookie(deps.Cfg.Session, tagChallenge(flow, sealed), webauthnChallengeCookieMaxAge, meta.tls)), nil
+	}
+}
+
 // registerFinishHandler completes a bootstrap claim or a grant redeem and
 // signs the user in. Extracted from registerPasskeyOps to keep that function
 // under the project's gocyclo threshold (.golangci.yml, min-complexity: 15).
 //
-// Which flow this is comes from the token, exactly as register/begin decides
-// from the email: a token means "redeem a grant", its absence means
-// "bootstrap claim". The two endpoints MUST agree — a caller that sends the
-// token on finish but the email on begin starts a bootstrap claim and ends
-// in the grant path, which fails with a message about an invalid link.
+// Which flow this is comes from the flow tag register/begin put on the
+// challenge cookie, never from the token or the email in the body, so the two
+// endpoints cannot disagree. A grant redeem still needs the token in the body
+// (for the atomic Consume); a bootstrap claim does not. A cookie with no
+// usable tag (absent, untagged, unknown tag) is the uniform ceremony failure.
 func registerFinishHandler(deps ServerDeps) func(context.Context, *webauthnFinishInput) (*loginFinishOutput, error) {
 	return func(ctx context.Context, in *webauthnFinishInput) (*loginFinishOutput, error) {
 		lmeta := loginMetaFrom(ctx)
@@ -447,10 +519,16 @@ func registerFinishHandler(deps ServerDeps) func(context.Context, *webauthnFinis
 
 		var usr store.User
 		var err error
-		if extra.Token != "" {
-			usr, err = deps.Grants.RedeemFinish(ctx, extra.Token, wmeta.challenge, wmeta.req, extra.Name)
-		} else {
-			usr, err = deps.Bootstrap.FinishClaim(ctx, wmeta.challenge, wmeta.req, extra.Name)
+		flow, sealed, _ := splitChallenge(wmeta.challenge)
+		switch flow {
+		case registerFlowGrant:
+			usr, err = deps.Grants.RedeemFinish(ctx, extra.Token, sealed, wmeta.req, extra.Name)
+		case registerFlowClaim:
+			usr, err = deps.Bootstrap.FinishClaim(ctx, sealed, wmeta.req, extra.Name)
+		default:
+			deps.Log.LogAttrs(ctx, slog.LevelInfo, "register finish: challenge cookie has no flow tag",
+				slog.Int("sealed_len", len(wmeta.challenge)))
+			return nil, huma.Error401Unauthorized(errPasskeyVerification)
 		}
 		if err != nil {
 			return nil, passkeyErr(ctx, deps, "finish registration", err)
