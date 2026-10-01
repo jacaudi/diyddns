@@ -1366,3 +1366,246 @@ func TestRequestSelfServiceRecovery_UnmailableStoredAddressStillNotifiesEveryAdm
 		t.Fatalf("email.send_failed rows = %+v, want exactly one, for the user %s", page.Rows, u.ID)
 	}
 }
+
+// seedGrant plants a grant row for userID with the given reason, expiry and
+// consumption time (0 means unconsumed) and returns the raw token that
+// hashes to it.
+func seedGrant(t *testing.T, st *store.Store, userID, reason string, expiresAt, usedAt int64) string {
+	t.Helper()
+	token, err := auth.RandToken(32)
+	if err != nil {
+		t.Fatalf("RandToken: %v", err)
+	}
+	if err := st.AccountRecovery().Create(t.Context(), store.RecoveryToken{
+		TokenHash: auth.HashToken(token), UserID: userID, Reason: reason, ExpiresAt: expiresAt, UsedAt: usedAt,
+	}); err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
+	return token
+}
+
+// beginRedeem runs RedeemBegin for token and returns the sealed challenge
+// cookie plus the authenticator's attestation response for it, so a test can
+// call RedeemFinish later, after changing the world in between.
+func beginRedeem(t *testing.T, grants *GrantService, token string) (sealed, attResp string) {
+	t.Helper()
+	_, optsJSON, sealed, err := grants.RedeemBegin(t.Context(), token)
+	if err != nil {
+		t.Fatalf("RedeemBegin: %v", err)
+	}
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(optsJSON))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	authr := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: []byte(attOpts.UserID)})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	authr.AddCredential(cred)
+	return sealed, virtualwebauthn.CreateAttestationResponse(testRP(), authr, cred, *attOpts)
+}
+
+// newClassifyGrants builds a GrantService with passkeys over a fresh store.
+func newClassifyGrants(t *testing.T) (*store.Store, *GrantService) {
+	t.Helper()
+	st := openTestStore(t)
+	passkeys := newTestPasskeyService(t, st, discardAudit{})
+	return st, newTestGrantService(t, st, passkeys, &fakeMailer{}, NewAuditWriter(st))
+}
+
+func TestGrantService_ClassifyRegistration(t *testing.T) {
+	now := store.NowUnix()
+	tests := []struct {
+		name string
+		// token plants the grant (if any) for user and returns the token to classify.
+		token func(t *testing.T, st *store.Store, user store.User) string
+		// wantGrant is the expected state when an admin exists; without one a
+		// non-grant token is first-run instead of dead.
+		wantGrant  bool
+		wantReason string
+	}{
+		{"invite", func(t *testing.T, st *store.Store, u store.User) string {
+			return seedGrant(t, st, u.ID, "invite", now+3600, 0)
+		}, true, "invite"},
+		{"recovery", func(t *testing.T, st *store.Store, u store.User) string {
+			return seedGrant(t, st, u.ID, "recovery", now+3600, 0)
+		}, true, "recovery"},
+		{"expired", func(t *testing.T, st *store.Store, u store.User) string {
+			return seedGrant(t, st, u.ID, "invite", now-10, 0)
+		}, false, ""},
+		{"used", func(t *testing.T, st *store.Store, u store.User) string {
+			return seedGrant(t, st, u.ID, "invite", now+3600, now-5)
+		}, false, ""},
+		{"unknown", func(*testing.T, *store.Store, store.User) string { return "no-such-token" }, false, ""},
+		{"empty", func(*testing.T, *store.Store, store.User) string { return "" }, false, ""},
+	}
+	for _, tt := range tests {
+		for _, withAdmin := range []bool{true, false} {
+			name := tt.name + "/no admin"
+			if withAdmin {
+				name = tt.name + "/admin exists"
+			}
+			t.Run(name, func(t *testing.T) {
+				st, grants := newClassifyGrants(t)
+				if withAdmin {
+					seedUser(t, st, "admin@example.com", "admin")
+				}
+				user := seedUser(t, st, "alice@example.com", "user")
+				token := tt.token(t, st, user)
+
+				got, err := grants.ClassifyRegistration(t.Context(), token)
+				if err != nil {
+					t.Fatalf("ClassifyRegistration: %v", err)
+				}
+
+				want := RegisterTarget{State: RegisterFirstRun}
+				switch {
+				case tt.wantGrant:
+					want = RegisterTarget{State: RegisterGrant, Reason: tt.wantReason, Email: user.Email}
+				case withAdmin:
+					want = RegisterTarget{State: RegisterDead}
+				}
+				if got != want {
+					t.Errorf("ClassifyRegistration = %+v, want %+v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestGrantService_ClassifyRegistration_GrantWithoutUserIsNotLive pins D9: a
+// live grant whose user row cannot be found is treated like any other
+// non-live token, not as an error. The foreign key makes this unreachable
+// through the API, so the test switches enforcement off for the delete.
+func TestGrantService_ClassifyRegistration_GrantWithoutUserIsNotLive(t *testing.T) {
+	st, grants := newClassifyGrants(t)
+	seedUser(t, st, "admin@example.com", "admin")
+	user := seedUser(t, st, "ghost@example.com", "user")
+	token := seedGrant(t, st, user.ID, "invite", store.NowUnix()+3600, 0)
+	for _, q := range []string{
+		`PRAGMA foreign_keys = OFF`,
+		`DELETE FROM users WHERE id = '` + user.ID + `'`,
+		`PRAGMA foreign_keys = ON`,
+	} {
+		if _, err := st.DB().ExecContext(t.Context(), q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	got, err := grants.ClassifyRegistration(t.Context(), token)
+	if err != nil {
+		t.Fatalf("ClassifyRegistration: %v", err)
+	}
+	if want := (RegisterTarget{State: RegisterDead}); got != want {
+		t.Errorf("ClassifyRegistration = %+v, want %+v", got, want)
+	}
+}
+
+// TestGrantService_ClassifyRegistration_StoreFailureIsAnError pins D9 for a
+// real store failure: the answer is an error, never a state. A closed store
+// is the only way to fail a read, because a SQLite trigger cannot abort a
+// SELECT.
+func TestGrantService_ClassifyRegistration_StoreFailureIsAnError(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		token bool
+	}{
+		{"with a token (the grant read fails)", true},
+		{"without a token (the admin scan fails)", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st, grants := newClassifyGrants(t)
+			user := seedUser(t, st, "alice@example.com", "user")
+			token := ""
+			if tt.token {
+				token = seedGrant(t, st, user.ID, "invite", store.NowUnix()+3600, 0)
+			}
+			if err := st.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			got, err := grants.ClassifyRegistration(t.Context(), token)
+			if err == nil {
+				t.Fatalf("ClassifyRegistration on a closed store = %+v, want an error", got)
+			}
+			if store.Cancelled(t.Context(), err) {
+				t.Errorf("a closed store reads as cancelled: %v", err)
+			}
+		})
+	}
+}
+
+// TestGrantService_ClassifyRegistration_CancelledContext checks the error the
+// handlers' store.Cancelled test relies on: it must wrap context.Canceled.
+// (store.Cancelled alone would be vacuous here, because it is true for any
+// error once the context is done.)
+func TestGrantService_ClassifyRegistration_CancelledContext(t *testing.T) {
+	st, grants := newClassifyGrants(t)
+	user := seedUser(t, st, "alice@example.com", "user")
+	token := seedGrant(t, st, user.ID, "invite", store.NowUnix()+3600, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for _, tok := range []string{token, ""} {
+		_, err := grants.ClassifyRegistration(ctx, tok)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("ClassifyRegistration(token %q) on a cancelled context: err = %v, want context.Canceled", tok, err)
+		}
+	}
+}
+
+// TestGrantService_RedeemBegin_StoreFailureIsNotGrantInvalid pins D9 for
+// validGrant: a store failure behind a live link is reported as a failure,
+// not as "link invalid".
+func TestGrantService_RedeemBegin_StoreFailureIsNotGrantInvalid(t *testing.T) {
+	st, grants := newClassifyGrants(t)
+	user := seedUser(t, st, "alice@example.com", "user")
+	token := seedGrant(t, st, user.ID, "invite", store.NowUnix()+3600, 0)
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, _, _, err := grants.RedeemBegin(t.Context(), token)
+	if err == nil {
+		t.Fatal("RedeemBegin on a closed store: err = nil, want an error")
+	}
+	if errors.Is(err, ErrGrantInvalid) {
+		t.Errorf("RedeemBegin on a closed store: err = %v, must not be ErrGrantInvalid", err)
+	}
+}
+
+// TestGrantService_RedeemFinish_ConsumeFailureIsNotGrantInvalid pins D9 for
+// the atomic Consume: a failure other than "no row matched" is returned, the
+// grant stays unconsumed, and no credential is stored.
+func TestGrantService_RedeemFinish_ConsumeFailureIsNotGrantInvalid(t *testing.T) {
+	st, grants := newClassifyGrants(t)
+	user := seedUser(t, st, "alice@example.com", "user")
+	token := seedGrant(t, st, user.ID, "invite", store.NowUnix()+3600, 0)
+	sealed, attResp := beginRedeem(t, grants, token)
+	if _, err := st.DB().ExecContext(t.Context(),
+		`CREATE TRIGGER block_grant_update BEFORE UPDATE ON account_recovery_tokens
+		 BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	_, err := grants.RedeemFinish(t.Context(), token, sealed, jsonRequest(attResp), "key")
+	if err == nil {
+		t.Fatal("RedeemFinish with a failing Consume: err = nil, want an error")
+	}
+	if errors.Is(err, ErrGrantInvalid) {
+		t.Errorf("RedeemFinish: err = %v, must not be ErrGrantInvalid", err)
+	}
+
+	grant, err := st.AccountRecovery().Get(t.Context(), auth.HashToken(token))
+	if err != nil {
+		t.Fatalf("AccountRecovery.Get: %v", err)
+	}
+	if grant.UsedAt != 0 {
+		t.Errorf("grant.UsedAt = %d, want 0 (unconsumed)", grant.UsedAt)
+	}
+	creds, err := st.WebAuthnCredentials().ListByUser(t.Context(), user.ID)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("credentials = %d, want 0", len(creds))
+	}
+}
