@@ -276,7 +276,7 @@ func (s *BootstrapService) FinishClaim(ctx context.Context, sealedCookie string,
 	if err != nil {
 		return store.User{}, err
 	}
-	if !s.passkeys.claimChallenge(cs.Session.Challenge, cs.Session.Expires) {
+	if !s.passkeys.claimChallenge(ctx, cs.Session.Challenge, cs.Session.Expires) {
 		return store.User{}, ErrPasskeyVerification
 	}
 	cred, err := s.passkeys.verifyRegistration(cs.Email, cs.Session.UserID, cs.Session, r)

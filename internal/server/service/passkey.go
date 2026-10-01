@@ -146,14 +146,24 @@ func (s *PasskeyService) sealSession(sess *webauthn.SessionData) (string, error)
 // openSession reverses sealSession. Every failure — bad key, malformed
 // payload, failed AEAD authentication — collapses to ErrPasskeyVerification;
 // none of these are distinguishable to a caller without leaking verification
-// internals.
-func (s *PasskeyService) openSession(sealed string) (webauthn.SessionData, error) {
+// internals. The cause is logged instead (Info, not Error: the finish routes
+// are anonymous-reachable, so Error would make log volume attacker-driveable),
+// never returned, mirroring BootstrapService.openClaim.
+//
+// auth.OpenWithAAD reports the bare "ciphertext too short" for BOTH an absent
+// cookie and a truncated one; sealed_len tells them apart: 0 means the client
+// sent no cookie at all. The cookie value itself is never logged.
+func (s *PasskeyService) openSession(ctx context.Context, sealed string) (webauthn.SessionData, error) {
 	raw, err := auth.OpenWithAAD(s.sealKey, sealed, webauthnAAD)
 	if err != nil {
+		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey challenge cookie could not be opened",
+			slog.String("error", err.Error()), slog.Int("sealed_len", len(sealed)))
 		return webauthn.SessionData{}, ErrPasskeyVerification
 	}
 	var sess webauthn.SessionData
 	if err := json.Unmarshal(raw, &sess); err != nil {
+		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey challenge cookie could not be decoded",
+			slog.String("error", err.Error()))
 		return webauthn.SessionData{}, ErrPasskeyVerification
 	}
 	return sess, nil
@@ -162,26 +172,32 @@ func (s *PasskeyService) openSession(sealed string) (webauthn.SessionData, error
 // claimChallenge enforces single-use: it reports whether challenge has not
 // already been claimed within its (still-live) window, and if so records it
 // through expires. Entries whose window has passed are pruned lazily on
-// every call rather than by a background job (design D6).
-func (s *PasskeyService) claimChallenge(challenge string, expires time.Time) bool {
+// every call rather than by a background job (design D6). A replayed
+// challenge is logged (Info, no attributes: the challenge is a secret) after
+// the mutex is released, so a slow log handler never holds up other ceremonies.
+func (s *PasskeyService) claimChallenge(ctx context.Context, challenge string, expires time.Time) bool {
 	s.usedMu.Lock()
-	defer s.usedMu.Unlock()
-
 	now := time.Now()
 	for k, exp := range s.used {
 		if !exp.After(now) {
 			delete(s.used, k)
 		}
 	}
-
+	replayed := false
 	if exp, ok := s.used[challenge]; ok && exp.After(now) {
-		return false
+		replayed = true
+	} else {
+		if expires.IsZero() {
+			expires = now.Add(2 * time.Minute) // matches the library's own default ceremony timeout
+		}
+		s.used[challenge] = expires
 	}
-	if expires.IsZero() {
-		expires = now.Add(2 * time.Minute) // matches the library's own default ceremony timeout
+	s.usedMu.Unlock()
+
+	if replayed {
+		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey challenge replayed")
 	}
-	s.used[challenge] = expires
-	return true
+	return !replayed
 }
 
 // BeginLogin starts a discoverable (usernameless) login ceremony and returns
@@ -211,11 +227,11 @@ func (s *PasskeyService) BeginLogin(ctx context.Context) ([]byte, string, error)
 // session (audit user.login.passkey). Every rejection path returns the
 // uniform ErrPasskeyVerification.
 func (s *PasskeyService) FinishLogin(ctx context.Context, sealedCookie string, r *http.Request, ip, ua string) (store.Session, error) {
-	sess, err := s.openSession(sealedCookie)
+	sess, err := s.openSession(ctx, sealedCookie)
 	if err != nil {
 		return store.Session{}, err
 	}
-	if !s.claimChallenge(sess.Challenge, sess.Expires) {
+	if !s.claimChallenge(ctx, sess.Challenge, sess.Expires) {
 		return store.Session{}, ErrPasskeyVerification
 	}
 
@@ -239,11 +255,20 @@ func (s *PasskeyService) FinishLogin(ctx context.Context, sealedCookie string, r
 	}
 
 	cred, err := s.wa.FinishDiscoverableLogin(handler, sess, r)
-	if err != nil || !haveUser {
+	if err == nil && !haveUser {
+		err = errors.New("user handle did not resolve")
+	}
+	if err != nil {
+		// A store failure inside the resolver also lands here (go-webauthn puts
+		// the resolver's error into this one's text): it stays a 401, now with
+		// its cause logged (D16). The library's error does not print the
+		// challenge or the cookie.
+		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey login verification failed", slog.String("error", err.Error()))
 		return store.Session{}, ErrPasskeyVerification
 	}
 
 	if resolved.Disabled {
+		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey login rejected: account disabled", slog.String("user_id", resolved.ID))
 		return store.Session{}, ErrPasskeyVerification
 	}
 
@@ -252,6 +277,7 @@ func (s *PasskeyService) FinishLogin(ctx context.Context, sealedCookie string, r
 			ActorUserID: resolved.ID, EventType: "passkey.signcount_anomaly",
 			TargetType: "webauthn_credential", TargetID: base64.RawURLEncoding.EncodeToString(cred.ID), IP: ip,
 		})
+		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey login rejected: sign-count anomaly", slog.String("user_id", resolved.ID))
 		return store.Session{}, ErrPasskeyVerification
 	}
 
@@ -340,11 +366,11 @@ func (s *PasskeyService) BeginRegister(ctx context.Context, userID string) ([]by
 // user's existing handle, freshly minted or reused, see BeginRegister), and
 // stores the new credential (audit passkey.registered).
 func (s *PasskeyService) FinishRegister(ctx context.Context, userID, sealedCookie, name string, r *http.Request) (store.WebAuthnCredential, error) {
-	sess, err := s.openSession(sealedCookie)
+	sess, err := s.openSession(ctx, sealedCookie)
 	if err != nil {
 		return store.WebAuthnCredential{}, err
 	}
-	if !s.claimChallenge(sess.Challenge, sess.Expires) {
+	if !s.claimChallenge(ctx, sess.Challenge, sess.Expires) {
 		return store.WebAuthnCredential{}, ErrPasskeyVerification
 	}
 

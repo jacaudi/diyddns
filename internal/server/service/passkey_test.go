@@ -32,12 +32,44 @@ func testRP() virtualwebauthn.RelyingParty {
 // AEAD seal key and RP identity consistent across all tests in this file.
 func newTestPasskeyService(t *testing.T, st *store.Store, audit AuditSink) *PasskeyService {
 	t.Helper()
+	return newTestPasskeyServiceWithLog(t, st, audit, discardLogger())
+}
+
+// newTestPasskeyServiceWithLog is newTestPasskeyService with a caller-supplied
+// logger, for tests that assert on what the ceremony logs.
+func newTestPasskeyServiceWithLog(t *testing.T, st *store.Store, audit AuditSink, log *slog.Logger) *PasskeyService {
+	t.Helper()
 	cfg := config.WebAuthnCfg{RPDisplayName: "Test", Timeout: 2 * time.Minute}
-	svc, err := NewPasskeyService(st, newTestSessionManager(st), testKey32(), cfg, "localhost", "http://localhost:8080", audit, discardLogger())
+	svc, err := NewPasskeyService(st, newTestSessionManager(st), testKey32(), cfg, "localhost", "http://localhost:8080", audit, log)
 	if err != nil {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	return svc
+}
+
+// rewindSignCount rewrites stored's persisted sign count to 999, higher than
+// anything the (unmodified) virtual authenticator will present next, so its
+// next assertion looks non-increasing against the stored high-water mark: a
+// cloned authenticator, as far as go-webauthn can tell.
+func rewindSignCount(t *testing.T, st *store.Store, stored store.WebAuthnCredential) {
+	t.Helper()
+	got, err := st.WebAuthnCredentials().GetByID(t.Context(), stored.CredentialID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	var wc webauthn.Credential
+	if err := json.Unmarshal(got.CredentialJSON, &wc); err != nil {
+		t.Fatalf("unmarshal stored credential: %v", err)
+	}
+	wc.Authenticator.SignCount = 999
+	rewound, err := json.Marshal(&wc)
+	if err != nil {
+		t.Fatalf("marshal rewound credential: %v", err)
+	}
+	got.CredentialJSON = rewound
+	if err := st.WebAuthnCredentials().Update(t.Context(), got); err != nil {
+		t.Fatalf("Update (rewind): %v", err)
+	}
 }
 
 // jsonRequest wraps body in an *http.Request the way huma's humago.Unwrap
@@ -287,28 +319,9 @@ func TestPasskeyService_FinishLogin_CloneWarningRejectsAndAudits(t *testing.T) {
 
 	stored, authr, cred := registerPasskey(t, svc, u.ID, "My Key", rp)
 
-	// Rewind: rewrite the persisted credential's sign count to a value
-	// higher than what the (unmodified) virtual authenticator is about to
-	// present (its Counter field never advanced past its zero-value
-	// default), simulating a cloned authenticator whose next assertion
-	// looks non-increasing relative to the stored high-water mark.
-	got, err := st.WebAuthnCredentials().GetByID(t.Context(), stored.CredentialID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	var wc webauthn.Credential
-	if err := json.Unmarshal(got.CredentialJSON, &wc); err != nil {
-		t.Fatalf("unmarshal stored credential: %v", err)
-	}
-	wc.Authenticator.SignCount = 999
-	rewound, err := json.Marshal(&wc)
-	if err != nil {
-		t.Fatalf("marshal rewound credential: %v", err)
-	}
-	got.CredentialJSON = rewound
-	if err := st.WebAuthnCredentials().Update(t.Context(), got); err != nil {
-		t.Fatalf("Update (rewind): %v", err)
-	}
+	// Simulate a cloned authenticator: its next assertion looks non-increasing
+	// relative to the stored high-water mark.
+	rewindSignCount(t, st, stored)
 
 	sess, err := loginPasskey(t, svc, rp, authr, cred, "1.2.3.4", "ua")
 	if !errors.Is(err, ErrPasskeyVerification) {
