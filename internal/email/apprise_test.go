@@ -226,6 +226,13 @@ func TestMailer_Send_AbandonedRaceNeverLosesTheOutcome(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("iteration %d: Send err = %v, want nil or context.DeadlineExceeded", i, err)
 		}
+		if !strings.Contains(buf.String(), "abandoned at deadline") {
+			// The deadline passed before Send was entered (a slow runner can
+			// stall this goroutine for longer than 1ms), so Send returned at
+			// its ctx.Err() pre-check: no conversation started and no WARN is
+			// owed. An abandoned send always logs this line before returning.
+			continue
+		}
 		// Abandoned: the WARN is the only remaining record of the outcome,
 		// and the fix guarantees it is never silently dropped.
 		waitForLog(t, &buf, "completed after its caller gave up")
