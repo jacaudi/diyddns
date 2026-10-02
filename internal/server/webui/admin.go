@@ -39,11 +39,12 @@ type userRow struct {
 // adminUsersData is admin-users.html's template data.
 type adminUsersData struct {
 	appData
-	Users         []userRow
-	UserCount     int
-	DeviceCount   int
-	DisabledCount int
-	Error         string
+	Users                []userRow
+	UserCount            int
+	DeviceCount          int
+	DisabledAccountCount int
+	DisabledDeviceCount  int
+	Error                string
 }
 
 // authLabel derives how an account authenticates, matching the JSON API's
@@ -93,7 +94,7 @@ func registrationText(reg service.Registration, now int64) string {
 	}
 }
 
-// handleAdminUsers renders the admin users list with its three stat tiles.
+// handleAdminUsers renders the admin accounts list with its four stat tiles.
 func (h *handler) handleAdminUsers(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
 	h.renderAdminUsers(w, r, usr, sess, http.StatusOK, "")
 }
@@ -126,11 +127,18 @@ func (h *handler) renderAdminUsers(w http.ResponseWriter, r *http.Request, usr s
 		}
 	}
 
+	disabledDevices := 0
+	for _, d := range devices {
+		if d.Disabled {
+			disabledDevices++
+		}
+	}
+
 	rows := make([]userRow, 0, len(users))
-	disabled := 0
+	disabledAccounts := 0
 	for _, u := range users {
 		if u.Disabled {
-			disabled++
+			disabledAccounts++
 		}
 		reg := regs[u.ID]
 		label, tag := registrationLabel(reg.Status)
@@ -145,12 +153,13 @@ func (h *handler) renderAdminUsers(w http.ResponseWriter, r *http.Request, usr s
 	}
 
 	h.renderStatus(w, r, status, "admin-users", adminUsersData{
-		appData:       h.newAppData(usr, sess, "Users", "admin-users"),
-		Users:         rows,
-		UserCount:     len(users),
-		DeviceCount:   len(devices),
-		DisabledCount: disabled,
-		Error:         errMsg,
+		appData:              h.newAppData(usr, sess, "Accounts", "admin-users"),
+		Users:                rows,
+		UserCount:            len(users),
+		DeviceCount:          len(devices),
+		DisabledAccountCount: disabledAccounts,
+		DisabledDeviceCount:  disabledDevices,
+		Error:                errMsg,
 	})
 }
 

@@ -265,7 +265,7 @@ try {
 
   step("walk the four admin screens");
   for (const [path, marker] of [
-    ["/admin/users", "Users"],
+    ["/admin/users", "Accounts"],
     ["/admin/devices", "browser-test-device"],
     ["/admin/audit", "Audit log"],
     ["/admin/server", "Server info"],
