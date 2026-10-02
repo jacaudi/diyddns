@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,8 +82,20 @@ func TestEnrollCode_LabelClashIs409(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnrollmentCodes.Get: %v", err)
 	}
-	if got.UsedAt != 0 {
-		t.Errorf("second code UsedAt = %d, want 0: the clash must leave it unconsumed", got.UsedAt)
+	if got.UsedAt != 0 || got.DeviceID != "" {
+		t.Errorf("second code = %+v, want it unconsumed: the device insert fails before Consume", got)
+	}
+	devices, err := h.st.Devices().ListByUser(t.Context(), user.ID)
+	if err != nil {
+		t.Fatalf("Devices.ListByUser: %v", err)
+	}
+	if len(devices) != 1 {
+		t.Errorf("devices = %d, want 1 (the first redeem's)", len(devices))
+	}
+	for _, code := range []string{first, second} {
+		if strings.Contains(logs.String(), code) {
+			t.Errorf("the log contains a code:\n%s", logs.String())
+		}
 	}
 }
 
@@ -134,14 +147,12 @@ func TestEnrollCode_FailedCompensatingDeleteIs500(t *testing.T) {
 	if err != nil || len(devices) != 1 {
 		t.Fatalf("devices = %v (err %v), want the 1 orphan", devices, err)
 	}
-	var orphanLogged bool
-	for _, rec := range atLevel(logs.records(t), "ERROR") {
-		if rec["device_id"] == devices[0].ID {
-			orphanLogged = true
-		}
+	orphan := withMsg(atLevel(logs.records(t), "ERROR"), "enrollment compensating delete failed")
+	if len(orphan) != 1 || orphan[0]["device_id"] != devices[0].ID || orphan[0]["error"] == nil {
+		t.Errorf("orphan Error lines = %v, want one naming device %s with its cause", orphan, devices[0].ID)
 	}
-	if !orphanLogged {
-		t.Errorf("no Error line names the orphan device %s: %v", devices[0].ID, logs.records(t))
+	if strings.Contains(logs.String(), code) {
+		t.Errorf("the log contains the code:\n%s", logs.String())
 	}
 }
 

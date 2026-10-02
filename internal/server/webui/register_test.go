@@ -1,11 +1,8 @@
 package webui
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"html"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,34 +31,6 @@ const (
 	noteRecoveryWipe = "removes the passkeys already on"
 )
 
-// registerDeps is testDeps with a JSON logger writing into the returned buffer.
-func registerDeps(t *testing.T) (Deps, *store.Store, *bytes.Buffer) {
-	t.Helper()
-	deps, st := testDeps(t)
-	var buf bytes.Buffer
-	deps.Log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return deps, st, &buf
-}
-
-// recordsAt returns the JSON records in buf logged at level ("INFO", "ERROR").
-func recordsAt(t *testing.T, buf *bytes.Buffer, level string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line not JSON: %v (%s)", err, line)
-		}
-		if rec["level"] == level {
-			out = append(out, rec)
-		}
-	}
-	return out
-}
-
 // getRegister serves GET target through the real mux.
 func getRegister(t *testing.T, deps Deps, target string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -71,9 +40,9 @@ func getRegister(t *testing.T, deps Deps, target string) *httptest.ResponseRecor
 	return rec
 }
 
-// seedLiveGrant gives a new user a live grant and returns the user and the raw
-// token that hashes to it.
-func seedLiveGrant(t *testing.T, st *store.Store, email, reason string) (store.User, string) {
+// seedLiveGrant gives a new user a live grant and returns the raw token that
+// hashes to it.
+func seedLiveGrant(t *testing.T, st *store.Store, email, reason string) string {
 	t.Helper()
 	usr := seedUser(t, st, email, "user")
 	token, err := auth.RandToken(32)
@@ -81,7 +50,7 @@ func seedLiveGrant(t *testing.T, st *store.Store, email, reason string) (store.U
 		t.Fatalf("RandToken: %v", err)
 	}
 	seedGrant(t, st, usr.ID, auth.HashToken(token), reason, store.NowUnix()+3600)
-	return usr, token
+	return token
 }
 
 func TestHandleRegister_Renders(t *testing.T) {
@@ -96,7 +65,7 @@ func TestHandleRegister_Renders(t *testing.T) {
 			name: "live invite grant",
 			setup: func(t *testing.T, st *store.Store) string {
 				seedUser(t, st, "admin@example.com", "admin")
-				_, token := seedLiveGrant(t, st, "invitee@example.com", "invite")
+				token := seedLiveGrant(t, st, "invitee@example.com", "invite")
 				return "/register?token=" + token
 			},
 			want:    []string{headingInvite, "invitee@example.com", `id="register-name"`},
@@ -106,7 +75,7 @@ func TestHandleRegister_Renders(t *testing.T) {
 			name: "live recovery grant",
 			setup: func(t *testing.T, st *store.Store) string {
 				seedUser(t, st, "admin@example.com", "admin")
-				_, token := seedLiveGrant(t, st, "locked-out@example.com", "recovery")
+				token := seedLiveGrant(t, st, "locked-out@example.com", "recovery")
 				return "/register?token=" + token
 			},
 			want:    []string{headingRecovery, "locked-out@example.com", noteRecoveryWipe, `id="register-name"`},
@@ -201,7 +170,7 @@ func TestHandleRegister_GrantFormCarriesTheTokenInAHiddenFirstInput(t *testing.T
 	for _, reason := range []string{"invite", "recovery"} {
 		t.Run(reason, func(t *testing.T) {
 			deps, st := testDeps(t)
-			_, token := seedLiveGrant(t, st, "user@example.com", reason)
+			token := seedLiveGrant(t, st, "user@example.com", reason)
 
 			body := getRegister(t, deps, "/register?token="+token).Body.String()
 
@@ -299,7 +268,7 @@ func TestHandleRegister_EscapesTheReflectedToken(t *testing.T) {
 // classifier is a 500 with the shared error page and one Error line, not a
 // misleading "link invalid" or "first-run" page.
 func TestHandleRegister_StoreFailureIsAnErrorPage(t *testing.T) {
-	deps, st, buf := registerDeps(t)
+	_, buf, st, deps := loggingHandler(t)
 	h, _ := New(deps)
 	if err := st.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -314,8 +283,8 @@ func TestHandleRegister_StoreFailureIsAnErrorPage(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Something went wrong") {
 		t.Errorf("body is not the shared error page:\n%s", rec.Body.String())
 	}
-	if errs := recordsAt(t, buf, "ERROR"); len(errs) != 1 {
-		t.Errorf("Error lines = %d, want 1:\n%s", len(errs), buf)
+	if n := strings.Count(buf.String(), `"level":"ERROR"`); n != 1 {
+		t.Errorf("Error lines = %d, want 1:\n%s", n, buf)
 	}
 }
 
@@ -329,8 +298,7 @@ func TestHandleRegister_CancelledRequest(t *testing.T) {
 	const longToken = "0123456789abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJ" // 47 chars: long enough that a match means a leak
 	for _, target := range []string{"/register?token=" + longToken, "/register"} {
 		t.Run(target, func(t *testing.T) {
-			deps, _, buf := registerDeps(t)
-			h := newTestHandler(t, deps)
+			h, buf, _, _ := loggingHandler(t)
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			rec := httptest.NewRecorder()
@@ -343,15 +311,11 @@ func TestHandleRegister_CancelledRequest(t *testing.T) {
 			if rec.Body.Len() != 0 {
 				t.Errorf("body = %q, want empty", rec.Body.String())
 			}
-			info := recordsAt(t, buf, "INFO")
-			if len(info) != 1 {
-				t.Fatalf("Info lines = %d, want 1:\n%s", len(info), buf)
+			if n := strings.Count(buf.String(), "\n"); n != 1 {
+				t.Fatalf("log lines = %d, want 1:\n%s", n, buf)
 			}
-			if info[0]["msg"] != "webui: register cancelled" {
-				t.Errorf("Info msg = %v, want %q", info[0]["msg"], "webui: register cancelled")
-			}
-			if errs := recordsAt(t, buf, "ERROR"); len(errs) != 0 {
-				t.Errorf("Error lines = %d, want 0:\n%s", len(errs), buf)
+			if line := findRecord(t, buf, "webui: register cancelled"); line["level"] != "INFO" {
+				t.Errorf("level = %v, want INFO", line["level"])
 			}
 			if strings.Contains(buf.String(), longToken) {
 				t.Errorf("the log contains the token from the query string:\n%s", buf)

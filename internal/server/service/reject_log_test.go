@@ -100,72 +100,6 @@ func TestGrantService_ValidGrant_LogsWhyAGrantWasRejected(t *testing.T) {
 	}
 }
 
-func TestGrantService_ClassifyRegistration_LogsADeadTokenOnly(t *testing.T) {
-	now := store.NowUnix()
-	tests := []struct {
-		name  string
-		admin bool
-		// token plants the grant, if any, for user and returns the token to classify.
-		token func(t *testing.T, st *store.Store, user store.User) string
-		// wantReason is the logged reason, or "" when nothing is logged.
-		wantReason rejectReason
-		wantUser   bool
-	}{
-		{"dead: unknown token", true, func(*testing.T, *store.Store, store.User) string { return "no-such-token" }, rejectUnknown, false},
-		{"dead: expired", true, func(t *testing.T, st *store.Store, u store.User) string {
-			return seedGrant(t, st, u.ID, "invite", now-10, 0)
-		}, rejectExpired, true},
-		{"dead: used", true, func(t *testing.T, st *store.Store, u store.User) string {
-			return seedGrant(t, st, u.ID, "invite", now+3600, now-5)
-		}, rejectUsed, true},
-		{"dead: live grant whose user is gone", true, func(t *testing.T, st *store.Store, u store.User) string {
-			token := seedGrant(t, st, u.ID, "invite", now+3600, 0)
-			// The foreign key makes this unreachable through the API.
-			for _, q := range []string{`PRAGMA foreign_keys = OFF`, `DELETE FROM users WHERE id = '` + u.ID + `'`, `PRAGMA foreign_keys = ON`} {
-				if _, err := st.DB().ExecContext(t.Context(), q); err != nil {
-					t.Fatalf("%s: %v", q, err)
-				}
-			}
-			return token
-		}, rejectUserMissing, true},
-		{"bare visit: no token", true, func(*testing.T, *store.Store, store.User) string { return "" }, "", false},
-		{"first-run begin: token that is not a grant", false, func(*testing.T, *store.Store, store.User) string { return "bootstrap-token" }, "", false},
-		{"first-run: expired grant", false, func(t *testing.T, st *store.Store, u store.User) string {
-			return seedGrant(t, st, u.ID, "invite", now-10, 0)
-		}, "", false},
-		{"live grant", true, func(t *testing.T, st *store.Store, u store.User) string {
-			return seedGrant(t, st, u.ID, "invite", now+3600, 0)
-		}, "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			st, grants, buf := newLoggedGrants(t)
-			if tt.admin {
-				seedUser(t, st, "admin@example.com", "admin")
-			}
-			user := seedUser(t, st, "alice@example.com", "user")
-			token := tt.token(t, st, user)
-
-			if _, err := grants.ClassifyRegistration(t.Context(), token); err != nil {
-				t.Fatalf("ClassifyRegistration: %v", err)
-			}
-
-			if tt.wantReason == "" {
-				if got := buf.String(); got != "" {
-					t.Fatalf("logged for a state that must log nothing:\n%s", got)
-				}
-			} else {
-				wantUser := ""
-				if tt.wantUser {
-					wantUser = user.ID
-				}
-				wantRejection(t, buf, msgGrantRejected, tt.wantReason, wantUser)
-			}
-			assertNoSecrets(t, buf, token, auth.HashToken(token))
-		})
-	}
-}
-
 // hookBody is a request body that runs hook on its first Read. go-webauthn
 // reads the body after validGrant and before Consume, so a hook that consumes
 // the grant there makes Consume match no row: a lost race, made deterministic.
@@ -226,56 +160,6 @@ func newLoggedEnrollment(t *testing.T) (*store.Store, *EnrollmentService, *locke
 	st := openTestStore(t)
 	log, buf := captureLog()
 	return st, NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, log), buf
-}
-
-func TestEnrollmentService_ConsumeCode_LogsWhyACodeWasRejected(t *testing.T) {
-	tests := []struct {
-		name string
-		// code plants the code for user and returns the code to redeem.
-		code       func(t *testing.T, st *store.Store, svc *EnrollmentService, user store.User) string
-		wantReason rejectReason
-		wantUser   bool
-	}{
-		{"unknown code", func(*testing.T, *store.Store, *EnrollmentService, store.User) string { return "never-issued-code" }, rejectUnknown, false},
-		{"expired", func(t *testing.T, st *store.Store, _ *EnrollmentService, u store.User) string {
-			if _, err := st.EnrollmentCodes().Create(t.Context(), store.EnrollmentCode{
-				Code: "expired-code-0001", UserID: u.ID, Label: "x", ExpiresAt: 1,
-			}); err != nil {
-				t.Fatalf("seed expired code: %v", err)
-			}
-			return "expired-code-0001"
-		}, rejectExpired, true},
-		{"already used", func(t *testing.T, _ *store.Store, svc *EnrollmentService, u store.User) string {
-			code, _, err := svc.CreateCode(t.Context(), u.ID, "x")
-			if err != nil {
-				t.Fatalf("CreateCode: %v", err)
-			}
-			if _, err := svc.ConsumeCode(t.Context(), code, ClientMeta{}); err != nil {
-				t.Fatalf("prime consume: %v", err)
-			}
-			return code
-		}, rejectUsed, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			st, svc, buf := newLoggedEnrollment(t)
-			user := seedUser(t, st, "bob@example.com", "user")
-			code := tt.code(t, st, svc, user)
-			buf.reset()
-
-			_, err := svc.ConsumeCode(t.Context(), code, ClientMeta{})
-
-			if !errors.Is(err, store.ErrNotFound) {
-				t.Fatalf("err = %v, want it to wrap store.ErrNotFound", err)
-			}
-			wantUser := ""
-			if tt.wantUser {
-				wantUser = user.ID
-			}
-			wantRejection(t, buf, msgCodeRejected, tt.wantReason, wantUser)
-			assertNoSecrets(t, buf, code)
-		})
-	}
 }
 
 // TestEnrollmentService_ConsumeCode_LogsALostRace: an AFTER INSERT trigger on

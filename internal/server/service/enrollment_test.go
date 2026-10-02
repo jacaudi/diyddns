@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -134,9 +135,13 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 		// ConsumeCode call (0, except "already used" which legitimately
 		// created one device on its priming consume).
 		seed func(t *testing.T, st *store.Store, usr store.User) (code string, wantDevicesBefore int)
+		// wantReason is the rejection reason logged; the row is known (user_id
+		// is logged) for every reason but rejectUnknown.
+		wantReason rejectReason
 	}{
 		{
-			name: "expired",
+			name:       "expired",
+			wantReason: rejectExpired,
 			seed: func(t *testing.T, st *store.Store, usr store.User) (string, int) {
 				t.Helper()
 				if _, err := st.EnrollmentCodes().Create(t.Context(), store.EnrollmentCode{
@@ -148,7 +153,8 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 			},
 		},
 		{
-			name: "already used",
+			name:       "already used",
+			wantReason: rejectUsed,
 			seed: func(t *testing.T, st *store.Store, usr store.User) (string, int) {
 				t.Helper()
 				svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
@@ -163,7 +169,8 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 			},
 		},
 		{
-			name: "nonexistent",
+			name:       "nonexistent",
+			wantReason: rejectUnknown,
 			seed: func(t *testing.T, st *store.Store, usr store.User) (string, int) {
 				t.Helper()
 				return "never-issued", 0
@@ -177,10 +184,17 @@ func TestConsumeCode_InvalidLeavesNoDevice(t *testing.T) {
 			usr := seedUser(t, st, "a@b.co", "user")
 			code, wantDevicesBefore := tt.seed(t, st, usr)
 
-			svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, discardLogger())
-			if _, err := svc.ConsumeCode(t.Context(), code, ClientMeta{}); err == nil {
-				t.Fatal("expected error consuming invalid code")
+			log, buf := captureLog()
+			svc := NewEnrollmentService(st, testKey32(), 15*time.Minute, discardAudit{}, log)
+			if _, err := svc.ConsumeCode(t.Context(), code, ClientMeta{}); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("err = %v, want it to wrap store.ErrNotFound", err)
 			}
+			wantUser := usr.ID
+			if tt.wantReason == rejectUnknown {
+				wantUser = ""
+			}
+			wantRejection(t, buf, msgCodeRejected, tt.wantReason, wantUser)
+			assertNoSecrets(t, buf, code)
 
 			ds, err := st.Devices().ListByUser(t.Context(), usr.ID)
 			if err != nil {
