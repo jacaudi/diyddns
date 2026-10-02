@@ -1,12 +1,13 @@
 {{define "content"}}
-<div class="grid cols-3 stats">
-  <div class="card stat"><div class="label">Users</div><div class="value">{{.UserCount}}</div></div>
+<div class="grid cols-4 stats">
+  <div class="card stat"><div class="label">Accounts</div><div class="value">{{.UserCount}}</div></div>
   <div class="card stat"><div class="label">Devices</div><div class="value">{{.DeviceCount}}</div></div>
-  <div class="card stat"><div class="label">Disabled</div><div class="value">{{.DisabledCount}}</div></div>
+  <div class="card stat"><div class="label">Disabled accounts</div><div class="value">{{.DisabledAccountCount}}</div></div>
+  <div class="card stat"><div class="label">Disabled devices</div><div class="value">{{.DisabledDeviceCount}}</div></div>
 </div>
 
 <div class="page-head">
-  <div><h1>Users</h1><p class="sub">Manage accounts, roles, and access</p></div>
+  <div><h1>Accounts</h1><p class="sub">Manage accounts, roles, and access</p></div>
   <a class="btn primary" href="/admin/users/new">+ Invite user</a>
 </div>
 
