@@ -648,8 +648,6 @@ func (s *GrantService) notifyAdminsOfSelfServiceRecovery(ctx context.Context, u 
 // rejected. One vocabulary serves both, so the two services cannot drift.
 type rejectReason string
 
-// The reasons a grant or an enrollment code is rejected. One const block, so
-// both services draw from one vocabulary (design §4.2).
 const (
 	rejectMissing       rejectReason = "missing"        // no token was sent
 	rejectUnknown       rejectReason = "unknown"        // no such row
