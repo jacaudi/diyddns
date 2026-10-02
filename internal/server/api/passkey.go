@@ -51,18 +51,14 @@ func tagChallenge(flow registerFlow, sealed string) string {
 	return string(flow) + "." + sealed
 }
 
-// splitChallenge undoes tagChallenge. ok is false for an untagged value and for
-// an unknown tag.
-func splitChallenge(value string) (flow registerFlow, sealed string, ok bool) {
+// splitChallenge undoes tagChallenge. flow is "" for an untagged value; an
+// unknown tag is returned as is, for the caller's switch to reject.
+func splitChallenge(value string) (flow registerFlow, sealed string) {
 	tag, sealed, found := strings.Cut(value, ".")
 	if !found {
-		return "", "", false
+		return "", ""
 	}
-	switch f := registerFlow(tag); f {
-	case registerFlowGrant, registerFlowClaim:
-		return f, sealed, true
-	}
-	return "", "", false
+	return registerFlow(tag), sealed
 }
 
 // statusClientClosedRequest is the status for a request whose client went away
@@ -528,7 +524,7 @@ func registerFinishHandler(deps ServerDeps) func(context.Context, *webauthnFinis
 
 		var usr store.User
 		var err error
-		flow, sealed, _ := splitChallenge(wmeta.challenge)
+		flow, sealed := splitChallenge(wmeta.challenge)
 		switch flow {
 		case registerFlowGrant:
 			usr, err = deps.Grants.RedeemFinish(ctx, extra.Token, sealed, wmeta.req, extra.Name)
