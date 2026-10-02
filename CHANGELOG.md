@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.0](https://github.com/jacaudi/diyddns/compare/v1.2.0...v1.3.0) (2026-10-02)
+
+
+### Features
+
+* **service:** log why a passkey ceremony was rejected ([d558275](https://github.com/jacaudi/diyddns/commit/d5582752ed86790a440ec995bda40e1f41901b11)), closes [#91](https://github.com/jacaudi/diyddns/issues/91)
+* **service:** log why a registration link or an enrollment code was rejected ([29a0367](https://github.com/jacaudi/diyddns/commit/29a0367073ce23713577ec08ba106ff4ddd19bfa)), closes [#91](https://github.com/jacaudi/diyddns/issues/91)
+
+
+### Bug Fixes
+
+* **api:** answer an enrollment store failure with a logged 500, and a label clash with 409 ([4d82a1d](https://github.com/jacaudi/diyddns/commit/4d82a1d4cd751b5a5b6791b5c3fdc1f6adff7b74)), closes [#9](https://github.com/jacaudi/diyddns/issues/9)
+* **api:** route register/begin and register/finish on the token, not the email ([16472f3](https://github.com/jacaudi/diyddns/commit/16472f394a60f0d457f6b5b0c8af627b88caa3f8)), closes [#188](https://github.com/jacaudi/diyddns/issues/188)
+* **middleware:** do not write a 500 after the response has started ([390c9b4](https://github.com/jacaudi/diyddns/commit/390c9b4b809af08c4b0f7901a84633f91b5a4af5)), closes [#7](https://github.com/jacaudi/diyddns/issues/7)
+* **register:** render /register from the token's state; link holders are never asked for an email ([9e29167](https://github.com/jacaudi/diyddns/commit/9e2916728a74a2526ec6873d7cce7f782ac0b879)), closes [#188](https://github.com/jacaudi/diyddns/issues/188)
+* **service:** a code lost to a concurrent redeem is a lost race, not a label clash ([bef1845](https://github.com/jacaudi/diyddns/commit/bef1845b6eac6fedc03edb4788f706cb1de610d0)), closes [#9](https://github.com/jacaudi/diyddns/issues/9)
+* **service:** classify a /register token on the server ([53e6a1e](https://github.com/jacaudi/diyddns/commit/53e6a1e12050170f0ba216aa8ded52fb14f09bba)), closes [#188](https://github.com/jacaudi/diyddns/issues/188)
+* **webui:** call the admin page Accounts, and name what each tile counts ([7123562](https://github.com/jacaudi/diyddns/commit/71235622453d5b60a764ce5bc77f95c9c0a1f761)), closes [#189](https://github.com/jacaudi/diyddns/issues/189)
+
 ## [1.2.0](https://github.com/jacaudi/diyddns/compare/v1.1.0...v1.2.0) (2026-10-01)
 
 
