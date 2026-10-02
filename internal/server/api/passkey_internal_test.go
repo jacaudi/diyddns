@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,25 +11,6 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/store"
 )
-
-// recordsAt returns the JSON records in buf logged at level ("INFO", "ERROR").
-func recordsAt(t *testing.T, buf *bytes.Buffer, level string) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line not JSON: %v (%s)", err, line)
-		}
-		if rec["level"] == level {
-			out = append(out, rec)
-		}
-	}
-	return out
-}
 
 // TestPasskeyErr_CancelledRequest drives the mapper directly, so the status
 // literal and the sentinel-before-cancelled order are pinned without a server.
@@ -69,18 +48,17 @@ func TestPasskeyErr_CancelledRequest(t *testing.T) {
 			if se.GetStatus() != tt.wantStatus {
 				t.Errorf("status = %d, want %d", se.GetStatus(), tt.wantStatus)
 			}
-			info := recordsAt(t, buf, "INFO")
-			if len(info) != tt.wantInfo {
-				t.Fatalf("Info lines = %d, want %d; log:\n%s", len(info), tt.wantInfo, buf)
+			if n := strings.Count(buf.String(), "\n"); n != tt.wantInfo {
+				t.Fatalf("log lines = %d, want %d; log:\n%s", n, tt.wantInfo, buf)
 			}
-			if tt.wantInfo == 1 && info[0]["msg"] != "begin registration cancelled" {
-				t.Errorf("Info msg = %v, want %q", info[0]["msg"], "begin registration cancelled")
+			if tt.wantInfo == 0 {
+				return
 			}
-			if tt.wantInfo == 1 && se.Error() != "client closed request" {
+			if rec := findRecord(t, buf, "begin registration cancelled"); rec["level"] != "INFO" {
+				t.Errorf("level = %v, want INFO", rec["level"])
+			}
+			if se.Error() != "client closed request" {
 				t.Errorf("message = %q, want %q", se.Error(), "client closed request")
-			}
-			if errs := recordsAt(t, buf, "ERROR"); len(errs) != 0 {
-				t.Errorf("Error lines = %v, want none", errs)
 			}
 		})
 	}

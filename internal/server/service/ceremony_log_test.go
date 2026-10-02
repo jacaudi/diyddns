@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -152,27 +151,22 @@ func TestClaimChallenge_LogsAReplayWithoutAttributes(t *testing.T) {
 	}
 }
 
-// lockProbe is a slog.Handler that records, for every record it handles,
-// whether the used-challenge mutex was free at that moment. mu is set after the
-// service is built (the service owns the mutex and needs the logger first).
+// lockProbe is a log sink that records, for every line written to it, whether
+// the used-challenge mutex was free at that moment. mu is set after the service
+// is built (the service owns the mutex and needs the logger first).
 type lockProbe struct {
 	mu   *sync.Mutex
 	free []bool
 }
 
-func (p *lockProbe) Enabled(context.Context, slog.Level) bool { return true }
-
-func (p *lockProbe) Handle(context.Context, slog.Record) error {
+func (p *lockProbe) Write(b []byte) (int, error) {
 	got := p.mu.TryLock()
 	if got {
 		p.mu.Unlock()
 	}
 	p.free = append(p.free, got)
-	return nil
+	return len(b), nil
 }
-
-func (p *lockProbe) WithAttrs([]slog.Attr) slog.Handler { return p }
-func (p *lockProbe) WithGroup(string) slog.Handler      { return p }
 
 // TestClaimChallenge_LogsAReplayAfterUnlocking pins the design's rule that
 // claimChallenge decides under its mutex and logs after releasing it, so a slow
@@ -181,7 +175,7 @@ func (p *lockProbe) WithGroup(string) slog.Handler      { return p }
 // mutex was already released.
 func TestClaimChallenge_LogsAReplayAfterUnlocking(t *testing.T) {
 	probe := &lockProbe{}
-	svc := newTestPasskeyServiceWithLog(t, openTestStore(t), discardAudit{}, slog.New(probe))
+	svc := newTestPasskeyServiceWithLog(t, openTestStore(t), discardAudit{}, slog.New(slog.NewTextHandler(probe, nil)))
 	probe.mu = &svc.usedMu
 	expires := time.Now().Add(time.Minute)
 

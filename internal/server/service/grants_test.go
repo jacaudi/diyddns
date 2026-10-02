@@ -1421,21 +1421,36 @@ func TestGrantService_ClassifyRegistration(t *testing.T) {
 		// non-grant token is first-run instead of dead.
 		wantGrant  bool
 		wantReason string
+		// wantLog is the reason logged when the token ends up dead (an admin
+		// exists), or "" when nothing is logged. Nothing else ever logs.
+		wantLog rejectReason
 	}{
 		{"invite", func(t *testing.T, st *store.Store, u store.User) string {
 			return seedGrant(t, st, u.ID, "invite", now+3600, 0)
-		}, true, "invite"},
+		}, true, "invite", ""},
 		{"recovery", func(t *testing.T, st *store.Store, u store.User) string {
 			return seedGrant(t, st, u.ID, "recovery", now+3600, 0)
-		}, true, "recovery"},
+		}, true, "recovery", ""},
 		{"expired", func(t *testing.T, st *store.Store, u store.User) string {
 			return seedGrant(t, st, u.ID, "invite", now-10, 0)
-		}, false, ""},
+		}, false, "", rejectExpired},
 		{"used", func(t *testing.T, st *store.Store, u store.User) string {
 			return seedGrant(t, st, u.ID, "invite", now+3600, now-5)
-		}, false, ""},
-		{"unknown", func(*testing.T, *store.Store, store.User) string { return "no-such-token" }, false, ""},
-		{"empty", func(*testing.T, *store.Store, store.User) string { return "" }, false, ""},
+		}, false, "", rejectUsed},
+		{"unknown", func(*testing.T, *store.Store, store.User) string { return "no-such-token" }, false, "", rejectUnknown},
+		{"empty", func(*testing.T, *store.Store, store.User) string { return "" }, false, "", ""},
+		// D9: a live grant whose user row is gone is not live. The foreign key
+		// makes this unreachable through the API, so enforcement is switched off
+		// for the delete.
+		{"live grant whose user is gone", func(t *testing.T, st *store.Store, u store.User) string {
+			token := seedGrant(t, st, u.ID, "invite", now+3600, 0)
+			for _, q := range []string{`PRAGMA foreign_keys = OFF`, `DELETE FROM users WHERE id = '` + u.ID + `'`, `PRAGMA foreign_keys = ON`} {
+				if _, err := st.DB().ExecContext(t.Context(), q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			return token
+		}, false, "", rejectUserMissing},
 	}
 	for _, tt := range tests {
 		for _, withAdmin := range []bool{true, false} {
@@ -1444,7 +1459,7 @@ func TestGrantService_ClassifyRegistration(t *testing.T) {
 				name = tt.name + "/admin exists"
 			}
 			t.Run(name, func(t *testing.T) {
-				st, grants := newClassifyGrants(t)
+				st, grants, buf := newLoggedGrants(t)
 				if withAdmin {
 					seedUser(t, st, "admin@example.com", "admin")
 				}
@@ -1466,36 +1481,19 @@ func TestGrantService_ClassifyRegistration(t *testing.T) {
 				if got != want {
 					t.Errorf("ClassifyRegistration = %+v, want %+v", got, want)
 				}
+				switch {
+				case !withAdmin || tt.wantLog == "":
+					if logged := buf.String(); logged != "" {
+						t.Errorf("logged for a state that must log nothing:\n%s", logged)
+					}
+				case tt.wantLog == rejectUnknown:
+					wantRejection(t, buf, msgGrantRejected, tt.wantLog, "")
+				default:
+					wantRejection(t, buf, msgGrantRejected, tt.wantLog, user.ID)
+				}
+				assertNoSecrets(t, buf, token, auth.HashToken(token))
 			})
 		}
-	}
-}
-
-// TestGrantService_ClassifyRegistration_GrantWithoutUserIsNotLive pins D9: a
-// live grant whose user row cannot be found is treated like any other
-// non-live token, not as an error. The foreign key makes this unreachable
-// through the API, so the test switches enforcement off for the delete.
-func TestGrantService_ClassifyRegistration_GrantWithoutUserIsNotLive(t *testing.T) {
-	st, grants := newClassifyGrants(t)
-	seedUser(t, st, "admin@example.com", "admin")
-	user := seedUser(t, st, "ghost@example.com", "user")
-	token := seedGrant(t, st, user.ID, "invite", store.NowUnix()+3600, 0)
-	for _, q := range []string{
-		`PRAGMA foreign_keys = OFF`,
-		`DELETE FROM users WHERE id = '` + user.ID + `'`,
-		`PRAGMA foreign_keys = ON`,
-	} {
-		if _, err := st.DB().ExecContext(t.Context(), q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-
-	got, err := grants.ClassifyRegistration(t.Context(), token)
-	if err != nil {
-		t.Fatalf("ClassifyRegistration: %v", err)
-	}
-	if want := (RegisterTarget{State: RegisterDead}); got != want {
-		t.Errorf("ClassifyRegistration = %+v, want %+v", got, want)
 	}
 }
 

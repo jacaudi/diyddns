@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -52,18 +53,17 @@ func TestEnrollErr(t *testing.T) {
 			if se.GetStatus() != tt.wantStatus || se.Error() != tt.wantMsg {
 				t.Errorf("response = %d %q, want %d %q", se.GetStatus(), se.Error(), tt.wantStatus, tt.wantMsg)
 			}
-			for _, level := range []string{"INFO", "ERROR"} {
-				recs := recordsAt(t, buf, level)
-				want := 0
-				if level == tt.wantLevel {
-					want = 1
+			if tt.wantLog == "" {
+				if buf.Len() != 0 {
+					t.Fatalf("logged, want nothing:\n%s", buf)
 				}
-				if len(recs) != want {
-					t.Fatalf("%s lines = %d, want %d; log:\n%s", level, len(recs), want, buf)
-				}
-				if want == 1 && recs[0]["msg"] != tt.wantLog {
-					t.Errorf("%s msg = %v, want %q", level, recs[0]["msg"], tt.wantLog)
-				}
+				return
+			}
+			if n := strings.Count(buf.String(), "\n"); n != 1 {
+				t.Fatalf("log lines = %d, want 1:\n%s", n, buf)
+			}
+			if rec := findRecord(t, buf, tt.wantLog); rec["level"] != tt.wantLevel {
+				t.Errorf("level = %v, want %s", rec["level"], tt.wantLevel)
 			}
 		})
 	}

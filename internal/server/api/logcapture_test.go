@@ -82,14 +82,8 @@ func withMsg(recs []map[string]any, msg string) []map[string]any {
 	return out
 }
 
-// serveDeps starts the full server over deps, which buildServerDeps built on
-// st, and returns the harness.
-func serveDeps(t *testing.T, st *store.Store, deps api.ServerDeps) fullHarness {
-	t.Helper()
-	return serveWith(t, st, deps, nil)
-}
-
-// serveWith is serveDeps with the mux wrapped by wrap (nil for no wrapper).
+// serveWith starts the full server over deps, which buildServerDeps built on
+// st, with the mux wrapped by wrap (nil for no wrapper).
 func serveWith(t *testing.T, st *store.Store, deps api.ServerDeps, wrap func(http.Handler) http.Handler) fullHarness {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -123,5 +117,5 @@ func newLoggedHarness(t *testing.T) (fullHarness, *logCapture) {
 	st, deps := buildServerDeps(t)
 	logs := &logCapture{}
 	deps.Log = logs.logger()
-	return serveDeps(t, st, deps), logs
+	return serveWith(t, st, deps, nil), logs
 }

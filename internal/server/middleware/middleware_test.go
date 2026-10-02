@@ -442,16 +442,6 @@ func TestRecover_PanicAfterHijackLeavesServerErrorLogClean(t *testing.T) {
 	}
 }
 
-// attrString returns the string value of the attribute named key.
-func attrString(attrs []attribute.KeyValue, key string) (string, bool) {
-	for _, kv := range attrs {
-		if string(kv.Key) == key {
-			return kv.Value.AsString(), true
-		}
-	}
-	return "", false
-}
-
 // Recover marks the request span, which Trace put in the request context, so
 // tracing still flags a panic whose 500 the client never received.
 func TestRecover_MarksSpanOnPanic(t *testing.T) {
@@ -502,9 +492,10 @@ func TestRecover_MarksSpanOnPanic(t *testing.T) {
 			if got := spans[0].Status.Code; got != tc.wantSpan {
 				t.Errorf("span status = %v, want %v", got, tc.wantSpan)
 			}
-			got, ok := attrString(spans[0].Attributes, "error.type")
-			if got != tc.wantErrorType || ok != (tc.wantErrorType != "") {
-				t.Errorf("error.type = %q (present %v), want %q", got, ok, tc.wantErrorType)
+			attrs := attribute.NewSet(spans[0].Attributes...)
+			got, ok := attrs.Value("error.type")
+			if got.AsString() != tc.wantErrorType || ok != (tc.wantErrorType != "") {
+				t.Errorf("error.type = %q (present %v), want %q", got.AsString(), ok, tc.wantErrorType)
 			}
 		})
 	}
