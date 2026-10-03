@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -54,7 +55,7 @@ func TestPasskeyErr_CancelledRequest(t *testing.T) {
 			if tt.wantInfo == 0 {
 				return
 			}
-			if rec := findRecord(t, buf, "begin registration cancelled"); rec["level"] != "INFO" {
+			if rec := logtest.Find(t, buf.String(), "begin registration cancelled"); rec["level"] != "INFO" {
 				t.Errorf("level = %v, want INFO", rec["level"])
 			}
 			if se.Error() != "client closed request" {

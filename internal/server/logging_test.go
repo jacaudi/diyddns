@@ -2,17 +2,16 @@ package server_test
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/server"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
 
@@ -35,19 +34,7 @@ func logRecords(t *testing.T, fn func(*slog.Logger)) []map[string]any {
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	var out []map[string]any
-	// SplitSeq, not Split -- `modernize` is not excluded for _test.go files.
-	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("decode %q: %v", line, err)
-		}
-		out = append(out, rec)
-	}
-	return out
+	return logtest.Records(t, string(raw))
 }
 
 // reqCtx returns a context carrying a request id, produced by the real

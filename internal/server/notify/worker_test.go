@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 
 	"go.opentelemetry.io/otel/metric"
@@ -210,28 +210,6 @@ func newLoggingTestWorker(st *store.Store, allowedCIDRs []string, maxAttempts in
 		panic(err)
 	}
 	return NewWorker(st, NewClients(allowed, 2*time.Second), testKey(), maxAttempts, nopAudit{}, halfJitter, log, deliveries)
-}
-
-// findRecord returns the first JSON record in buf whose msg matches, or fails.
-func findRecord(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
-	t.Helper()
-	// SplitSeq, not Split: golangci-lint runs `modernize`, and its test-file
-	// exclusion list is [gocyclo dupl gosec errcheck unparam prealloc] -- so
-	// `stringsseq` fires on a range over strings.Split in a _test.go file.
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line not JSON: %v (%s)", err, line)
-		}
-		if rec["msg"] == msg {
-			return rec
-		}
-	}
-	t.Fatalf("no record with msg %q in:\n%s", msg, buf.String())
-	return nil
 }
 
 // Backoff: the published schedule, the clamp, and the jitter order.
@@ -786,7 +764,7 @@ func TestDeliver_LogsInfoOnDelivered(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log, noop.Int64Counter{}).sweep(t.Context())
 
-	line := findRecord(t, &buf, "notify: delivered")
+	line := logtest.Find(t, buf.String(), "notify: delivered")
 	if line["level"] != "INFO" {
 		t.Errorf("level = %v, want INFO", line["level"])
 	}
@@ -812,7 +790,7 @@ func TestDeliver_LogsWarnOn410Gone(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 5, log, noop.Int64Counter{}).sweep(t.Context())
 
-	line := findRecord(t, &buf, "notify: delivery failed permanently")
+	line := logtest.Find(t, buf.String(), "notify: delivery failed permanently")
 	if line["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", line["level"])
 	}
@@ -858,7 +836,7 @@ func TestDeliver_LogsWarnWhenAttemptsExhausted(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	newLoggingTestWorker(st, []string{"127.0.0.0/8"}, 1, log, noop.Int64Counter{}).sweep(t.Context())
 
-	line := findRecord(t, &buf, "notify: delivery failed permanently")
+	line := logtest.Find(t, buf.String(), "notify: delivery failed permanently")
 	if line["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", line["level"])
 	}

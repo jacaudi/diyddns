@@ -1,10 +1,10 @@
 package service
 
 import (
-	"encoding/json"
 	"log/slog"
-	"strings"
 	"testing"
+
+	"github.com/jacaudi/diyddns/internal/logtest"
 )
 
 // captureLog returns a JSON logger at Debug and the buffer it writes to, for
@@ -25,18 +25,7 @@ func (b *lockedBuffer) reset() {
 // logRecords decodes every line written to buf.
 func logRecords(t *testing.T, buf *lockedBuffer) []map[string]any {
 	t.Helper()
-	var out []map[string]any
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line is not JSON: %v (%s)", err, line)
-		}
-		out = append(out, rec)
-	}
-	return out
+	return logtest.Records(t, buf.String())
 }
 
 // onlyRecord asserts buf holds exactly one line, at level with message msg, and

@@ -2,7 +2,6 @@ package service
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/descope/virtualwebauthn"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -535,14 +535,7 @@ func TestFinishClaim_CriticalRecordUsesErrorKey(t *testing.T) {
 // match them.
 func findRecordPrefix(t *testing.T, buf *bytes.Buffer, prefix string) map[string]any {
 	t.Helper()
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line not JSON: %v (%s)", err, line)
-		}
+	for _, rec := range logtest.Records(t, buf.String()) {
 		if msg, _ := rec["msg"].(string); strings.HasPrefix(msg, prefix) {
 			return rec
 		}

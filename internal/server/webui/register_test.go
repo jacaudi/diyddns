@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -314,7 +315,7 @@ func TestHandleRegister_CancelledRequest(t *testing.T) {
 			if n := strings.Count(buf.String(), "\n"); n != 1 {
 				t.Fatalf("log lines = %d, want 1:\n%s", n, buf)
 			}
-			if line := findRecord(t, buf, "webui: register cancelled"); line["level"] != "INFO" {
+			if line := logtest.Find(t, buf.String(), "webui: register cancelled"); line["level"] != "INFO" {
 				t.Errorf("level = %v, want INFO", line["level"])
 			}
 			if strings.Contains(buf.String(), longToken) {
