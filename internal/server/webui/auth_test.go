@@ -2,13 +2,13 @@ package webui
 
 import (
 	"bytes"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -25,25 +25,6 @@ func loggingHandler(t *testing.T) (*handler, *bytes.Buffer, *store.Store, Deps) 
 	return newTestHandler(t, deps), &buf, st, deps
 }
 
-// findRecord returns the first JSON record in buf whose msg matches, or fails.
-func findRecord(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
-	t.Helper()
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line not JSON: %v (%s)", err, line)
-		}
-		if rec["msg"] == msg {
-			return rec
-		}
-	}
-	t.Fatalf("no record with msg %q in:\n%s", msg, buf.String())
-	return nil
-}
-
 func TestRequireSession_LogsRejection(t *testing.T) {
 	h, buf, _, _ := loggingHandler(t)
 	rec := httptest.NewRecorder()
@@ -57,7 +38,7 @@ func TestRequireSession_LogsRejection(t *testing.T) {
 	if got := rec.Header().Get("Location"); got != "/login" {
 		t.Fatalf("Location = %q, want /login", got)
 	}
-	line := findRecord(t, buf, "session auth rejected")
+	line := logtest.Find(t, buf.String(), "session auth rejected")
 	if line["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", line["level"])
 	}
@@ -98,7 +79,7 @@ func TestAdminOnly_LogsRejection(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
-	line := findRecord(t, buf, "admin role required")
+	line := logtest.Find(t, buf.String(), "admin role required")
 	if line["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", line["level"])
 	}
@@ -129,7 +110,7 @@ func TestRequirePost_LogsCSRFRejection(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
-	line := findRecord(t, buf, "csrf rejected")
+	line := logtest.Find(t, buf.String(), "csrf rejected")
 	if line["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", line["level"])
 	}
@@ -156,7 +137,7 @@ func TestRequirePost_LogsMalformedForm(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	line := findRecord(t, buf, "malformed form")
+	line := logtest.Find(t, buf.String(), "malformed form")
 	if line["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", line["level"])
 	}

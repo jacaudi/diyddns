@@ -3,7 +3,6 @@ package telemetry
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"go.opentelemetry.io/otel"
 )
 
@@ -34,20 +34,7 @@ func newTestHandler(t *testing.T) (*rateLimited, *bytes.Buffer, *fakeClock) {
 
 func records(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	t.Helper()
-	var out []map[string]any
-	// SplitSeq, not Split: modernize/stringsseq is enabled for _test.go too
-	// (the exclusion list is [gocyclo dupl gosec errcheck unparam prealloc]).
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Fatalf("unmarshal %q: %v", line, err)
-		}
-		out = append(out, m)
-	}
-	return out
+	return logtest.Records(t, buf.String())
 }
 
 // The FIRST failure is never delayed, and a burst produces exactly one record.

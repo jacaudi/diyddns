@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -62,7 +63,7 @@ func TestEnrollErr(t *testing.T) {
 			if n := strings.Count(buf.String(), "\n"); n != 1 {
 				t.Fatalf("log lines = %d, want 1:\n%s", n, buf)
 			}
-			if rec := findRecord(t, buf, tt.wantLog); rec["level"] != tt.wantLevel {
+			if rec := logtest.Find(t, buf.String(), tt.wantLog); rec["level"] != tt.wantLevel {
 				t.Errorf("level = %v, want %s", rec["level"], tt.wantLevel)
 			}
 		})

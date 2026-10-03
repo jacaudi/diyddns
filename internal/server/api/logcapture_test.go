@@ -3,14 +3,13 @@ package api_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -44,20 +43,7 @@ func (c *logCapture) logger() *slog.Logger {
 // records returns every line logged so far, decoded.
 func (c *logCapture) records(t *testing.T) []map[string]any {
 	t.Helper()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var out []map[string]any
-	for line := range strings.SplitSeq(strings.TrimSpace(c.buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line is not JSON: %v (%s)", err, line)
-		}
-		out = append(out, rec)
-	}
-	return out
+	return logtest.Records(t, c.String())
 }
 
 // atLevel returns the records logged at level ("INFO", "ERROR", ...).
