@@ -253,6 +253,42 @@ func TestFinishLogin_LogsAFailedVerification(t *testing.T) {
 	}
 }
 
+// TestFinishLogin_StoreFailureIsNotAVerificationFailure: a store failure while
+// resolving the signer is returned as itself, for passkeyErr to log at Error,
+// not collapsed into the uniform 401 and logged as a failed verification (#190).
+func TestFinishLogin_StoreFailureIsNotAVerificationFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		breakStore func(t *testing.T, st *store.Store)
+	}{
+		{"the handle lookup fails", func(t *testing.T, st *store.Store) {
+			if err := st.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+		}},
+		{"the credential list fails", dropTable("webauthn_credentials")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := openTestStore(t)
+			svc, buf := newLoggedPasskeys(t, st)
+			u := seedUser(t, st, "alice@example.com", "user")
+			_, authr, cred := registerPasskey(t, svc, u.ID, "My Key", testRP())
+			sealed, body := beginLoginFor(t, svc, authr, cred)
+			tt.breakStore(t, st)
+			buf.reset()
+
+			_, err := svc.FinishLogin(t.Context(), sealed, jsonRequest(body), "1.2.3.4", "ua")
+
+			wantStoreFailure(t, err, ErrPasskeyVerification)
+			for _, rec := range logRecords(t, buf) {
+				if rec["msg"] == msgLoginFailed {
+					t.Errorf("a store failure was logged as %q: %v", msgLoginFailed, rec)
+				}
+			}
+		})
+	}
+}
+
 func TestFinishLogin_LogsADisabledAccount(t *testing.T) {
 	st := openTestStore(t)
 	svc, buf := newLoggedPasskeys(t, st)

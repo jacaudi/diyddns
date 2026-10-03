@@ -433,6 +433,26 @@ func TestRegister_BeginOnAClosedStoreIsAServerError(t *testing.T) {
 	}
 }
 
+// TestRegister_BeginClaimStoreFailureIsAServerError: on a fresh install, a
+// store failure inside the claim itself (routing succeeded, the token read
+// failed) is a 500 with one Error line, not "invalid bootstrap token" (#190).
+func TestRegister_BeginClaimStoreFailureIsAServerError(t *testing.T) {
+	h, logs := newLoggedHarness(t)
+	if _, err := h.st.DB().ExecContext(t.Context(), `DROP TABLE bootstrap`); err != nil {
+		t.Fatalf("drop bootstrap: %v", err)
+	}
+
+	status, _, body := jarPost(t, jarClient(t), h.srv.URL+registerBeginPath,
+		map[string]string{"token": "some-token", "email": "admin@example.com"}, "")
+
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body=%s", status, body)
+	}
+	if errs := atLevel(logs.records(t), "ERROR"); len(errs) != 1 || errs[0]["msg"] != "begin registration failed" {
+		t.Errorf("Error lines = %v, want exactly one %q", errs, "begin registration failed")
+	}
+}
+
 // TestRegister_BeginFreshInstallWrongTokenKeepsItsMessage: on a fresh install
 // a wrong token with an email is still "invalid bootstrap token".
 func TestRegister_BeginFreshInstallWrongTokenKeepsItsMessage(t *testing.T) {
