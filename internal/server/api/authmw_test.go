@@ -17,6 +17,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -75,25 +76,6 @@ func seedDeviceWithSecret(t *testing.T, st *store.Store, key []byte, label, user
 func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
-}
-
-// findRecord returns the first JSON record in buf whose msg matches, or fails.
-func findRecord(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
-	t.Helper()
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line not JSON: %v (%s)", err, line)
-		}
-		if rec["msg"] == msg {
-			return rec
-		}
-	}
-	t.Fatalf("no record with msg %q in:\n%s", msg, buf.String())
-	return nil
 }
 
 // hmacProbe wires a throwaway operation behind hmacMiddleware, mirroring
@@ -163,7 +145,7 @@ func TestHMACMiddleware_LogsRejectionReason(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
-	rec := findRecord(t, buf, "agent auth rejected")
+	rec := logtest.Find(t, buf.String(), "agent auth rejected")
 	if rec["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", rec["level"])
 	}
@@ -189,7 +171,7 @@ func TestHMACMiddleware_BoundsClaimedDeviceID(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	rec := findRecord(t, buf, "agent auth rejected")
+	rec := logtest.Find(t, buf.String(), "agent auth rejected")
 	if rec["claimed_device_id"] != "" {
 		t.Errorf("claimed_device_id = %q, want empty for an over-long value", rec["claimed_device_id"])
 	}
@@ -677,7 +659,7 @@ func TestSessionMiddleware_LogsRejectionReason(t *testing.T) {
 				t.Fatalf("status = %d, want 401", resp.StatusCode)
 			}
 
-			rec := findRecord(t, buf, "session auth rejected")
+			rec := logtest.Find(t, buf.String(), "session auth rejected")
 			if rec["level"] != "WARN" {
 				t.Errorf("level = %v, want WARN", rec["level"])
 			}
@@ -715,7 +697,7 @@ func TestCSRFMiddleware_LogsRejection(t *testing.T) {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 
-	rec := findRecord(t, buf, "csrf rejected")
+	rec := logtest.Find(t, buf.String(), "csrf rejected")
 	if rec["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", rec["level"])
 	}
@@ -747,7 +729,7 @@ func TestAdminMiddleware_LogsRejection(t *testing.T) {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 
-	rec := findRecord(t, buf, "admin role required")
+	rec := logtest.Find(t, buf.String(), "admin role required")
 	if rec["level"] != "WARN" {
 		t.Errorf("level = %v, want WARN", rec["level"])
 	}

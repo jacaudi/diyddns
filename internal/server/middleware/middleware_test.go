@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -319,27 +320,11 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// logRecord returns the first JSON log record whose msg is msg.
-func logRecord(t *testing.T, logs, msg string) map[string]any {
-	t.Helper()
-	for line := range strings.SplitSeq(strings.TrimSpace(logs), "\n") {
-		var got map[string]any
-		if err := json.Unmarshal([]byte(line), &got); err != nil {
-			t.Fatalf("log line is not JSON: %v: %q", err, line)
-		}
-		if got["msg"] == msg {
-			return got
-		}
-	}
-	t.Fatalf("no %q record in logs: %s", msg, logs)
-	return nil
-}
-
 // responseStarted reads the response_started attribute of the "panic
 // recovered" record, failing the test when it is absent or not a bool.
 func responseStarted(t *testing.T, logs string) bool {
 	t.Helper()
-	got, ok := logRecord(t, logs, "panic recovered")["response_started"].(bool)
+	got, ok := logtest.Find(t, logs, "panic recovered")["response_started"].(bool)
 	if !ok {
 		t.Fatalf("panic record has no bool response_started: %s", logs)
 	}
@@ -482,7 +467,7 @@ func TestRecover_MarksSpanOnPanic(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Errorf("client status = %d, want %d", rec.Code, tc.wantStatus)
 			}
-			if got := logRecord(t, buf.String(), "request")["status"]; got != float64(tc.wantStatus) {
+			if got := logtest.Find(t, buf.String(), "request")["status"]; got != float64(tc.wantStatus) {
 				t.Errorf("access log status = %v, want %d", got, tc.wantStatus)
 			}
 			spans := exp.GetSpans()
