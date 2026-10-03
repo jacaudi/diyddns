@@ -211,7 +211,11 @@ func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) 
 	if s.passkeys == nil {
 		return "", nil, ErrWebAuthnUnavailable
 	}
-	if ok, _ := s.AdminExists(ctx); ok {
+	ok, err := s.AdminExists(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("service.BeginClaim: %w", err)
+	}
+	if ok {
 		return "", nil, ErrBootstrapClosed
 	}
 	// Normalize as well as validate — see AdminService.CreateUserInvite. The
@@ -224,7 +228,12 @@ func (s *BootstrapService) BeginClaim(ctx context.Context, token, email string) 
 	}
 	email = normalized
 
+	// A missing row is a wrong token, uniformly; any other read failure is the
+	// store's, never the caller's (#190).
 	bs, err := s.st.Bootstrap().Get(ctx)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", nil, fmt.Errorf("service.BeginClaim: %w", err)
+	}
 	if err != nil || bs.TokenHash == "" {
 		return "", nil, ErrBootstrapToken
 	}
@@ -268,7 +277,11 @@ func (s *BootstrapService) FinishClaim(ctx context.Context, sealedCookie string,
 	if s.passkeys == nil {
 		return store.User{}, ErrWebAuthnUnavailable
 	}
-	if ok, _ := s.AdminExists(ctx); ok {
+	ok, err := s.AdminExists(ctx)
+	if err != nil {
+		return store.User{}, fmt.Errorf("service.FinishClaim: %w", err)
+	}
+	if ok {
 		return store.User{}, ErrBootstrapClosed
 	}
 
@@ -286,7 +299,11 @@ func (s *BootstrapService) FinishClaim(ctx context.Context, sealedCookie string,
 
 	if err := s.st.Bootstrap().Consume(ctx); err != nil {
 		// ErrNotFound => already consumed, or this call lost the atomic race.
-		return store.User{}, ErrBootstrapClosed
+		// Anything else is a store failure (#190).
+		if errors.Is(err, store.ErrNotFound) {
+			return store.User{}, ErrBootstrapClosed
+		}
+		return store.User{}, fmt.Errorf("service.FinishClaim: %w", err)
 	}
 
 	u, err := s.st.Users().Create(ctx, store.User{Email: cs.Email, Role: "admin"})

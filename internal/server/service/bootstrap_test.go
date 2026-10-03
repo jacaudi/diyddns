@@ -49,6 +49,14 @@ func newTestBootstrapServiceWithPasskeys(t *testing.T, st *store.Store, audit Au
 // virtualwebauthn, returning whatever FinishClaim returns.
 func driveClaim(t *testing.T, svc *BootstrapService, token, email, name string, rp virtualwebauthn.RelyingParty) (store.User, error) {
 	t.Helper()
+	sealed, attResp := beginClaim(t, svc, token, email, rp)
+	return svc.FinishClaim(t.Context(), sealed, jsonRequest(attResp), name)
+}
+
+// beginClaim runs BeginClaim and builds the authenticator's attestation
+// response, so a test can break the store before FinishClaim.
+func beginClaim(t *testing.T, svc *BootstrapService, token, email string, rp virtualwebauthn.RelyingParty) (sealed, attResp string) {
+	t.Helper()
 
 	sealed, optsJSON, err := svc.BeginClaim(t.Context(), token, email)
 	if err != nil {
@@ -62,9 +70,7 @@ func driveClaim(t *testing.T, svc *BootstrapService, token, email, name string, 
 	authr := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: []byte(attOpts.UserID)})
 	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
 	authr.AddCredential(cred)
-	attResp := virtualwebauthn.CreateAttestationResponse(rp, authr, cred, *attOpts)
-
-	return svc.FinishClaim(t.Context(), sealed, jsonRequest(attResp), name)
+	return sealed, virtualwebauthn.CreateAttestationResponse(rp, authr, cred, *attOpts)
 }
 
 func TestBootstrapService_Startup_TokenPath_SetsHashAndEmitsToken(t *testing.T) {
@@ -366,6 +372,124 @@ func TestBootstrapService_BeginClaim_AdminAlreadyExists_ReturnsClosed(t *testing
 
 	if _, _, err := svc.BeginClaim(t.Context(), "any-token", "new-admin@example.com"); !errors.Is(err, ErrBootstrapClosed) {
 		t.Fatalf("BeginClaim (admin exists): got %v, want ErrBootstrapClosed", err)
+	}
+}
+
+// wantStoreFailure fails unless err reports a store failure: not nil, not a
+// cancellation, not ErrNotFound (passkeyErr answers that 404), and none of the
+// credential sentinels a client would read as its own mistake.
+func wantStoreFailure(t *testing.T, err error, credentialErrs ...error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("err = nil, want the store failure")
+	}
+	if store.Cancelled(t.Context(), err) {
+		t.Errorf("a store failure reads as cancelled: %v", err)
+	}
+	for _, sentinel := range append(credentialErrs, store.ErrNotFound) {
+		if errors.Is(err, sentinel) {
+			t.Errorf("err = %v, must not be %v", err, sentinel)
+		}
+	}
+}
+
+// TestBootstrapService_BeginClaim_StoreFailureIsNotABadToken: with the
+// CORRECT token, a failed admin scan or token read is a store failure, not
+// "invalid bootstrap token" or "bootstrap already completed" (#190).
+func TestBootstrapService_BeginClaim_StoreFailureIsNotABadToken(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		breakStore func(t *testing.T, st *store.Store)
+	}{
+		// Dropping a table breaks only the read that needs it, so each case
+		// fails on its own step and cannot pass on the next one's failure.
+		{"the admin scan fails", dropTable("users")},
+		{"the token read fails", dropTable("bootstrap")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := openTestStore(t)
+			var token string
+			svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+			if err := svc.Startup(t.Context()); err != nil {
+				t.Fatalf("Startup: %v", err)
+			}
+			tt.breakStore(t, st)
+
+			_, _, err := svc.BeginClaim(t.Context(), token, "admin@example.com")
+
+			wantStoreFailure(t, err, ErrBootstrapToken, ErrBootstrapClosed)
+		})
+	}
+}
+
+// TestBootstrapService_FinishClaim_AdminScanFailureIsNotClosed: a failed admin
+// scan must not read as "no admin exists" and carry on to spend the token.
+func TestBootstrapService_FinishClaim_AdminScanFailureIsNotClosed(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	sealed, attResp := beginClaim(t, svc, token, "admin@example.com", testRP())
+	dropTable("users")(t, st)
+
+	_, err := svc.FinishClaim(t.Context(), sealed, jsonRequest(attResp), "My Key")
+
+	wantStoreFailure(t, err, ErrBootstrapClosed, ErrPasskeyVerification)
+	bs, err := st.Bootstrap().Get(t.Context())
+	if err != nil {
+		t.Fatalf("Bootstrap.Get: %v", err)
+	}
+	if bs.ConsumedAt != 0 {
+		t.Errorf("ConsumedAt = %d, want 0: the token was spent on a failed admin scan", bs.ConsumedAt)
+	}
+}
+
+// dropTable returns a step that drops table, so the store calls that read it
+// fail while every other call keeps working.
+func dropTable(table string) func(t *testing.T, st *store.Store) {
+	return func(t *testing.T, st *store.Store) {
+		t.Helper()
+		if _, err := st.DB().ExecContext(t.Context(), "DROP TABLE "+table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+}
+
+// TestBootstrapService_FinishClaim_ConsumeFailureIsNotClosed: only "no row
+// matched" means the token was spent; any other Consume failure is a store
+// failure, and nothing after the consume runs.
+func TestBootstrapService_FinishClaim_ConsumeFailureIsNotClosed(t *testing.T) {
+	st := openTestStore(t)
+	var token string
+	svc := newTestBootstrapServiceWithPasskeys(t, st, discardAudit{}, func(tok string) { token = tok })
+	if err := svc.Startup(t.Context()); err != nil {
+		t.Fatalf("Startup: %v", err)
+	}
+	sealed, attResp := beginClaim(t, svc, token, "admin@example.com", testRP())
+	if _, err := st.DB().ExecContext(t.Context(),
+		`CREATE TRIGGER block_bootstrap_update BEFORE UPDATE ON bootstrap
+		 BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	_, err := svc.FinishClaim(t.Context(), sealed, jsonRequest(attResp), "My Key")
+
+	wantStoreFailure(t, err, ErrBootstrapClosed, ErrPasskeyVerification)
+	users, err := st.Users().List(t.Context())
+	if err != nil {
+		t.Fatalf("Users.List: %v", err)
+	}
+	if len(users) != 0 {
+		t.Errorf("users after a failed consume = %d, want 0", len(users))
+	}
+	bs, err := st.Bootstrap().Get(t.Context())
+	if err != nil {
+		t.Fatalf("Bootstrap.Get: %v", err)
+	}
+	if bs.ConsumedAt != 0 {
+		t.Errorf("ConsumedAt = %d, want 0 (unconsumed)", bs.ConsumedAt)
 	}
 }
 
