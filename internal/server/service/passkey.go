@@ -225,7 +225,7 @@ func (s *PasskeyService) BeginLogin(ctx context.Context) ([]byte, string, error)
 // (auditing passkey.signcount_anomaly and minting no session), persists the
 // credential's updated counter and last-used timestamp, and mints a browser
 // session (audit user.login.passkey). Every rejection path returns the
-// uniform ErrPasskeyVerification.
+// uniform ErrPasskeyVerification; a store failure is returned as itself.
 func (s *PasskeyService) FinishLogin(ctx context.Context, sealedCookie string, r *http.Request, ip, ua string) (store.Session, error) {
 	sess, err := s.openSession(ctx, sealedCookie)
 	if err != nil {
@@ -235,38 +235,24 @@ func (s *PasskeyService) FinishLogin(ctx context.Context, sealedCookie string, r
 		return store.Session{}, ErrPasskeyVerification
 	}
 
-	var resolved store.User
-	var haveUser bool
-	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
-		u, err := s.st.Users().GetByWebAuthnHandle(ctx, userHandle)
-		if err != nil {
-			return nil, fmt.Errorf("resolve user by webauthn handle: %w", err)
-		}
-		creds, err := s.st.WebAuthnCredentials().ListByUser(ctx, u.ID)
-		if err != nil {
-			return nil, fmt.Errorf("list credentials for %s: %w", u.ID, err)
-		}
-		wu, err := newWebauthnUser(u.Email, userHandle, creds)
-		if err != nil {
-			return nil, err
-		}
-		resolved, haveUser = u, true
-		return wu, nil
+	var signer signerLookup
+	cred, err := s.wa.FinishDiscoverableLogin(s.resolveSigner(ctx, &signer), sess, r)
+	if signer.storeErr != nil {
+		// Returned, not logged: passkeyErr logs it once, at Error, as a 500.
+		return store.Session{}, fmt.Errorf("service.FinishLogin: %w", signer.storeErr)
 	}
-
-	cred, err := s.wa.FinishDiscoverableLogin(handler, sess, r)
-	if err == nil && !haveUser {
+	if err == nil && !signer.found {
 		err = errors.New("user handle did not resolve")
 	}
 	if err != nil {
-		// A store failure inside the resolver also lands here (go-webauthn puts
-		// the resolver's error into this one's text): it stays a 401, now with
-		// its cause logged (D16). The library's error does not print the
-		// challenge or the cookie.
+		// A handle that resolves to no account lands here too: it stays the
+		// uniform 401, with its cause logged (D16). The library's error does
+		// not print the challenge or the cookie.
 		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey login verification failed", slog.String("error", err.Error()))
 		return store.Session{}, ErrPasskeyVerification
 	}
 
+	resolved := signer.user
 	if resolved.Disabled {
 		s.log.LogAttrs(ctx, slog.LevelInfo, "passkey login rejected: account disabled", slog.String("user_id", resolved.ID))
 		return store.Session{}, ErrPasskeyVerification
@@ -297,6 +283,41 @@ func (s *PasskeyService) FinishLogin(ctx context.Context, sealedCookie string, r
 	}
 	s.audit.Log(ctx, store.AuditEntry{ActorUserID: resolved.ID, EventType: "user.login.passkey", IP: ip})
 	return newSess, nil
+}
+
+// signerLookup is what resolveSigner's handler found for one login.
+type signerLookup struct {
+	user  store.User
+	found bool
+	// storeErr is a lookup that failed for a reason other than "no such
+	// handle", so a store failure can leave the uniform 401 while the library
+	// still sees the same resolver error (#190).
+	storeErr error
+}
+
+// resolveSigner returns the go-webauthn handler that resolves a discoverable
+// login's signer by WebAuthn handle, recording the outcome in found.
+func (s *PasskeyService) resolveSigner(ctx context.Context, found *signerLookup) webauthn.DiscoverableUserHandler {
+	return func(_, userHandle []byte) (webauthn.User, error) {
+		u, err := s.st.Users().GetByWebAuthnHandle(ctx, userHandle)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				found.storeErr = err
+			}
+			return nil, fmt.Errorf("resolve user by webauthn handle: %w", err)
+		}
+		creds, err := s.st.WebAuthnCredentials().ListByUser(ctx, u.ID)
+		if err != nil {
+			found.storeErr = err
+			return nil, fmt.Errorf("list credentials for %s: %w", u.ID, err)
+		}
+		wu, err := newWebauthnUser(u.Email, userHandle, creds)
+		if err != nil {
+			return nil, err
+		}
+		found.user, found.found = u, true
+		return wu, nil
+	}
 }
 
 // BeginRegister starts a registration ceremony for userID and returns the
