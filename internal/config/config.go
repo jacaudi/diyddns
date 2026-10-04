@@ -230,9 +230,10 @@ var keyDefaults = map[string]any{
 	"auth.oidc.issuer":             "",
 	"auth.oidc.client_id":          "",
 	"auth.oidc.client_secret":      "",
-	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
-	// (viper delivers env values as a single string, not []string). Configure
-	// scopes via YAML or flags; the default covers the common case.
+	// auth.oidc.scopes, like any []string key, is settable from the environment
+	// as a comma-separated value (DIYDDNS_AUTH_OIDC_SCOPES=openid,profile,groups):
+	// Load decodes through v.Unmarshal, whose default hook splits on commas.
+	// Only v.GetStringSlice would see one unsplit string.
 	"auth.oidc.scopes":                       []string{"openid", "profile", "email"},
 	"auth.oidc.auto_link_by_email":           true,
 	"auth.oidc.allow_oidc_signup":            true,

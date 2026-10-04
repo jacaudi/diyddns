@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,23 @@ func TestLoad_FlagBeatsEnv(t *testing.T) {
 	}
 	if cfg.Server.Listen != ":6000" {
 		t.Errorf("Listen = %q, want :6000 (changed flag wins over env)", cfg.Server.Listen)
+	}
+}
+
+// TestLoad_ListKeyFromEnvIsCommaSeparated pins the rule the config comments
+// state (#98): a []string key IS settable from the environment, as a
+// comma-separated value, because Load decodes through Unmarshal and its
+// comma-split hook. (v.GetStringSlice would see one unsplit string.)
+func TestLoad_ListKeyFromEnvIsCommaSeparated(t *testing.T) {
+	t.Setenv("DIYDDNS_AUTH_OIDC_SCOPES", "openid,profile,groups")
+	v := viper.New()
+	v.Set("database.path", ":memory:")
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"openid", "profile", "groups"}; !slices.Equal(cfg.Auth.OIDC.Scopes, want) {
+		t.Errorf("Scopes = %q, want %q", cfg.Auth.OIDC.Scopes, want)
 	}
 }
 
