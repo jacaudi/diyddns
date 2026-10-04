@@ -72,7 +72,14 @@ const fail = (m) => {
   process.exit(1);
 };
 
-const browser = await chromium.launch();
+// insecure.test resolves to the test server but, unlike localhost, is not a
+// potentially trustworthy origin, so a page served from it is not a secure
+// context and navigator.credentials is undefined there: the plain-HTTP LAN
+// hostname case from #74, without needing a LAN.
+const INSECURE_URL = BASE_URL.replace("//localhost:", "//insecure.test:");
+const NEEDS_HTTPS = "Passkeys need a secure connection";
+
+const browser = await chromium.launch({ args: ["--host-resolver-rules=MAP insecure.test 127.0.0.1"] });
 const context = await browser.newContext();
 const page = await context.newPage();
 
@@ -85,6 +92,47 @@ page.on("console", (m) => {
 });
 
 try {
+  // Runs before the claim, with a dummy token: the page must stop before its
+  // begin call, so neither the real token nor the fresh install is touched.
+  step("outside a secure context, the passkey pages name HTTPS instead of throwing (#74)");
+  {
+    const insecureCtx = await browser.newContext();
+    const ipg = await insecureCtx.newPage();
+    const insecureErrors = [];
+    ipg.on("pageerror", (e) => insecureErrors.push(String(e)));
+    const pages = [
+      ["/login", "#passkey-login-status", () => ipg.click("#passkey-login")],
+      ["/register", "#register-status", async () => {
+        await ipg.fill("#register-token", "not-the-bootstrap-token");
+        await ipg.fill("#register-email", EMAIL);
+        await ipg.fill("#register-name", PASSKEY_NAME);
+        await ipg.click("#register-form button[type=submit]");
+      }],
+    ];
+    for (const [path, statusSel, act] of pages) {
+      await ipg.goto(`${INSECURE_URL}${path}`, { waitUntil: "domcontentloaded" });
+      if (await ipg.evaluate(() => window.isSecureContext)) {
+        fail(`${INSECURE_URL}${path} is a secure context; this check needs one that is not`);
+      }
+      const onLoad = (await ipg.textContent(statusSel)) ?? "";
+      if (!onLoad.includes(NEEDS_HTTPS)) {
+        fail(`${path} on load: status = ${JSON.stringify(onLoad.trim())}, want it to say ${JSON.stringify(NEEDS_HTTPS)}`);
+      }
+      await act();
+      // Without the guard the ceremony calls begin and only then fails, so
+      // wait for the network before reading the status again.
+      await ipg.waitForLoadState("networkidle");
+      const afterAct = (await ipg.textContent(statusSel)) ?? "";
+      if (!afterAct.includes(NEEDS_HTTPS)) {
+        fail(`${path} after starting the ceremony: status = ${JSON.stringify(afterAct.trim())}, want it to say ${JSON.stringify(NEEDS_HTTPS)}`);
+      }
+    }
+    if (insecureErrors.length) {
+      fail(`page errors outside a secure context: ${JSON.stringify(insecureErrors)}`);
+    }
+    await insecureCtx.close();
+  }
+
   step("attach a virtual authenticator");
   await addVirtualAuthenticator(context, page);
 
