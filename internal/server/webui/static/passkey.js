@@ -117,12 +117,30 @@
     el.classList.toggle("status-error", !!isError);
   }
 
+  // Outside a secure context (plain HTTP on anything but localhost) the
+  // browser does not expose navigator.credentials at all, and a ceremony
+  // would fail with a raw TypeError that names neither cause nor fix (#74).
+  const NEEDS_HTTPS = "Passkeys need a secure connection. Browse to this server over HTTPS, or via localhost.";
+
+  // webauthnUnavailable returns why no ceremony can run here, or "" if one can.
+  function webauthnUnavailable() {
+    return window.isSecureContext && navigator.credentials ? "" : NEEDS_HTTPS;
+  }
+
+  // requireWebAuthn throws that reason, so a ceremony stops before its begin
+  // call and the caller's catch shows it like any other failure.
+  function requireWebAuthn() {
+    const why = webauthnUnavailable();
+    if (why) throw new Error(why);
+  }
+
   // ---- ceremonies -------------------------------------------------------
 
   // Login: discoverable (usernameless) passkey sign-in.
   async function loginWithPasskey() {
     const status = document.getElementById("passkey-login-status");
     try {
+      requireWebAuthn();
       setStatus(status, "Waiting for your passkey...");
       const opts = await api("POST", "/api/v1/auth/passkey/login/begin");
       const publicKey = decodeRequestOptions(opts.publicKey);
@@ -138,6 +156,7 @@
   async function addPasskey(name) {
     const status = document.getElementById("passkey-status");
     const csrf = csrfToken();
+    requireWebAuthn();
     setStatus(status, "Waiting for your passkey...");
     const opts = await api("POST", "/api/v1/account/passkeys/register/begin", undefined, csrf);
     const publicKey = decodeCreationOptions(opts.publicKey);
@@ -155,6 +174,7 @@
   // redeem ignores it.
   async function registerWithToken(token, email, name) {
     const status = document.getElementById("register-status");
+    requireWebAuthn();
     setStatus(status, "Waiting for your passkey...");
     const beginBody = email ? { token: token, email: email } : { token: token };
     const opts = await api("POST", "/api/v1/register/begin", beginBody);
@@ -260,6 +280,14 @@
   // ---- wire-up ------------------------------------------------------------
 
   document.addEventListener("DOMContentLoaded", function () {
+    // Say so before the first click, on whichever passkey page this is.
+    const unavailable = webauthnUnavailable();
+    if (unavailable) {
+      ["passkey-login-status", "register-status", "passkey-status"].forEach(function (id) {
+        setStatus(document.getElementById(id), unavailable, true);
+      });
+    }
+
     const loginBtn = document.getElementById("passkey-login");
     if (loginBtn) loginBtn.addEventListener("click", loginWithPasskey);
 
