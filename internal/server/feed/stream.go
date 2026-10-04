@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -95,6 +96,7 @@ func (h *handler) tokenStillLive(w http.ResponseWriter, r *http.Request, tokenID
 	reason, status, body := "store_error", http.StatusServiceUnavailable, []byte(`{"error":"feed unavailable"}`)
 	if errors.Is(err, store.ErrNotFound) {
 		reason, status, body = "revoked", http.StatusUnauthorized, []byte(unauthorizedBody)
+		w.Header().Set(shared.HeaderWWWAuthenticate, shared.ChallengeBearer)
 	}
 	h.deps.Log.LogAttrs(r.Context(), slog.LevelWarn, "feed stream refused",
 		slog.String("token_id", tokenID), slog.String("reason", reason))

@@ -30,7 +30,7 @@ import (
 func enrollErr(ctx context.Context, deps ServerDeps, err error) error {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return huma.Error401Unauthorized(errEnrollUnauthorized)
+		return unauthorized(errEnrollUnauthorized)
 	case errors.Is(err, store.ErrConflict):
 		return huma.Error409Conflict(errDeviceLabelTaken)
 	case store.Cancelled(ctx, err):

@@ -225,13 +225,13 @@ func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) 
 	case errors.Is(err, service.ErrBootstrapClosed):
 		return huma.Error410Gone("bootstrap already completed")
 	case errors.Is(err, service.ErrBootstrapToken):
-		return huma.Error401Unauthorized("invalid bootstrap token")
+		return unauthorized("invalid bootstrap token")
 	case errors.Is(err, service.ErrBootstrapInvalidEmail):
 		return huma.Error422UnprocessableEntity("email address must be a plain 7-bit ASCII address in user@host form, with no display name and no surrounding whitespace")
 	case errors.Is(err, service.ErrGrantInvalid):
-		return huma.Error401Unauthorized("registration link invalid, expired, or already used")
+		return unauthorized("registration link invalid, expired, or already used")
 	case errors.Is(err, service.ErrPasskeyVerification):
-		return huma.Error401Unauthorized(errPasskeyVerification)
+		return unauthorized(errPasskeyVerification)
 	case store.Cancelled(ctx, err):
 		// The client went away mid-request (or the store reported it): not an
 		// infrastructure failure, so Info, not Error, and not a 5xx.
@@ -533,7 +533,7 @@ func registerFinishHandler(deps ServerDeps) func(context.Context, *webauthnFinis
 		default:
 			deps.Log.LogAttrs(ctx, slog.LevelInfo, "register finish: challenge cookie has no flow tag",
 				slog.Int("sealed_len", len(wmeta.challenge)))
-			return nil, huma.Error401Unauthorized(errPasskeyVerification)
+			return nil, unauthorized(errPasskeyVerification)
 		}
 		if err != nil {
 			return nil, passkeyErr(ctx, deps, "finish registration", err)

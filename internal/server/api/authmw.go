@@ -24,6 +24,19 @@ import (
 // unauthenticated reads.
 const maxAgentBody = 64 * 1024
 
+// challengeSessionOrKey is the challenge for a route that takes either an API
+// key or a session cookie (sessionOrKeyMW): one challenge per credential.
+const challengeSessionOrKey = shared.ChallengeBearer + ", " + shared.ChallengeDIYDDNS
+
+// unauthorized is huma.Error401Unauthorized plus the challenge every 401 must
+// carry (RFC 9110 §15.5.2, #191). The handlers' own 401s are all for a
+// credential sent in the request body, which ChallengeDIYDDNS covers.
+func unauthorized(msg string) error {
+	h := http.Header{}
+	h.Set(shared.HeaderWWWAuthenticate, shared.ChallengeDIYDDNS)
+	return huma.ErrorWithHeaders(huma.Error401Unauthorized(msg), h)
+}
+
 // nowUnix returns the current unix time in seconds. It is a package var so
 // tests can inject a fixed clock.
 var nowUnix = func() int64 { return time.Now().Unix() }
@@ -73,7 +86,7 @@ func hmacMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) 
 }
 
 func sessionMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) {
-	return sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName, deps.Log)
+	return sessionMiddleware(a, deps.Sessions, deps.Cfg.Session.CookieName, shared.ChallengeDIYDDNS, deps.Log)
 }
 
 func csrfMW(a huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) {
@@ -145,6 +158,7 @@ func hmacMiddleware(api huma.API, v *auth.Verifier, maxBody int64, log *slog.Log
 			// Response unchanged: one uniform 401, never the reason. Do NOT
 			// pass err — huma.NewError copies Error() into ErrorModel.Errors,
 			// which would change the body's shape.
+			ctx.SetHeader(shared.HeaderWWWAuthenticate, shared.ChallengeHMAC)
 			_ = huma.WriteErr(api, ctx, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -179,8 +193,9 @@ func claimedDeviceID(s string) string {
 }
 
 // sessionMiddleware authenticates the session cookie and forwards the
-// resulting user and session via context.
-func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName string, log *slog.Logger) func(huma.Context, func(huma.Context)) {
+// resulting user and session via context. A rejection carries challenge, the
+// WWW-Authenticate value naming every credential the route accepts.
+func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName, challenge string, log *slog.Logger) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		r, _ := humago.Unwrap(ctx)
 
@@ -192,6 +207,7 @@ func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName string,
 			log.LogAttrs(ctx.Context(), slog.LevelWarn, "session auth rejected",
 				slog.String("reason", auth.ReasonOf(err)),
 				slog.String("route", r.Pattern))
+			ctx.SetHeader(shared.HeaderWWWAuthenticate, challenge)
 			_ = huma.WriteErr(api, ctx, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -220,7 +236,7 @@ func sessionMiddleware(api huma.API, sm *auth.SessionManager, cookieName string,
 // which is what makes /auth/logout's exclusion (design D6) and this
 // function's own CSRF-skip flag both correct.
 func sessionOrAPIKeyMiddleware(api huma.API, keys *service.APIKeyService, sessions *auth.SessionManager, cookieName string, log *slog.Logger) func(huma.Context, func(huma.Context)) {
-	sessionFallback := sessionMiddleware(api, sessions, cookieName, log)
+	sessionFallback := sessionMiddleware(api, sessions, cookieName, challengeSessionOrKey, log)
 	return func(ctx huma.Context, next func(huma.Context)) {
 		r, _ := humago.Unwrap(ctx)
 
@@ -234,6 +250,7 @@ func sessionOrAPIKeyMiddleware(api huma.API, keys *service.APIKeyService, sessio
 			log.LogAttrs(ctx.Context(), slog.LevelWarn, "api key auth rejected",
 				slog.String("reason", reason),
 				slog.String("route", r.Pattern))
+			ctx.SetHeader(shared.HeaderWWWAuthenticate, challengeSessionOrKey)
 			_ = huma.WriteErr(api, ctx, http.StatusUnauthorized, "unauthorized")
 		}
 
