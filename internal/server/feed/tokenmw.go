@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -46,6 +47,7 @@ func TokenMiddleware(auth Authenticator, log *slog.Logger) func(http.Handler) ht
 					slog.String("route", r.Pattern))
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set(shared.HeaderWWWAuthenticate, shared.ChallengeBearer)
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(unauthorizedBody))
 			}
