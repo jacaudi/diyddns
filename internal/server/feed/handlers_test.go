@@ -103,6 +103,11 @@ func doReq(t *testing.T, method, url string, headers map[string]string) (httpRes
 
 func bearer(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
 
+// wantFeedChallenge is the WWW-Authenticate challenge every feed 401 carries
+// (RFC 9110 §15.5.2, #191), written out rather than taken from
+// internal/shared, so a changed constant fails the tests that use it.
+const wantFeedChallenge = `Bearer realm="diyddns"`
+
 // TestTokenMiddleware_RejectionsAreUniformAndLogged is the #106 door in the
 // #100 style: every rejection returns the same 401 body, and the reason goes
 // to the log only, with the route.
@@ -132,6 +137,9 @@ func TestTokenMiddleware_RejectionsAreUniformAndLogged(t *testing.T) {
 			}
 			if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
 				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			if got := resp.Header.Get("WWW-Authenticate"); got != wantFeedChallenge {
+				t.Errorf("WWW-Authenticate = %q, want %q (#191)", got, wantFeedChallenge)
 			}
 			bodies = append(bodies, body)
 			if !strings.Contains(logBuf.String(), `"msg":"feed auth rejected"`) ||

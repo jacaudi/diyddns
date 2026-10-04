@@ -157,6 +157,9 @@ func TestStream_RevokedBetweenAuthenticateAndSubscribeIsRefused(t *testing.T) {
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("handshake response = %v, want 401", resp)
 	}
+	if got := resp.Header.Get("WWW-Authenticate"); got != wantFeedChallenge {
+		t.Errorf("WWW-Authenticate = %q, want %q (#191)", got, wantFeedChallenge)
+	}
 	if got := hub.Live(); got != 0 {
 		t.Errorf("hub.Live() = %d, want 0", got)
 	}
@@ -186,5 +189,8 @@ func TestStream_UnauthenticatedGets401BeforeUpgrade(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("handshake response = %v, want 401", resp)
+	}
+	if got := resp.Header.Get("WWW-Authenticate"); got != wantFeedChallenge {
+		t.Errorf("WWW-Authenticate = %q, want %q (#191)", got, wantFeedChallenge)
 	}
 }
