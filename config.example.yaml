@@ -183,8 +183,9 @@ auth:
     client_secret: ""
 
     # Default ["openid", "profile", "email"]. MUST include "openid".
-    # This is the one key with NO env-var support — viper delivers env values
-    # as a single string, so DIYDDNS_AUTH_OIDC_SCOPES is ignored. Set it here.
+    # Env form: comma-separated, e.g.
+    # DIYDDNS_AUTH_OIDC_SCOPES=openid,profile,email
+    # (every list key takes its env value this way).
     scopes: ["openid", "profile", "email"]
 
     # Link an OIDC identity to an existing local account with the same
