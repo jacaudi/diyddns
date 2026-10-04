@@ -29,6 +29,11 @@ tasks:
       # CLI_ARGS=[].
       - task: :test:e2e
         vars: {CLI_ARGS: "-skip-discovery"}
+      # The only suite that runs the real pages and passkey.js. Same colon and
+      # vars: rules as above; -browser-required turns its "no Node toolchain"
+      # skip into a failure, so this step cannot pass without running (#95).
+      - task: :test:e2e:browser
+        vars: {CLI_ARGS: "-browser-required"}
 
   lint:
     desc: golangci-lint

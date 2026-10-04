@@ -7,7 +7,7 @@
 // browser_test.go — see that file's header for why this is not in the default
 // build.
 //
-//	task smoke:browser
+//	task test:e2e:browser
 package smoke
 
 import (
