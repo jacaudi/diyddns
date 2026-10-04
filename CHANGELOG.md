@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/jacaudi/diyddns/compare/v1.3.0...v1.3.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **service:** report a store failure in the first-run claim and passkey login as a failure ([bc0529d](https://github.com/jacaudi/diyddns/commit/bc0529db9eb374f6c70805b31acaa8b785e36e52)), closes [#190](https://github.com/jacaudi/diyddns/issues/190)
+
 ## [1.3.0](https://github.com/jacaudi/diyddns/compare/v1.2.0...v1.3.0) (2026-10-02)
 
 
