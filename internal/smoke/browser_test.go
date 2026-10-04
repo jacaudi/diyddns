@@ -7,11 +7,12 @@
 // default build, so `go build ./...` and `go test ./...` are unaffected and
 // the project still builds with the Go toolchain alone.
 //
-//	task smoke:browser
+//	task test:e2e:browser
 //
 // Skips (rather than fails) when node/npx is absent, so it degrades to a
 // no-op on a machine without the Node toolchain instead of turning an
-// optional check into a broken build.
+// optional check into a broken build. CI passes -browser-required, which
+// turns that skip into a failure, so the gate cannot pass without running.
 package smoke
 
 import (
@@ -29,6 +30,12 @@ import (
 // -skip-discovery, with the polarity inverted so the default needs no flag.
 var browserDiscovery = flag.Bool("browser-discovery", false,
 	"run the client check-in step, which performs real outbound IP discovery")
+
+// browserRequired makes a missing Node toolchain or a failed Playwright
+// download fail the test instead of skipping it. go:ci sets it: a skip there
+// would leave a gate that is green without having run (#95).
+var browserRequired = flag.Bool("browser-required", false,
+	"fail, rather than skip, when the browser toolchain cannot be provisioned")
 
 // discoveryArg renders the flag as the argv token smoke.mjs checks for.
 func discoveryArg() string {
@@ -87,18 +94,30 @@ func TestBrowserSmoke(t *testing.T) {
 // NODE_PATH, so `npx -p` does not work here even though it looks like it
 // should. A temp dir also keeps node_modules out of the repo entirely.
 //
+// It also installs the Chromium build that playwright version expects, which
+// is a no-op where it is already cached and the download on a fresh CI runner.
+//
 // Returns ok=false after skipping the test when the Node toolchain or the
 // download is unavailable, so the check degrades to a no-op rather than
-// turning an optional harness into a broken build.
+// turning an optional harness into a broken build. With -browser-required it
+// fails instead.
 func provisionPlaywright(t *testing.T) (string, bool) {
 	t.Helper()
+	unavailable := t.Skipf
+	if *browserRequired {
+		unavailable = t.Fatalf
+	}
 	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skip("npx not found; skipping the browser check (see internal/smoke/browser/)")
+		unavailable("npx not found; cannot run the browser check (see internal/smoke/browser/)")
 		return "", false
 	}
 	work := t.TempDir()
 	if out, err := runIn(work, "npm", "install", "playwright@1.62.1", "--no-audit", "--no-fund"); err != nil {
-		t.Skipf("could not provision playwright (offline?): %v\n%s", err, out)
+		unavailable("could not provision playwright (offline?): %v\n%s", err, out)
+		return "", false
+	}
+	if out, err := runIn(work, "npx", "playwright", "install", "chromium"); err != nil {
+		unavailable("could not install chromium for playwright (offline?): %v\n%s", err, out)
 		return "", false
 	}
 	return work, true
