@@ -153,7 +153,7 @@ func completeOIDCDevice(ctx context.Context, deps ServerDeps, flow store.OIDCDev
 	if err != nil {
 		deps.Log.LogAttrs(ctx, slog.LevelInfo, "oidc device enroll rejected", slog.Any("error", err))
 		_ = deps.Store.OIDCDeviceFlows().Delete(ctx, flow.FlowID)
-		return nil, huma.Error401Unauthorized("enrollment not authorized")
+		return nil, unauthorized("enrollment not authorized")
 	}
 	enr, err := deps.Enroll.EnrollForUser(ctx, user.ID, "device.enroll.oidc", service.ClientMeta{})
 	if err != nil {

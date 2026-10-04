@@ -135,9 +135,12 @@ func TestOIDCDeviceEnroll_RejectDeletesFlowAnd401(t *testing.T) {
 		Subject: "reject-sub", Email: "reject@x.com", EmailVerified: true, Audience: "test-client",
 	})
 
-	status, body := postJSON(t, h.srv.URL+"/agent/v1/enroll/oidc/poll", map[string]string{"flow_id": start.FlowID})
+	status, challenge := requestChallenge(t, http.MethodPost, h.srv.URL+"/agent/v1/enroll/oidc/poll", map[string]string{"flow_id": start.FlowID}, nil)
 	if status != http.StatusUnauthorized {
-		t.Fatalf("poll status = %d, want 401, body=%s", status, body)
+		t.Fatalf("poll status = %d, want 401", status)
+	}
+	if challenge != challengeDIYDDNS {
+		t.Errorf("WWW-Authenticate = %q, want %q (#191)", challenge, challengeDIYDDNS)
 	}
 
 	// The reject path must delete the flow — no orphaned enrollment handle.

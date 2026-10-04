@@ -391,7 +391,7 @@ func registerSessionProbe(t *testing.T, withCSRF bool) (*httptest.Server, store.
 	}
 
 	log, buf := captureLogger()
-	mws := huma.Middlewares{sessionMiddleware(probeAPI, sm, testCookieName, log)}
+	mws := huma.Middlewares{sessionMiddleware(probeAPI, sm, testCookieName, shared.ChallengeDIYDDNS, log)}
 	if withCSRF {
 		mws = append(mws, csrfMiddleware(probeAPI, log))
 	}
@@ -516,7 +516,7 @@ func registerAdminProbe(t *testing.T) (srv *httptest.Server, adminSess, userSess
 		Method: http.MethodGet,
 		Path:   path,
 		Middlewares: huma.Middlewares{
-			sessionMiddleware(probeAPI, sm, testCookieName, log),
+			sessionMiddleware(probeAPI, sm, testCookieName, shared.ChallengeDIYDDNS, log),
 			adminMiddleware(probeAPI, log),
 		},
 	}, func(ctx context.Context, _ *struct{}) (*out, error) {

@@ -3,6 +3,7 @@ package api_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +22,12 @@ func doNoAuth(t *testing.T, srv *httptest.Server, method, path string) int {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
+	// RFC 9110 §15.5.2: a 401 MUST carry a challenge (#191), and Basic would
+	// make a browser show its own credentials prompt.
+	if challenge := resp.Header.Get("WWW-Authenticate"); resp.StatusCode == http.StatusUnauthorized &&
+		(challenge == "" || strings.HasPrefix(challenge, "Basic")) {
+		t.Errorf("%s %s: 401 with WWW-Authenticate %q, want a non-Basic challenge", method, path, challenge)
+	}
 	return resp.StatusCode
 }
 
