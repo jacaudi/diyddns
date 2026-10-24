@@ -452,7 +452,13 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 	// as the innermost layer below, for the same r.Pattern-visibility reason
 	// the comment above return explains -- see withNotFoundRedirect's own
 	// doc comment for why a route-table catch-all was rejected instead.
-	wrapped := withNotFoundRedirect(mux, webui.NotFound(webDeps))
+	// wwwAuthenticate sits just outside the mux so it intercepts every route's
+	// 401 (feed middleware, huma auth middleware, and huma handler errors alike)
+	// and adds the RFC 9110 §15.5.2 WWW-Authenticate challenge for that route
+	// group (#191). It is below the generic middleware chain and, like
+	// statusRecorder, forwards the connection through Unwrap so the feed
+	// WebSocket upgrade is unaffected.
+	wrapped := wwwAuthenticate(withNotFoundRedirect(mux, webui.NotFound(webDeps)))
 	// This order is load-bearing, not stylistic. AccessLog reads r.Pattern
 	// AFTER next.ServeHTTP returns, and that works only because
 	// ServeMux.ServeHTTP sets Pattern on the very *http.Request the caller
