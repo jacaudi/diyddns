@@ -12,7 +12,7 @@ require (
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
 	github.com/unraid/apprise-go v0.3.3
 	go.opentelemetry.io/contrib/bridges/otelslog v0.20.1
