@@ -38,7 +38,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 
 func memStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(t.Context(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestVerifier_SurvivesRestart(t *testing.T) {
 	}
 
 	// --- process 1: enroll a device, then shut down ---
-	st1, err := store.Open(ctx, dbPath)
+	st1, err := store.Open(ctx, dbPath, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestVerifier_SurvivesRestart(t *testing.T) {
 
 	// --- process 2: reopen the same DB, construct a NEW Verifier with the
 	// same key, and confirm a signed check-in verifies. ---
-	st2, err := store.Open(ctx, dbPath)
+	st2, err := store.Open(ctx, dbPath, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open (restart): %v", err)
 	}

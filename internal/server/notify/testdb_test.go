@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"log/slog"
 	"path/filepath"
 	"testing"
 
@@ -12,7 +13,7 @@ import (
 // needs a real database carries; there is deliberately no shared helper.
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func testKey32() []byte {
 // later service test files in this package.
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(t.Context(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

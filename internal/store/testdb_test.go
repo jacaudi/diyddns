@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func newTestStore(t *testing.T) (*Store, context.Context) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	s, err := Open(ctx, path)
+	s, err := Open(ctx, path, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
