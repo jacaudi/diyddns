@@ -133,6 +133,37 @@ func (t *timedConn) QueryContext(ctx context.Context, query string, args []drive
 	return &timedRows{Rows: rows, done: func() { t.c.report(ctx, query, start) }}, nil
 }
 
+func (t *timedConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	tx, err := t.innerConn.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &timedTx{Tx: tx, c: t.c, ctx: ctx}, nil
+}
+
+// Begin routes the legacy entry point through the timed BeginTx.
+func (t *timedConn) Begin() (driver.Tx, error) {
+	return t.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+// timedTx times Commit and Rollback: modernc runs them directly rather than
+// through ExecContext, and a commit can carry a WAL checkpoint's fsync.
+type timedTx struct {
+	driver.Tx
+	c   *timedConnector
+	ctx context.Context
+}
+
+func (t *timedTx) Commit() error {
+	defer t.c.report(t.ctx, "COMMIT", time.Now())
+	return t.Tx.Commit()
+}
+
+func (t *timedTx) Rollback() error {
+	defer t.c.report(t.ctx, "ROLLBACK", time.Now())
+	return t.Tx.Rollback()
+}
+
 func (t *timedConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
 	s, err := t.innerConn.PrepareContext(ctx, query)
 	if err != nil {

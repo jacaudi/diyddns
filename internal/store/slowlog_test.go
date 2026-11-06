@@ -130,7 +130,7 @@ func TestTimedConn_TxStatementsAreTimed(t *testing.T) {
 	for _, r := range slowRecords(t, buf) {
 		got = append(got, r["sql"].(string))
 	}
-	want := []string{"INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)"}
+	want := []string{"INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)", "COMMIT"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("sql = %q, want %q", got, want)
 	}
@@ -163,5 +163,36 @@ func TestTimedConn_SQLCollapsedAndTruncated(t *testing.T) {
 	}
 	if n := len(recs[1]["sql"].(string)); n != 200 {
 		t.Errorf("truncated sql length = %d, want 200", n)
+	}
+}
+
+// TestTimedConn_CommitAndRollbackAreTimed: modernc's tx.Commit/Rollback run
+// "commit"/"rollback" directly, bypassing ExecContext, and a commit can carry
+// a WAL checkpoint's fsync — a real connection hold.
+func TestTimedConn_CommitAndRollbackAreTimed(t *testing.T) {
+	db, buf := openTimed(t, time.Nanosecond)
+	ctx := context.Background()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, r := range slowRecords(t, buf) {
+		got = append(got, r["sql"].(string))
+	}
+	if strings.Join(got, "|") != "COMMIT|ROLLBACK" {
+		t.Fatalf("sql = %q, want [COMMIT ROLLBACK]", got)
 	}
 }
