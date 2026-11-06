@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0](https://github.com/jacaudi/diyddns/compare/v1.3.1...v1.4.0) (2026-11-06)
+
+
+### Features
+
+* **store:** time statements through a connector wrapper ([#103](https://github.com/jacaudi/diyddns/issues/103)) ([efa8d94](https://github.com/jacaudi/diyddns/commit/efa8d94af42111832bedb064256dab5e548b6103))
+* **store:** warn when a statement holds the connection 500ms or longer ([#103](https://github.com/jacaudi/diyddns/issues/103)) ([8d7bf73](https://github.com/jacaudi/diyddns/commit/8d7bf7390f02ef24bc5ee69d7b09cf6e75b4da58))
+
+
+### Bug Fixes
+
+* **deps:** bump Go to 1.27.3 and golang.org/x/net to v0.62.0 ([850d178](https://github.com/jacaudi/diyddns/commit/850d1786f6adcfec15b4961b74d9ee58e386a21f))
+* **store:** time COMMIT and ROLLBACK, which modernc runs outside ExecContext ([#103](https://github.com/jacaudi/diyddns/issues/103)) ([0df99dd](https://github.com/jacaudi/diyddns/commit/0df99ddfa4151dc520dfe345feeeb68821f9a39e))
+
 ## [1.3.1](https://github.com/jacaudi/diyddns/compare/v1.3.0...v1.3.1) (2026-10-04)
 
 
