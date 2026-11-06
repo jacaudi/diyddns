@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 
 	_ "modernc.org/sqlite"
 )
@@ -36,11 +37,12 @@ type Store struct {
 // Open opens the SQLite database at path, applies the runtime pragmas
 // (WAL, foreign_keys=ON, synchronous=NORMAL, busy_timeout=5000), and
 // runs all embedded migrations. path may be ":memory:" for in-process use.
-func Open(ctx context.Context, path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("store: sql.Open: %w", err)
-	}
+//
+// Every statement is timed: one that holds the single connection for
+// slowStatementThreshold or longer is reported once through log as
+// "store: slow statement", with its SQL text but never its arguments (#103).
+func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
+	db := sql.OpenDB(newTimedConnector(path, log, slowStatementThreshold))
 	db.SetMaxOpenConns(1)
 
 	if err := db.PingContext(ctx); err != nil {

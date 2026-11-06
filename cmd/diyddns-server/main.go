@@ -143,7 +143,7 @@ func serveCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			st, err := store.Open(ctx, cfg.Database.Path)
+			st, err := store.Open(ctx, cfg.Database.Path, log)
 			if err != nil {
 				return fmt.Errorf("open store: %w", err)
 			}

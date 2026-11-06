@@ -34,7 +34,7 @@ func capturingLog() (*slog.Logger, *bytes.Buffer) {
 func openFileTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	st, err := store.Open(t.Context(), path)
+	st, err := store.Open(t.Context(), path, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

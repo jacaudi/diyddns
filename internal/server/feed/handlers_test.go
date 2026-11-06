@@ -39,7 +39,7 @@ const goodToken = store.FeedTokenPrefix + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "feed.db"))
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "feed.db"), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

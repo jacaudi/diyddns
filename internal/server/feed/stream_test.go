@@ -73,7 +73,7 @@ func chain(t *testing.T, logBuf *syncBuffer) (*httptest.Server, *feed.Hub, *stor
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "stream.db"))
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "stream.db"), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

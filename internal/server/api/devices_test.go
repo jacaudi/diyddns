@@ -70,7 +70,7 @@ func (failingMailer) Enabled() bool { return true }
 // literal.
 func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	t.Helper()
-	st, err := store.Open(t.Context(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

@@ -50,7 +50,7 @@ type agentHarness struct {
 // mux, and returns everything a test needs to seed data and make requests.
 func newAgentHarness(t *testing.T) agentHarness {
 	t.Helper()
-	st, err := store.Open(t.Context(), ":memory:")
+	st, err := store.Open(t.Context(), ":memory:", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
