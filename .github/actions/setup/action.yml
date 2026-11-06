@@ -90,7 +90,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=github-releases depName=golangci/golangci-lint
-        VERSION: 2.13.2
+        VERSION: 2.15.0
       run: |
         set -euo pipefail
         curl -sSfL "https://github.com/golangci/golangci-lint/releases/download/v${VERSION}/golangci-lint-${VERSION}-linux-amd64.tar.gz" \
