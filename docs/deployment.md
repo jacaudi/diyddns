@@ -378,12 +378,13 @@ whether or not `tar` exists.
 
 **Kubernetes** (an ephemeral container that shares the pod's process
 namespace; `-i` without `-t` so the redirect captures raw bytes). `--target`
-is the name of the server container in the pod (`app` in the app-template
-values above):
+is the server container's name, the `containers:` key in the app-template
+values above (`app`; `diyddns` is the controller, not the container). Adjust it
+if your chart names the container differently:
 
-    kubectl debug <pod> -i --image=busybox:1.37 --target=diyddns --profile=general -- cat /proc/1/root/data/ca-backup.key > ca-backup.key
+    kubectl debug <pod> -i --image=busybox:1.37 --target=app --profile=general -- cat /proc/1/root/data/ca-backup.key > ca-backup.key
     openssl pkey -in ca-backup.key -noout
-    kubectl debug <pod> -i --image=busybox:1.37 --target=diyddns --profile=general -- rm /proc/1/root/data/ca-backup.key
+    kubectl debug <pod> -i --image=busybox:1.37 --target=app --profile=general -- rm /proc/1/root/data/ca-backup.key
 
 **Docker:**
 
