@@ -54,6 +54,17 @@ type ServerDeps struct {
 	// registered below, like EmailChange -- unlike Passkey/Grants/Notify/Feed,
 	// there is no config flag that turns account-scoped API keys off (#149).
 	APIKeys *service.APIKeyService
+
+	// Cert issues device certificates (#173); nil when the agent listener is
+	// disabled (agent.listen empty), in which case POST /agent/v1/cert is not
+	// registered.
+	Cert *service.CertService
+	// AgentURL is agent.public_url, advertised in capabilities; "" when the
+	// agent listener is disabled.
+	AgentURL string
+	// RequireMTLS mirrors agent.require_mtls: the main port refuses check-in
+	// and self with 403 mtls_required.
+	RequireMTLS bool
 }
 
 // Build registers both huma APIs, their operations, and the health handlers
@@ -98,12 +109,27 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 }
 
 // registerAgentOps registers the agent-facing operations (enroll, checkin,
-// self) onto agentAPI. Each vertical is isolated in its own file
-// (enroll.go, checkin.go) so a future agent op is a new file plus a line
-// here, not an edit to an existing one.
+// self, and cert when the agent listener is enabled) onto agentAPI. Each
+// vertical is isolated in its own file (enroll.go, checkin.go, cert.go) so a
+// future agent op is a new file plus a line here, not an edit to an existing
+// one.
 func registerAgentOps(a huma.API, deps ServerDeps) {
 	registerEnrollOps(a, deps)
-	registerCheckinOps(a, deps)
+	registerCheckinOps(a, deps, mainAgentMWs(a, deps))
+	if deps.Cert != nil {
+		registerCertOps(a, deps, service.CertListenerMain, huma.Middlewares{hmacMW(a, deps)})
+	}
+}
+
+// mainAgentMWs is the middleware chain for the main port's check-in and self:
+// HMAC, preceded by the mtls_required refusal when agent.require_mtls is set.
+// Capabilities, enroll and cert stay outside it so a client can still learn the
+// requirement and obtain a certificate.
+func mainAgentMWs(a huma.API, deps ServerDeps) huma.Middlewares {
+	if deps.RequireMTLS {
+		return huma.Middlewares{mtlsRequiredMW, hmacMW(a, deps)}
+	}
+	return huma.Middlewares{hmacMW(a, deps)}
 }
 
 // groupConfig returns a huma.Config whose OpenAPI, Docs, and Schemas paths are

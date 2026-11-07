@@ -157,6 +157,15 @@ type deleteUserInput struct {
 // deleteUserOutput carries no body; huma emits 204 via DefaultStatus.
 type deleteUserOutput struct{}
 
+// clearDeviceCertInput carries the {id} path parameter of POST
+// /api/v1/devices/{id}/cert/clear.
+type clearDeviceCertInput struct {
+	ID string `path:"id"`
+}
+
+// clearDeviceCertOutput carries no body; huma emits 204 via DefaultStatus.
+type clearDeviceCertOutput struct{}
+
 // issueRecoveryInput carries the {id} path parameter of POST
 // /api/v1/admin/users/{id}/recovery.
 type issueRecoveryInput struct {
@@ -339,6 +348,10 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 	}, adminReissueInviteHandler(deps))
 
 	huma.Register(a, huma.Operation{
+		Method: http.MethodPost, Path: "/api/v1/devices/{id}/cert/clear", DefaultStatus: http.StatusNoContent, Middlewares: adminWriteMW(a, deps),
+	}, adminClearDeviceCertHandler(deps))
+
+	huma.Register(a, huma.Operation{
 		Method: http.MethodGet, Path: "/api/v1/admin/devices", Middlewares: adminReadMW(a, deps),
 	}, func(ctx context.Context, _ *struct{}) (*listAllDevicesOutput, error) {
 		devices, err := deps.Admin.ListAllDevices(ctx)
@@ -405,6 +418,21 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 			},
 		}}, nil
 	})
+}
+
+// adminClearDeviceCertHandler builds the handler for POST
+// /api/v1/devices/{id}/cert/clear (#173). It is a named function, like the
+// handlers around it, to keep registerAdminOps under the gocyclo ceiling.
+func adminClearDeviceCertHandler(deps ServerDeps) func(context.Context, *clearDeviceCertInput) (*clearDeviceCertOutput, error) {
+	return func(ctx context.Context, in *clearDeviceCertInput) (*clearDeviceCertOutput, error) {
+		if err := deps.Admin.ClearDeviceCert(ctx, SessionFrom(ctx), in.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, huma.Error404NotFound("device not found")
+			}
+			return nil, adminErr(ctx, deps, "clear device certificate", err)
+		}
+		return &clearDeviceCertOutput{}, nil
+	}
 }
 
 // adminListUsersHandler builds the handler for GET /api/v1/admin/users. The

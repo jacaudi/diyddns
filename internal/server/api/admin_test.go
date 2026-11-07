@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -534,4 +535,75 @@ func TestAdminIssueRecovery_DisabledTargetReportsSuppressed(t *testing.T) {
 	if got.Delivery.Suppressed != "user_disabled" {
 		t.Errorf("Delivery.Suppressed = %q, want %q", got.Delivery.Suppressed, "user_disabled")
 	}
+}
+
+// ---------- POST /api/v1/devices/{id}/cert/clear ----------
+
+func TestAdmin_ClearDeviceCert(t *testing.T) {
+	h := newFullHarness(t)
+	seedUser(t, h.st, "admin-clear@example.com", "admin")
+	owner := seedUser(t, h.st, "owner-clear@example.com", "user")
+	dev, err := h.st.Devices().Create(t.Context(), store.Device{UserID: owner.ID, Label: "laptop"})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	seedCert := func() {
+		t.Helper()
+		if err := h.st.Devices().SetCert(t.Context(), dev.ID, "abc123", time.Now().Add(time.Hour).Unix()); err != nil {
+			t.Fatalf("SetCert: %v", err)
+		}
+	}
+	clearURL := h.srv.URL + "/api/v1/devices/" + dev.ID + "/cert/clear"
+	adminCookie, adminCSRF := sessionFor(t, h, "admin-clear@example.com")
+
+	t.Run("non-admin is 403 and row untouched", func(t *testing.T) {
+		seedCert()
+		userCookie, userCSRF := sessionFor(t, h, "owner-clear@example.com")
+		status, _, body := doJSON(t, http.MethodPost, clearURL, nil, userCookie, userCSRF)
+		if status != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403, body=%s", status, body)
+		}
+		got, err := h.st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.CertSerial != "abc123" {
+			t.Errorf("CertSerial = %q, want it untouched", got.CertSerial)
+		}
+	})
+
+	t.Run("missing csrf is 403 and row untouched", func(t *testing.T) {
+		status, _, body := doJSON(t, http.MethodPost, clearURL, nil, adminCookie, "")
+		if status != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403, body=%s", status, body)
+		}
+		got, err := h.st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.CertSerial != "abc123" {
+			t.Errorf("CertSerial = %q, want it untouched", got.CertSerial)
+		}
+	})
+
+	t.Run("unknown id is 404", func(t *testing.T) {
+		status, _, body := doJSON(t, http.MethodPost, h.srv.URL+"/api/v1/devices/no-such-device/cert/clear", nil, adminCookie, adminCSRF)
+		if status != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404, body=%s", status, body)
+		}
+	})
+
+	t.Run("admin clears the row", func(t *testing.T) {
+		status, _, body := doJSON(t, http.MethodPost, clearURL, nil, adminCookie, adminCSRF)
+		if status != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204, body=%s", status, body)
+		}
+		got, err := h.st.Devices().GetByID(t.Context(), dev.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.CertSerial != "" || got.CertNotAfter != 0 {
+			t.Errorf("cert = (%q, %d), want cleared", got.CertSerial, got.CertNotAfter)
+		}
+	})
 }
