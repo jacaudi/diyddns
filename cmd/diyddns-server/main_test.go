@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jacaudi/diyddns/internal/server/agenttls"
+	"github.com/jacaudi/diyddns/internal/store"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -382,5 +386,112 @@ func TestServe_FatalTelemetryStatusRefusesToBoot(t *testing.T) {
 		if strings.Contains(string(data), forbidden) {
 			t.Errorf("log contains %q; the server booted on a Fatal telemetry Status:\n%s", forbidden, data)
 		}
+	}
+}
+
+func TestCACmd_ResetRequiresConfirm(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"ca", "reset"})
+
+	err := cmd.Execute()
+
+	if err == nil || !strings.Contains(err.Error(), "--confirm") {
+		t.Fatalf("err = %v, want one naming --confirm", err)
+	}
+}
+
+func TestCACmd_PromoteRequiresBackupKey(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"ca", "promote-backup"})
+
+	err := cmd.Execute()
+
+	if err == nil || !strings.Contains(err.Error(), "backup-key") {
+		t.Fatalf("err = %v, want a required-flag error naming backup-key", err)
+	}
+}
+
+// caCmdEnv points the config at a fresh database in a temp dir (which is also
+// agent.tls.dir, its default) and returns that dir.
+func caCmdEnv(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("DIYDDNS_DATABASE_PATH", filepath.Join(dir, "diyddns.db"))
+	t.Setenv("DIYDDNS_SERVER_BASE_URL", "http://localhost:8080")
+	t.Setenv("DIYDDNS_AUTH_HMAC_SECRET_KEY", randomKeyB64(t))
+	return dir
+}
+
+// runCA executes `diyddns-server ca <args>` and returns its stdout.
+func runCA(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := rootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"ca"}, args...))
+	err := cmd.ExecuteContext(t.Context())
+	return out.String(), err
+}
+
+func TestCACmd_ResetRenamesAndPrints(t *testing.T) {
+	dir := caCmdEnv(t)
+	if err := os.WriteFile(filepath.Join(dir, "ca.key"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write ca.key: %v", err)
+	}
+
+	out, err := runCA(t, "reset", "--confirm")
+	if err != nil {
+		t.Fatalf("ca reset --confirm: %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "ca.key")); !os.IsNotExist(statErr) {
+		t.Errorf("ca.key still present after reset (stat err %v)", statErr)
+	}
+	for _, want := range []string{filepath.Join(dir, "ca.key.reset-"), `Every committed device must run "diyddns-client mtls reset".`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
+
+func TestCACmd_PromoteBackupPrintsGuidanceThenAlreadyPromoted(t *testing.T) {
+	dir := caCmdEnv(t)
+	st, err := store.Open(t.Context(), filepath.Join(dir, "diyddns.db"), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	_, err = agenttls.LoadOrInit(t.Context(), st, dir, time.Now(), slog.New(slog.DiscardHandler))
+	if closeErr := st.Close(); closeErr != nil {
+		t.Fatalf("store.Close: %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("LoadOrInit: %v", err)
+	}
+	offline := filepath.Join(t.TempDir(), "backup.key")
+	if err := os.Rename(filepath.Join(dir, "ca-backup.key"), offline); err != nil {
+		t.Fatalf("move backup key offline: %v", err)
+	}
+
+	out, err := runCA(t, "promote-backup", "--backup-key", offline)
+	if err != nil {
+		t.Fatalf("ca promote-backup: %v", err)
+	}
+	want := "Backup CA promoted. A new backup key was written to " + filepath.Join(dir, "ca-backup.key") +
+		`: move it offline now (see docs/deployment.md, "Agent CA backups").`
+	if !strings.Contains(out, want) {
+		t.Errorf("output %q does not contain %q", out, want)
+	}
+
+	out, err = runCA(t, "promote-backup", "--backup-key", offline)
+	if err != nil {
+		t.Fatalf("second ca promote-backup: %v", err)
+	}
+	if !strings.Contains(out, "Backup CA already promoted; nothing to do.") {
+		t.Errorf("output %q does not say the backup was already promoted", out)
 	}
 }
