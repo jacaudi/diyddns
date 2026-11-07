@@ -54,12 +54,13 @@ func (h *handler) handleAdminDeviceHistory(w http.ResponseWriter, r *http.Reques
 	h.renderDeviceHistory(w, r, usr, sess, adminScope(owner, dev), dev)
 }
 
-// handleAdminDeviceSetEnabled is the ONE admin mutation of a device (#132
-// D4). The session goes to the service whole so the audit row carries the
-// admin's id and IP (#137). Rename, secret rotation and deletion are
-// deliberately not routed under /admin/devices: their absence from
-// webui.New's table is the enforcement (#132 D3). No typed confirmation --
-// the owner's route has none and the action is reversible.
+// handleAdminDeviceSetEnabled is one of the two admin mutations of a device
+// (enable/disable, #132 D4, and certificate reset, #173). The session goes to
+// the service whole so the audit row carries the admin's id and IP (#137).
+// Rename, secret rotation and deletion are deliberately not routed under
+// /admin/devices: their absence from webui.New's table is the enforcement
+// (#132 D3). No typed confirmation -- the owner's route has none and the
+// action is reversible.
 //
 // It does NOT go through adminDevice first: SetDeviceEnabled resolves the
 // device itself, and resolving it twice would answer 404 and then 500 for a
@@ -74,6 +75,25 @@ func (h *handler) handleAdminDeviceSetEnabled(w http.ResponseWriter, r *http.Req
 			return
 		}
 		h.logAndFail(w, r, usr, "set device enabled for admin", err)
+		return
+	}
+	http.Redirect(w, r, "/admin/devices/"+id, http.StatusSeeOther)
+}
+
+// handleAdminDeviceClearCert forgets a device's recorded agent certificate
+// (#173), so the main port issues it a new one on its next check-in. Like
+// handleAdminDeviceSetEnabled it does not go through adminDevice first:
+// ClearDeviceCert resolves the device itself, and its ErrNotFound is mapped
+// here to the same 404 copy. Idempotent in the service, so a double-submit
+// redirects without a second audit row.
+func (h *handler) handleAdminDeviceClearCert(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session) {
+	id := r.PathValue("id")
+	if err := h.deps.Admin.ClearDeviceCert(r.Context(), sess, id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.renderError(w, r, usr, http.StatusNotFound, "That device does not exist.")
+			return
+		}
+		h.logAndFail(w, r, usr, "clear device cert for admin", err)
 		return
 	}
 	http.Redirect(w, r, "/admin/devices/"+id, http.StatusSeeOther)
