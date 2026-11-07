@@ -32,21 +32,25 @@ type ClientRunSection struct {
 	AddressFamilies []string      `mapstructure:"address_families"`
 	ProvidersV4     []string      `mapstructure:"providers_v4"`
 	ProvidersV6     []string      `mapstructure:"providers_v6"`
+	// InsecureProvision lets `run` provision a device certificate over a plain
+	// http:// main-port URL, which it otherwise refuses. Off by default.
+	InsecureProvision bool `mapstructure:"insecure_provision"`
 }
 
 // clientKeyDefaults enumerates every client config key, its default, and (via
 // BindEnv) its DIYDDNS_* env var. As with the server loader there is no
 // AutomaticEnv, so every key MUST be listed or its env var is ignored.
 var clientKeyDefaults = map[string]any{
-	"server.url":           "",
-	"server.ca_bundle":     "",
-	"logging.level":        "info",
-	"logging.format":       "text", // spec §8: text default for the interactive client
-	"run.interval":         5 * time.Minute,
-	"run.quorum":           2,
-	"run.address_families": []string{"ipv4", "ipv6"},
-	"run.providers_v4":     []string{},
-	"run.providers_v6":     []string{},
+	"server.url":             "",
+	"server.ca_bundle":       "",
+	"logging.level":          "info",
+	"logging.format":         "text", // spec §8: text default for the interactive client
+	"run.interval":           5 * time.Minute,
+	"run.quorum":             2,
+	"run.address_families":   []string{"ipv4", "ipv6"},
+	"run.providers_v4":       []string{},
+	"run.providers_v6":       []string{},
+	"run.insecure_provision": false,
 }
 
 // LoadClient resolves the client configuration. Callers may pre-configure v

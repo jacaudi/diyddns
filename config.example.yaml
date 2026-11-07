@@ -280,6 +280,27 @@ feed:
   # Maximum 36500 (100 years), for the same overflow reason as retention below.
   # expire_after_days: 21
 
+# Agent mutual-TLS listener (#173). Off by default: with `listen` empty the
+# server behaves exactly as before and the rest of this section is ignored.
+# Setting `listen` starts a second, TLS 1.3 listener for agent traffic.
+agent:
+  # Address of the agent listener, e.g. ":8443". Empty disables it.
+  listen: ""
+
+  # Externally reachable https://host:port of the agent listener. Required when
+  # `listen` is set. Its host is the serving-certificate SAN, so it must be a
+  # DNS name behind a passthrough TLSRoute.
+  # public_url: "https://ddns.example.com:8443"
+
+  # Where the agent CA and serving certificate are kept. Defaults to the
+  # directory of database.path.
+  # tls:
+  #   dir: /var/lib/diyddns
+
+  # Closes the HMAC-only check-in path on the main listener, so check-ins are
+  # accepted only on the agent listener. Requires `listen`.
+  require_mtls: false
+
 # Data retention for ip_history and audit_log. Disabled by default: neither
 # table loses a row to this policy until you set one of the three keys below,
 # so upgrading DIYDDNS never destroys history you already have because of

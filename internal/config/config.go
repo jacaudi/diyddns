@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/textproto"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -36,6 +37,7 @@ type Server struct {
 	Email         EmailSection
 	Notifications Notifications
 	Feed          FeedSection
+	Agent         AgentSection
 	Retention     RetentionSection
 	Observability ObservabilitySection
 }
@@ -203,6 +205,44 @@ func (f FeedSection) ExpiryEnabled() bool {
 	return f.Enabled && f.ExpireAfterDays > 0
 }
 
+// AgentSection configures the optional second listener that serves the agent
+// API over mutual TLS (#173). It is disabled while Listen is empty, which is
+// today's behaviour, so the whole section is opt-in.
+type AgentSection struct {
+	Listen string
+	// PublicURL is the externally reachable https://host:port of the agent
+	// listener. Its host becomes the serving-certificate SAN and is handed to
+	// clients as the address to pin.
+	PublicURL string          `mapstructure:"public_url"`
+	TLS       AgentTLSSection `mapstructure:"tls"`
+	// RequireMTLS closes the HMAC-only check-in path on the main listener, so
+	// every check-in must arrive on the agent listener.
+	RequireMTLS bool `mapstructure:"require_mtls"`
+}
+
+// AgentTLSSection locates the agent PKI material on disk.
+type AgentTLSSection struct {
+	// Dir holds the CA and serving-certificate files. It defaults to the
+	// directory of database.path (validateAgent).
+	Dir string `mapstructure:"dir"`
+}
+
+// Enabled reports whether the agent listener runs.
+func (a AgentSection) Enabled() bool {
+	return a.Listen != ""
+}
+
+// PublicHost returns the hostname of PublicURL with no port and, for an IPv6
+// literal, no brackets. validateAgent has already vetted PublicURL when the
+// section is enabled; for a disabled section the result is unspecified.
+func (a AgentSection) PublicHost() string {
+	u, err := url.Parse(a.PublicURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
 // keyDefaults enumerates every config key, its default, and its env var. Keys
 // with a corresponding CLI flag (server.listen) still carry a SetDefault here;
 // viper ranks SetDefault above an unchanged flag's default, so a changed flag
@@ -255,6 +295,10 @@ var keyDefaults = map[string]any{
 	"notifications.max_attempts":             8,
 	"feed.enabled":                           true,
 	"feed.expire_after_days":                 21,
+	"agent.listen":                           "",
+	"agent.public_url":                       "",
+	"agent.tls.dir":                          "",
+	"agent.require_mtls":                     false,
 	"retention.ip_history_days":              0,
 	"retention.ip_history_per_device_max":    0,
 	"retention.audit_log_days":               0,
@@ -345,28 +389,76 @@ func Load(v *viper.Viper, configPath string) (Server, error) {
 	if cfg.Database.Path == "" {
 		return Server{}, fmt.Errorf("config: database.path is required")
 	}
-	if err := validateAuth(cfg); err != nil {
-		return Server{}, err
-	}
-	if err := validateOIDC(cfg); err != nil {
-		return Server{}, err
-	}
-	if err := validateEmail(cfg); err != nil {
-		return Server{}, err
-	}
-	if err := validateNotifications(cfg); err != nil {
-		return Server{}, err
-	}
-	if err := validateRetention(cfg); err != nil {
-		return Server{}, err
-	}
-	if err := validateFeedExpiry(cfg); err != nil {
-		return Server{}, err
-	}
-	if err := validateObservability(cfg); err != nil {
+	if err := validateSections(&cfg); err != nil {
 		return Server{}, err
 	}
 	return cfg, nil
+}
+
+// validateSections runs every section validator in a fixed order and returns
+// the first error. It exists so Load's cyclomatic complexity stays under the
+// project's gocyclo threshold (.golangci.yml, min-complexity: 15): Load was at
+// 15, so a new validator must be added here, not in Load.
+func validateSections(cfg *Server) error {
+	if err := validateAuth(*cfg); err != nil {
+		return err
+	}
+	if err := validateOIDC(*cfg); err != nil {
+		return err
+	}
+	if err := validateEmail(*cfg); err != nil {
+		return err
+	}
+	if err := validateNotifications(*cfg); err != nil {
+		return err
+	}
+	if err := validateRetention(*cfg); err != nil {
+		return err
+	}
+	if err := validateFeedExpiry(*cfg); err != nil {
+		return err
+	}
+	if err := validateObservability(*cfg); err != nil {
+		return err
+	}
+	return validateAgent(cfg)
+}
+
+// validateAgent enforces the agent.* invariants. It takes a pointer because it
+// normalises two fields: a single trailing "/" is trimmed from PublicURL, and
+// an empty TLS.Dir becomes the directory of database.path.
+//
+// The public_url rules apply only when the listener is enabled, so a stale
+// value under a disabled section cannot stop an upgrade.
+func validateAgent(cfg *Server) error {
+	a := &cfg.Agent
+	if a.TLS.Dir == "" {
+		a.TLS.Dir = filepath.Dir(cfg.Database.Path)
+	}
+	if !a.Enabled() {
+		if a.RequireMTLS {
+			return errors.New("config: agent.require_mtls requires agent.listen")
+		}
+		return nil
+	}
+	if a.PublicURL == "" {
+		return errors.New("config: agent.public_url is required when agent.listen is set")
+	}
+	u, err := url.Parse(a.PublicURL)
+	if err != nil {
+		return fmt.Errorf("config: agent.public_url is not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("config: agent.public_url must be https, got %q", a.PublicURL)
+	}
+	if u.Hostname() == "" || u.Port() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return fmt.Errorf("config: agent.public_url must be https://host:port, got %q", a.PublicURL)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("config: agent.public_url must not have a path, got %q", a.PublicURL)
+	}
+	a.PublicURL = strings.TrimSuffix(a.PublicURL, "/")
+	return nil
 }
 
 // validateAuth enforces the auth.* invariants that are not OIDC's. Extracted
