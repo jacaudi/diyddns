@@ -24,8 +24,9 @@ const (
 const ecKeyPEMType = "EC PRIVATE KEY"
 
 // writeFileAtomic writes data to dir/name through a 0600 temp file in the same
-// directory, fsyncs it, then renames it into place: readers see the old file
-// or the whole new one, never a torn write.
+// directory, fsyncs it, renames it into place, then fsyncs the directory so the
+// new entry survives power loss. Readers see the old file or the whole new one,
+// never a torn write.
 func writeFileAtomic(dir, name string, data []byte) (err error) {
 	f, err := os.CreateTemp(dir, "."+name+".tmp-*") // 0600
 	if err != nil {
@@ -51,7 +52,7 @@ func writeFileAtomic(dir, name string, data []byte) (err error) {
 	if err = os.Rename(tmp, filepath.Join(dir, name)); err != nil {
 		return fmt.Errorf("agenttls: rename %s into place: %w", name, err)
 	}
-	return nil
+	return syncDir(dir)
 }
 
 // pendingName is the staging name writePending uses for a key file.
@@ -107,5 +108,25 @@ func rollForward(dir, name string, pub *ecdsa.PublicKey) (bool, error) {
 	if err := os.Rename(pending, filepath.Join(dir, name)); err != nil {
 		return false, fmt.Errorf("agenttls: roll %s forward: %w", name, err)
 	}
+	if err := syncDir(dir); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+// syncDir fsyncs the directory itself so a create or rename in it survives
+// power loss; fsyncing the file alone does not persist its directory entry.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // G304: operator-configured agent.tls.dir, not request input
+	if err != nil {
+		return fmt.Errorf("agenttls: open dir %s for sync: %w", dir, err)
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("agenttls: sync dir %s: %w", dir, err)
+	}
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("agenttls: close dir %s: %w", dir, err)
+	}
+	return nil
 }
