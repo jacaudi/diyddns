@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/oidc/oidctest"
+	"github.com/jacaudi/diyddns/internal/server/api"
 )
 
 // oidcCapabilities is the subset of the /agent/v1/capabilities body this file
@@ -61,6 +62,46 @@ func TestCapabilities_ReflectsOIDCManager(t *testing.T) {
 		}
 		if caps.OIDCDeviceEnabled {
 			t.Error("OIDCDeviceEnabled = true, want false")
+		}
+	})
+}
+
+func TestCapabilities_AgentMTLS(t *testing.T) {
+	get := func(t *testing.T, h agentHarness) map[string]json.RawMessage {
+		t.Helper()
+		resp, err := http.Get(h.srv.URL + "/agent/v1/capabilities")
+		if err != nil {
+			t.Fatalf("get capabilities: %v", err)
+		}
+		defer resp.Body.Close()
+		var m map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return m
+	}
+
+	t.Run("agent url set", func(t *testing.T) {
+		h := newAgentHarnessWith(t, func(d *api.ServerDeps) { d.AgentURL = testAgentURL })
+		raw, ok := get(t, h)["agent_mtls"]
+		if !ok {
+			t.Fatal("agent_mtls key absent, want present")
+		}
+		var got struct {
+			AgentURL string `json:"agent_url"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode agent_mtls: %v", err)
+		}
+		if got.AgentURL != testAgentURL {
+			t.Errorf("agent_url = %q, want %q", got.AgentURL, testAgentURL)
+		}
+	})
+
+	t.Run("agent url unset", func(t *testing.T) {
+		h := newAgentHarness(t)
+		if _, ok := get(t, h)["agent_mtls"]; ok {
+			t.Error("agent_mtls key present, want absent")
 		}
 	})
 }

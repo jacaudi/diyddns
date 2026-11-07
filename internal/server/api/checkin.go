@@ -63,13 +63,14 @@ type selfOutput struct {
 }
 
 // registerCheckinOps registers the two HMAC-authenticated agent operations
-// onto a: POST /agent/v1/checkin and GET /agent/v1/self. Both attach
-// hmacMiddleware and read the authenticated device id via DeviceIDFrom.
-func registerCheckinOps(a huma.API, deps ServerDeps) {
+// onto a: POST /agent/v1/checkin and GET /agent/v1/self. Both attach mws (which
+// must include HMAC verification) and read the authenticated device id via
+// DeviceIDFrom.
+func registerCheckinOps(a huma.API, deps ServerDeps, mws huma.Middlewares) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodPost,
 		Path:        "/agent/v1/checkin",
-		Middlewares: huma.Middlewares{hmacMW(a, deps)},
+		Middlewares: mws,
 	}, func(ctx context.Context, in *checkinInput) (*checkinOutput, error) {
 		deviceID := DeviceIDFrom(ctx)
 		res, err := deps.Checkin.Checkin(ctx, deviceID, service.CheckinReport{
@@ -95,7 +96,7 @@ func registerCheckinOps(a huma.API, deps ServerDeps) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodGet,
 		Path:        "/agent/v1/self",
-		Middlewares: huma.Middlewares{hmacMW(a, deps)},
+		Middlewares: mws,
 	}, func(ctx context.Context, _ *struct{}) (*selfOutput, error) {
 		deviceID := DeviceIDFrom(ctx)
 		dev, err := deps.Checkin.Self(ctx, deviceID)

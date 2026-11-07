@@ -50,6 +50,14 @@ type agentHarness struct {
 // mux, and returns everything a test needs to seed data and make requests.
 func newAgentHarness(t *testing.T) agentHarness {
 	t.Helper()
+	return newAgentHarnessWith(t, nil)
+}
+
+// newAgentHarnessWith is newAgentHarness with a hook: mutate (when non-nil)
+// edits the assembled ServerDeps before api.Build, so a test can switch on a
+// single optional dependency without a second copy of the wiring.
+func newAgentHarnessWith(t *testing.T, mutate func(*api.ServerDeps)) agentHarness {
+	t.Helper()
 	st, err := store.Open(t.Context(), ":memory:", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -62,15 +70,19 @@ func newAgentHarness(t *testing.T) agentHarness {
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
 	checkinSvc := service.NewCheckinService(st, service.NopNotifier{})
 
-	mux := http.NewServeMux()
-	api.Build(mux, api.ServerDeps{
+	deps := api.ServerDeps{
 		Log:      log,
 		Store:    st,
 		Verifier: verifier,
 		Enroll:   enroll,
 		Checkin:  checkinSvc,
 		Info:     version.Info{Version: "v1.2.3"},
-	})
+	}
+	if mutate != nil {
+		mutate(&deps)
+	}
+	mux := http.NewServeMux()
+	api.Build(mux, deps)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

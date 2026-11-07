@@ -19,6 +19,13 @@ type Capabilities struct {
 	AddressFamilies   []string `json:"address_families"`
 	OIDCEnabled       bool     `json:"oidc_enabled"`
 	OIDCDeviceEnabled bool     `json:"oidc_device_enabled"`
+	// AgentMTLS is present only when the agent listener is enabled (#173).
+	AgentMTLS *AgentMTLSCapability `json:"agent_mtls,omitempty"`
+}
+
+// AgentMTLSCapability tells a client where the mTLS agent listener lives.
+type AgentMTLSCapability struct {
+	AgentURL string `json:"agent_url"`
 }
 
 type capabilitiesOutput struct {
@@ -27,12 +34,16 @@ type capabilitiesOutput struct {
 
 func registerCapabilities(a huma.API, deps ServerDeps) {
 	huma.Get(a, "/agent/v1/capabilities", func(_ context.Context, _ *struct{}) (*capabilitiesOutput, error) {
-		return &capabilitiesOutput{Body: Capabilities{
+		caps := Capabilities{
 			ServerVersion:     deps.Info.Version,
 			SkewWindowSeconds: hmacSkewWindowSeconds,
 			AddressFamilies:   []string{"ipv4", "ipv6"},
 			OIDCEnabled:       deps.OIDCMgr.Enabled(),
 			OIDCDeviceEnabled: deps.OIDCMgr.DeviceEnabled(),
-		}}, nil
+		}
+		if deps.AgentURL != "" {
+			caps.AgentMTLS = &AgentMTLSCapability{AgentURL: deps.AgentURL}
+		}
+		return &capabilitiesOutput{Body: caps}, nil
 	})
 }
