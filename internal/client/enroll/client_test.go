@@ -206,3 +206,32 @@ func TestClient_EnrollCode_StatusMapping(t *testing.T) {
 		})
 	}
 }
+
+func TestCapabilities_AgentMTLS(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want *AgentMTLS
+	}{
+		{"present", `{"server_version":"v","agent_mtls":{"agent_url":"https://ddns.example.com:8443"}}`,
+			&AgentMTLS{AgentURL: "https://ddns.example.com:8443"}},
+		{"absent", `{"server_version":"v"}`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			})
+			caps, err := c.Capabilities(t.Context())
+			if err != nil {
+				t.Fatalf("Capabilities: %v", err)
+			}
+			switch {
+			case tt.want == nil && caps.AgentMTLS != nil:
+				t.Errorf("AgentMTLS = %+v, want nil", caps.AgentMTLS)
+			case tt.want != nil && (caps.AgentMTLS == nil || *caps.AgentMTLS != *tt.want):
+				t.Errorf("AgentMTLS = %+v, want %+v", caps.AgentMTLS, tt.want)
+			}
+		})
+	}
+}

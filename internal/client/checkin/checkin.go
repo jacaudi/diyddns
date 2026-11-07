@@ -26,10 +26,18 @@ import (
 )
 
 // ErrUnauthorized is returned when the server rejects the signature/device
-// (401) — e.g. a rotated or invalid secret. ErrServer is any other non-2xx.
+// (401) — e.g. a rotated or invalid secret. ErrClientCertRejected is a 401 the
+// agent port coded as a refused client certificate: the credential is fine, the
+// certificate is not, so callers re-provision rather than count it as a
+// rejected secret. ErrCertAlreadyIssued (409) means the device already holds a
+// live certificate; ErrMTLSRequired (403) means the server refuses this port
+// and the client must move to the agent port. ErrServer is any other non-2xx.
 var (
-	ErrUnauthorized = errors.New("checkin: unauthorized")
-	ErrServer       = errors.New("checkin: server error")
+	ErrUnauthorized       = errors.New("checkin: unauthorized")
+	ErrClientCertRejected = errors.New("checkin: client certificate rejected")
+	ErrCertAlreadyIssued  = errors.New("checkin: device already has a live certificate")
+	ErrMTLSRequired       = errors.New("checkin: server requires mTLS")
+	ErrServer             = errors.New("checkin: server error")
 )
 
 // Report is the IP/metadata a device reports. Empty families are omitted so
@@ -45,8 +53,11 @@ type Result struct {
 }
 
 // Options configures the client. CACertPath trusts a self-signed homelab CA.
+// TLSConfig, when non-nil, is used verbatim (it carries the pinned roots, the
+// client certificate and MinVersion) and CACertPath is ignored.
 type Options struct {
 	CACertPath string
+	TLSConfig  *tls.Config
 	Timeout    time.Duration
 }
 
@@ -90,7 +101,10 @@ func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, erro
 		return nil, fmt.Errorf("checkin: secret is not valid base64")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if opts.CACertPath != "" {
+	switch {
+	case opts.TLSConfig != nil:
+		transport.TLSClientConfig = opts.TLSConfig
+	case opts.CACertPath != "":
 		pem, err := os.ReadFile(opts.CACertPath) // operator-provided CA bundle path (enroll/client.go reads the same way, no #nosec needed — gosec does not flag this pattern here)
 		if err != nil {
 			return nil, fmt.Errorf("checkin: read ca cert %s: %w", opts.CACertPath, err)
@@ -114,6 +128,17 @@ func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, erro
 	}, nil
 }
 
+// CertResponse is the 200 body of POST /agent/v1/cert: the issued device
+// certificate, the CA bundle to trust, and the agent URL to use from now on.
+type CertResponse struct {
+	Certificate string `json:"certificate"`
+	CABundle    string `json:"ca_bundle"`
+	AgentURL    string `json:"agent_url"`
+}
+
+// BaseURL returns the server URL this client talks to, without a trailing slash.
+func (c *Client) BaseURL() string { return c.baseURL }
+
 // Checkin signs and POSTs one check-in.
 func (c *Client) Checkin(ctx context.Context, r Report) (Result, error) {
 	// I1: hash exactly the bytes we send — Marshal then read those bytes.
@@ -123,20 +148,80 @@ func (c *Client) Checkin(ctx context.Context, r Report) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("checkin: marshal: %w", err)
 	}
-	const path = "/agent/v1/checkin"
-	ts := strconv.FormatInt(c.now().Unix(), 10)
-	nonce, err := randNonce()
+	resp, err := c.do(ctx, http.MethodPost, "/agent/v1/checkin", body)
 	if err != nil {
 		return Result{}, err
 	}
-	canonical := shared.CanonicalRequest(http.MethodPost, path, ts, nonce, shared.BodyHashHex(body))
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		return Result{}, classify(resp)
+	}
+	var b checkinResponse
+	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+		return Result{}, fmt.Errorf("checkin: decode: %w", err)
+	}
+	// checkinResponse and Result share identical field name/type/order.
+	return Result(b), nil
+}
+
+// Self signs and sends GET /agent/v1/self. It reports only whether the server
+// accepted the device's credentials (and, on the agent port, its certificate);
+// the response body is not read.
+func (c *Client) Self(ctx context.Context) error {
+	resp, err := c.do(ctx, http.MethodGet, "/agent/v1/self", nil)
+	if err != nil {
+		return err
+	}
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		return classify(resp)
+	}
+	return nil
+}
+
+// RequestCert signs and POSTs csrPEM to /agent/v1/cert and returns the issued
+// certificate. A device that already holds a live certificate gets
+// ErrCertAlreadyIssued.
+func (c *Client) RequestCert(ctx context.Context, csrPEM []byte) (CertResponse, error) {
+	body, err := json.Marshal(struct {
+		CSR string `json:"csr"`
+	}{CSR: string(csrPEM)})
+	if err != nil {
+		return CertResponse{}, fmt.Errorf("checkin: marshal: %w", err)
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/agent/v1/cert", body)
+	if err != nil {
+		return CertResponse{}, err
+	}
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		return CertResponse{}, classify(resp)
+	}
+	var out CertResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return CertResponse{}, fmt.Errorf("checkin: decode: %w", err)
+	}
+	return out, nil
+}
+
+// do signs method+path+body with the device secret and sends it. A nil body
+// is sent as an empty body (and hashed as such). The caller owns resp.Body.
+func (c *Client) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	ts := strconv.FormatInt(c.now().Unix(), 10)
+	nonce, err := randNonce()
+	if err != nil {
+		return nil, err
+	}
+	canonical := shared.CanonicalRequest(method, path, ts, nonce, shared.BodyHashHex(body))
 	sig := shared.Sign(c.key, canonical)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return Result{}, fmt.Errorf("checkin: request: %w", err)
+		return nil, fmt.Errorf("checkin: request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set(shared.HeaderDevice, c.deviceID)
 	req.Header.Set(shared.HeaderTimestamp, ts)
 	req.Header.Set(shared.HeaderNonce, nonce)
@@ -144,23 +229,41 @@ func (c *Client) Checkin(ctx context.Context, r Report) (Result, error) {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("checkin: post: %w", err)
+		return nil, fmt.Errorf("checkin: %s %s: %w", method, path, err)
 	}
-	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)); _ = resp.Body.Close() }()
+	return resp, nil
+}
 
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var b checkinResponse
-		if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
-			return Result{}, fmt.Errorf("checkin: decode: %w", err)
-		}
-		// checkinResponse and Result share identical field name/type/order.
-		return Result(b), nil
-	case http.StatusUnauthorized:
-		return Result{}, ErrUnauthorized
-	default:
-		return Result{}, fmt.Errorf("%w: status %d", ErrServer, resp.StatusCode)
+// classify turns a non-200 response into a typed error. The server's problem
+// JSON carries a stable `code` (shared.Code*) which, when present, wins over
+// the bare status: a coded 401 is a rejected client certificate, not a rejected
+// HMAC credential.
+func classify(resp *http.Response) error {
+	var p struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
 	}
+	// A body that is not problem JSON leaves p empty; the status still classifies.
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&p)
+
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized && p.Code == shared.CodeClientCertRejected:
+		return ErrClientCertRejected
+	case resp.StatusCode == http.StatusUnauthorized:
+		return ErrUnauthorized
+	case resp.StatusCode == http.StatusForbidden && p.Code == shared.CodeMTLSRequired:
+		return fmt.Errorf("%w: upgrade this client", ErrMTLSRequired)
+	case resp.StatusCode == http.StatusConflict && p.Code == shared.CodeCertAlreadyIssued:
+		return ErrCertAlreadyIssued
+	default:
+		return fmt.Errorf("%w: status %d: %s", ErrServer, resp.StatusCode, p.Detail)
+	}
+}
+
+// drainClose drains and closes a response body so the connection can be reused.
+func drainClose(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	_ = resp.Body.Close()
 }
 
 // randNonce returns a fresh 16-byte hex nonce (server replay-nonce table

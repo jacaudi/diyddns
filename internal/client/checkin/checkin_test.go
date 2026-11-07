@@ -1,12 +1,16 @@
 package checkin
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,5 +98,228 @@ func TestClient_Checkin_StatusMapping(t *testing.T) {
 			t.Errorf("status %d → err %v, want %v", tt.code, err, tt.wantErr)
 		}
 		srv.Close()
+	}
+}
+
+const (
+	testDeviceID = "dev-123"
+	testSecret   = "0123456789abcdef0123456789abcdef"
+)
+
+// newCodedClient serves status and body for every request and returns a client
+// pointed at it.
+func newCodedClient(t *testing.T, status int, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c
+}
+
+// verifySigned checks r carries the HMAC headers for body, exactly as the
+// server verifies them.
+func verifySigned(t *testing.T, r *http.Request, body []byte) {
+	t.Helper()
+	canonical := shared.CanonicalRequest(r.Method, r.URL.Path,
+		r.Header.Get(shared.HeaderTimestamp), r.Header.Get(shared.HeaderNonce), shared.BodyHashHex(body))
+	if got, want := r.Header.Get(shared.HeaderSignature), shared.Sign([]byte(testSecret), canonical); got != want {
+		t.Errorf("signature mismatch: got %q want %q", got, want)
+	}
+	if got := r.Header.Get(shared.HeaderDevice); got != testDeviceID {
+		t.Errorf("device header = %q, want %q", got, testDeviceID)
+	}
+	if r.Header.Get(shared.HeaderNonce) == "" || r.Header.Get(shared.HeaderTimestamp) == "" {
+		t.Errorf("missing nonce or timestamp header")
+	}
+}
+
+func checkinErr(t *testing.T, status int, body string) error {
+	t.Helper()
+	_, err := newCodedClient(t, status, body).Checkin(t.Context(), Report{IPv4: "203.0.113.7"})
+	return err
+}
+
+// A cert rejection on the agent port is not a rejected HMAC credential: the
+// poller's 3-strike ErrUnauthorized stop must not see it.
+func TestCheckin_401CodedIsNotErrUnauthorized(t *testing.T) {
+	err := checkinErr(t, 401, `{"code":"client_cert_rejected"}`)
+	if !errors.Is(err, ErrClientCertRejected) {
+		t.Errorf("err = %v, want ErrClientCertRejected", err)
+	}
+	if errors.Is(err, ErrUnauthorized) {
+		t.Errorf("err = %v must not match ErrUnauthorized", err)
+	}
+}
+
+func TestCheckin_401PlainIsErrUnauthorized(t *testing.T) {
+	for _, body := range []string{``, `{"detail":"unauthorized"}`} {
+		err := checkinErr(t, 401, body)
+		if !errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrClientCertRejected) {
+			t.Errorf("body %q: err = %v, want ErrUnauthorized only", body, err)
+		}
+	}
+}
+
+func TestCheckin_403MTLSRequired(t *testing.T) {
+	err := checkinErr(t, 403, `{"code":"mtls_required","detail":"this server requires mTLS on the agent port: upgrade this client"}`)
+	if !errors.Is(err, ErrMTLSRequired) {
+		t.Fatalf("err = %v, want ErrMTLSRequired", err)
+	}
+	if got, want := err.Error(), "checkin: server requires mTLS: upgrade this client"; got != want {
+		t.Errorf("err = %q, want %q", got, want)
+	}
+}
+
+func TestCheckin_403UncodedIsServerError(t *testing.T) {
+	err := checkinErr(t, 403, `{"detail":"nope"}`)
+	if !errors.Is(err, ErrServer) || errors.Is(err, ErrMTLSRequired) {
+		t.Errorf("err = %v, want ErrServer only", err)
+	}
+}
+
+func TestCheckin_OtherStatusIncludesDetail(t *testing.T) {
+	err := checkinErr(t, 500, `{"detail":"check-in failed"}`)
+	if !errors.Is(err, ErrServer) {
+		t.Fatalf("err = %v, want ErrServer", err)
+	}
+	for _, want := range []string{"check-in failed", "500"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+func TestCheckin_NonJSONErrorBodyIsServerError(t *testing.T) {
+	if err := checkinErr(t, 500, `<html>boom</html>`); !errors.Is(err, ErrServer) {
+		t.Errorf("err = %v, want ErrServer", err)
+	}
+}
+
+func TestSelf_SignedGET(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/agent/v1/self" {
+			t.Errorf("request = %s %s, want GET /agent/v1/self", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if len(body) != 0 {
+			t.Errorf("body = %q, want empty", body)
+		}
+		verifySigned(t, r, nil)
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": testDeviceID})
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(srv.URL, testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := c.Self(t.Context()); err != nil {
+		t.Fatalf("Self: %v", err)
+	}
+}
+
+func TestSelf_ClientCertRejected(t *testing.T) {
+	c := newCodedClient(t, 401, `{"code":"client_cert_rejected"}`)
+	if err := c.Self(t.Context()); !errors.Is(err, ErrClientCertRejected) {
+		t.Errorf("Self err = %v, want ErrClientCertRejected", err)
+	}
+}
+
+func TestRequestCert_RoundTrip(t *testing.T) {
+	const csr = "-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/agent/v1/cert" {
+			t.Errorf("request = %s %s, want POST /agent/v1/cert", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		verifySigned(t, r, body)
+		var in struct {
+			CSR string `json:"csr"`
+		}
+		if err := json.Unmarshal(body, &in); err != nil || in.CSR != csr {
+			t.Errorf("body = %q (decode err %v), want csr %q", body, err, csr)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"certificate": "CERT", "ca_bundle": "BUNDLE", "agent_url": "https://ddns.example.com:8443",
+		})
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(srv.URL, testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	got, err := c.RequestCert(t.Context(), []byte(csr))
+	if err != nil {
+		t.Fatalf("RequestCert: %v", err)
+	}
+	want := CertResponse{Certificate: "CERT", CABundle: "BUNDLE", AgentURL: "https://ddns.example.com:8443"}
+	if got != want {
+		t.Errorf("RequestCert = %+v, want %+v", got, want)
+	}
+}
+
+func TestRequestCert_ErrorMapping(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{"409 coded", 409, `{"code":"cert_already_issued","detail":"x"}`, ErrCertAlreadyIssued},
+		{"401 plain", 401, `{"detail":"unauthorized"}`, ErrUnauthorized},
+		{"400 bad csr", 400, `{"detail":"invalid CSR"}`, ErrServer},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newCodedClient(t, tt.status, tt.body)
+			if _, err := c.RequestCert(t.Context(), []byte("csr")); !errors.Is(err, tt.want) {
+				t.Errorf("err = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequestCert_BadSuccessBody(t *testing.T) {
+	c := newCodedClient(t, 200, `not json`)
+	if _, err := c.RequestCert(t.Context(), []byte("csr")); err == nil {
+		t.Error("want decode error for a non-JSON 200 body")
+	}
+}
+
+func TestNewClient_TLSConfigOverridesCACert(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": testDeviceID})
+	}))
+	defer srv.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+
+	c, err := NewClient(srv.URL, testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{
+		CACertPath: filepath.Join(t.TempDir(), "missing.pem"), // ignored when TLSConfig is set
+		TLSConfig:  &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := c.Self(t.Context()); err != nil {
+		t.Fatalf("Self over pinned TLS: %v", err)
+	}
+}
+
+func TestClient_BaseURL(t *testing.T) {
+	c, err := NewClient("https://ddns.example.com:8443/", testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if got, want := c.BaseURL(), "https://ddns.example.com:8443"; got != want {
+		t.Errorf("BaseURL = %q, want %q", got, want)
 	}
 }

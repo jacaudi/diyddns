@@ -26,6 +26,13 @@ type Capabilities struct {
 	ServerVersion     string `json:"server_version"`
 	OIDCEnabled       bool   `json:"oidc_enabled"`
 	OIDCDeviceEnabled bool   `json:"oidc_device_enabled"`
+	// AgentMTLS is non-nil only when the server runs the mTLS agent listener.
+	AgentMTLS *AgentMTLS `json:"agent_mtls,omitempty"`
+}
+
+// AgentMTLS tells the client where the server's mTLS agent listener lives.
+type AgentMTLS struct {
+	AgentURL string `json:"agent_url"`
 }
 
 // DeviceStart is the 200 body of POST /agent/v1/enroll/oidc/start.
