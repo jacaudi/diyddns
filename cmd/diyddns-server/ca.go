@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -47,17 +48,7 @@ func promoteBackupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
-			if res.AlreadyPromoted {
-				if _, err := fmt.Fprintln(out, "Backup CA already promoted; nothing to do."); err != nil {
-					return err
-				}
-			}
-			if res.NewBackupKeyPath != "" {
-				_, err = fmt.Fprintf(out, "Backup CA promoted. A new backup key was written to %s: "+
-					"move it offline now (see docs/deployment.md, \"Agent CA backups\").\n", res.NewBackupKeyPath)
-			}
-			return err
+			return printPromoted(cmd, dir, res)
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "", "path to server config file")
@@ -66,6 +57,34 @@ func promoteBackupCmd() *cobra.Command {
 		panic(err) //nolint:tricorder // libpanic: the flag was defined one line above; a failure is a programming error
 	}
 	return cmd
+}
+
+// printPromoted reports what PromoteBackup did.
+func printPromoted(cmd *cobra.Command, dir string, res agenttls.PromoteResult) error {
+	out := cmd.OutOrStdout()
+	var errs []error
+	say := func(w io.Writer, format string, args ...any) {
+		_, err := fmt.Fprintf(w, format+"\n", args...)
+		errs = append(errs, err)
+	}
+	switch {
+	case res.AlreadyPromoted && !res.ActiveKeyRestored && res.NewBackupKeyPath == "":
+		say(out, "Backup CA already promoted; nothing to do.")
+	case res.AlreadyPromoted:
+		say(out, "Backup CA already promoted.")
+	}
+	if res.ActiveKeyRestored {
+		say(out, "Restored %s from --backup-key.", filepath.Join(dir, agenttls.CAKeyFile))
+	}
+	if res.NoLocalBackupKey {
+		say(cmd.ErrOrStderr(), "WARN: no %s is present in %s. The recorded backup CA's key must exist offline; "+
+			"without it a new backup CA requires \"diyddns-server ca reset\".", agenttls.CABackupKeyFile, dir)
+	}
+	if res.NewBackupKeyPath != "" {
+		say(out, "Backup CA promoted. A new backup key was written to %s: "+
+			"move it offline now (see docs/deployment.md, \"Agent CA backups\").", res.NewBackupKeyPath)
+	}
+	return errors.Join(errs...)
 }
 
 func resetCmd() *cobra.Command {

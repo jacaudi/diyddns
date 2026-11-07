@@ -459,8 +459,11 @@ func TestCACmd_ResetRenamesAndPrints(t *testing.T) {
 	}
 }
 
-func TestCACmd_PromoteBackupPrintsGuidanceThenAlreadyPromoted(t *testing.T) {
-	dir := caCmdEnv(t)
+// caCmdPromotable starts a CA in a fresh env and moves its backup key offline,
+// returning the dir and the offline key path.
+func caCmdPromotable(t *testing.T) (dir, offline string) {
+	t.Helper()
+	dir = caCmdEnv(t)
 	st, err := store.Open(t.Context(), filepath.Join(dir, "diyddns.db"), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -472,10 +475,16 @@ func TestCACmd_PromoteBackupPrintsGuidanceThenAlreadyPromoted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrInit: %v", err)
 	}
-	offline := filepath.Join(t.TempDir(), "backup.key")
+	offline = filepath.Join(t.TempDir(), "backup.key")
 	if err := os.Rename(filepath.Join(dir, "ca-backup.key"), offline); err != nil {
 		t.Fatalf("move backup key offline: %v", err)
 	}
+
+	return dir, offline
+}
+
+func TestCACmd_PromoteBackupPrintsGuidanceThenAlreadyPromoted(t *testing.T) {
+	dir, offline := caCmdPromotable(t)
 
 	out, err := runCA(t, "promote-backup", "--backup-key", offline)
 	if err != nil {
@@ -493,5 +502,30 @@ func TestCACmd_PromoteBackupPrintsGuidanceThenAlreadyPromoted(t *testing.T) {
 	}
 	if !strings.Contains(out, "Backup CA already promoted; nothing to do.") {
 		t.Errorf("output %q does not say the backup was already promoted", out)
+	}
+}
+
+func TestCACmd_PromoteBackupRerunRestoresActiveKey(t *testing.T) {
+	dir, offline := caCmdPromotable(t)
+	if _, err := runCA(t, "promote-backup", "--backup-key", offline); err != nil {
+		t.Fatalf("ca promote-backup: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "ca.key")); err != nil {
+		t.Fatalf("remove ca.key: %v", err)
+	}
+
+	out, err := runCA(t, "promote-backup", "--backup-key", offline)
+	if err != nil {
+		t.Fatalf("rerun ca promote-backup: %v", err)
+	}
+
+	if want := "Restored " + filepath.Join(dir, "ca.key") + " from --backup-key."; !strings.Contains(out, want) {
+		t.Errorf("output %q does not contain %q", out, want)
+	}
+	if strings.Contains(out, "nothing to do") {
+		t.Errorf("output %q claims nothing to do after a restore", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.key")); err != nil {
+		t.Errorf("ca.key not restored: %v", err)
 	}
 }
