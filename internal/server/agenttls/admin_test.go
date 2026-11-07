@@ -330,6 +330,93 @@ func TestPromoteBackup_CompletesAfterCrash(t *testing.T) {
 	mustLoad(t, f.st, f.dir)
 }
 
+// promoteThenDamage promotes once, then runs damage on the dir, simulating a
+// volume lost or replaced after the transaction committed.
+func promoteThenDamage(t *testing.T, damage func(f adminFixture)) adminFixture {
+	t.Helper()
+	f := newAdminFixture(t, true)
+	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow); err != nil {
+		t.Fatalf("PromoteBackup: %v", err)
+	}
+	damage(f)
+	return f
+}
+
+func (f adminFixture) assertActiveKeyRestored(t *testing.T, res PromoteResult) {
+	t.Helper()
+	if !res.AlreadyPromoted || !res.ActiveKeyRestored {
+		t.Errorf("result = %+v, want AlreadyPromoted and ActiveKeyRestored", res)
+	}
+	after, err := f.st.AgentCA().Get(t.Context())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertKeyFile(t, f.dir, CAKeyFile, certPub(t, after.ActiveDER))
+	assertNoPending(t, f.dir)
+	mustLoad(t, f.st, f.dir) // startup rule 1
+}
+
+func TestPromoteBackup_RerunRestoresMissingActiveKey(t *testing.T) {
+	f := promoteThenDamage(t, func(f adminFixture) {
+		if err := os.Remove(filepath.Join(f.dir, CAKeyFile)); err != nil {
+			t.Fatalf("remove ca.key: %v", err)
+		}
+	})
+
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	if err != nil {
+		t.Fatalf("rerun PromoteBackup: %v", err)
+	}
+
+	f.assertActiveKeyRestored(t, res)
+	if res.NoLocalBackupKey {
+		t.Error("NoLocalBackupKey = true although ca-backup.key is present")
+	}
+}
+
+func TestPromoteBackup_RerunRestoresMismatchedActiveKey(t *testing.T) {
+	f := promoteThenDamage(t, func(f adminFixture) {
+		_, other, err := newCACert(adminNow)
+		if err != nil {
+			t.Fatalf("newCACert: %v", err)
+		}
+		if err := writePending(f.dir, CAKeyFile, other); err != nil {
+			t.Fatalf("writePending: %v", err)
+		}
+		if err := os.Rename(filepath.Join(f.dir, pendingName(CAKeyFile)), filepath.Join(f.dir, CAKeyFile)); err != nil {
+			t.Fatalf("install unrelated ca.key: %v", err)
+		}
+	})
+
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	if err != nil {
+		t.Fatalf("rerun PromoteBackup: %v", err)
+	}
+
+	f.assertActiveKeyRestored(t, res)
+}
+
+func TestPromoteBackup_RerunRestoreWithoutBackupKeyFlagsIt(t *testing.T) {
+	f := promoteThenDamage(t, func(f adminFixture) {
+		for _, n := range []string{CAKeyFile, CABackupKeyFile} {
+			if err := os.Remove(filepath.Join(f.dir, n)); err != nil {
+				t.Fatalf("remove %s: %v", n, err)
+			}
+		}
+	})
+
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	if err != nil {
+		t.Fatalf("rerun PromoteBackup: %v", err)
+	}
+
+	f.assertActiveKeyRestored(t, res)
+	if !res.NoLocalBackupKey {
+		t.Error("NoLocalBackupKey = false although no ca-backup.key is present")
+	}
+	assertGone(t, f.dir, CABackupKeyFile) // a new backup is never generated here
+}
+
 func TestPromoteBackup_WorksWithEmptyDir(t *testing.T) {
 	f := newAdminFixture(t, true)
 	entries, err := os.ReadDir(f.dir)

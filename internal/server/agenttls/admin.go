@@ -4,6 +4,7 @@ package agenttls
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,13 @@ type PromoteResult struct {
 	// NewBackupKeyPath is where a new ca-backup.key was installed by this call
 	// and must be moved offline; empty when none was.
 	NewBackupKeyPath string
+	// ActiveKeyRestored is true when a rerun found ca.key missing or not the
+	// active CA's and wrote the supplied key there.
+	ActiveKeyRestored bool
+	// NoLocalBackupKey is true when ActiveKeyRestored and no ca-backup.key is in
+	// the dir: the recorded backup CA's key must exist offline, since without
+	// it a new backup CA needs "ca reset".
+	NoLocalBackupKey bool
 }
 
 // PromoteBackup makes the backup CA the active one. backupKeyPath is the
@@ -77,7 +85,7 @@ func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath stri
 
 	switch {
 	case key.PublicKey.Equal(active.PublicKey):
-		return finishPromotion(ctx, st, dir, active, backup)
+		return finishPromotion(ctx, st, dir, active, backup, key)
 	case !key.PublicKey.Equal(backup.PublicKey):
 		return PromoteResult{}, fmt.Errorf("%w: %s", ErrBackupKeyMismatch, backupKeyPath)
 	}
@@ -125,8 +133,11 @@ func installAndAudit(ctx context.Context, st *store.Store, dir string, active, b
 
 // finishPromotion is the rerun path: the database already holds the promoted
 // pair. It completes whatever a crashed run left (staged key renames, agent
-// files) and, when it had to, writes the audit row that run never reached.
-func finishPromotion(ctx context.Context, st *store.Store, dir string, active, backup *x509.Certificate) (PromoteResult, error) {
+// files), writes the audit row that run never reached when it had to, and
+// restores ca.key from the supplied key (which is the active CA's) when the
+// volume lost or replaced it after the transaction committed; startup would
+// otherwise refuse under rule 2 and point back at this command.
+func finishPromotion(ctx context.Context, st *store.Store, dir string, active, backup *x509.Certificate, key *ecdsa.PrivateKey) (PromoteResult, error) {
 	rolledActive, rolledBackup, err := rollBoth(dir, active, backup)
 	if err != nil {
 		return PromoteResult{}, err
@@ -135,6 +146,13 @@ func finishPromotion(ctx context.Context, st *store.Store, dir string, active, b
 		return PromoteResult{}, err
 	}
 	res := PromoteResult{AlreadyPromoted: true}
+	if res.ActiveKeyRestored, err = restoreActiveKey(dir, key); err != nil {
+		return PromoteResult{}, err
+	}
+	if res.ActiveKeyRestored {
+		_, statErr := os.Stat(filepath.Join(dir, CABackupKeyFile))
+		res.NoLocalBackupKey = errors.Is(statErr, fs.ErrNotExist)
+	}
 	if rolledBackup {
 		res.NewBackupKeyPath = filepath.Join(dir, CABackupKeyFile)
 	}
@@ -146,6 +164,25 @@ func finishPromotion(ctx context.Context, st *store.Store, dir string, active, b
 		}
 	}
 	return res, nil
+}
+
+// restoreActiveKey installs key as ca.key unless ca.key already holds it. A
+// ca.key that is missing, unreadable, or someone else's counts as lost.
+func restoreActiveKey(dir string, key *ecdsa.PrivateKey) (bool, error) {
+	if cur, err := readKey(filepath.Join(dir, CAKeyFile)); err == nil && cur.PublicKey.Equal(&key.PublicKey) {
+		return false, nil
+	}
+	if err := writePending(dir, CAKeyFile, key); err != nil {
+		return false, err
+	}
+	ok, err := rollForward(dir, CAKeyFile, &key.PublicKey)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("agenttls: restore %s did not install", CAKeyFile)
+	}
+	return true, nil
 }
 
 // parseRecorded parses the recorded pair; both certificates must be ECDSA.
