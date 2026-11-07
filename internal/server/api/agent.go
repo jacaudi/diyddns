@@ -1,0 +1,145 @@
+package api
+
+import (
+	"context"
+	"crypto/x509"
+	"errors"
+	"log/slog"
+	"net/http"
+	"slices"
+	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+
+	"github.com/jacaudi/diyddns/internal/server/agenttls"
+	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/shared"
+	"github.com/jacaudi/diyddns/internal/store"
+)
+
+// BuildAgent registers the agent mTLS listener's API onto mux: check-in, self
+// and cert, and nothing else. It is a separate huma instance from Build's, with
+// no OpenAPI document, docs page or schemas route, so the listener answers 404
+// for every other path. Each route is HMAC-authenticated and then bound to the
+// client certificate; the certificate itself is verified by ClientCertMiddleware
+// wrapped around the whole mux. Cert is renewal-only here (CertListenerAgent).
+func BuildAgent(mux *http.ServeMux, deps ServerDeps) {
+	cfg := huma.DefaultConfig("DIYDDNS Agent mTLS API", deps.Info.Version)
+	cfg.OpenAPIPath, cfg.DocsPath, cfg.SchemasPath = "", "", ""
+	a := humago.New(mux, cfg)
+
+	mws := huma.Middlewares{hmacMW(a, deps), certBindingMW(a, deps)}
+	registerCheckinOps(a, deps, mws)
+	registerCertOps(a, deps, service.CertListenerAgent, mws)
+}
+
+// ClientCertMiddleware verifies the TLS client certificate on every request to
+// the agent listener, so no route can skip it. The listener requests any client
+// certificate without verifying it (the handshake cannot name the active CA
+// alone), so this does the real check: the leaf chains to the active CA and is
+// usable only for client authentication, it names a device through its URI SAN,
+// and that device's recorded serial is this certificate's. Anything else is the
+// coded 401 client_cert_rejected. A failing device lookup is a 500 instead, so
+// a database outage never reads as a rejected certificate.
+//
+// It hands r to next untouched (no WithContext or Clone): AccessLog reads
+// r.Pattern off the same request once the mux has routed it.
+func ClientCertMiddleware(ca *agenttls.CA, devices *store.DeviceRepo, log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reason, claimed, err := checkClientCert(r, ca, devices)
+			if err != nil {
+				log.LogAttrs(r.Context(), slog.LevelError, "agent client certificate lookup failed",
+					slog.String("claimed_device_id", claimedDeviceID(claimed)), slog.Any("error", err))
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				return
+			}
+			if reason != "" {
+				rejectClientCert(r.Context(), w, log, reason, claimed)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// Rejection reasons logged by rejectClientCert; never sent to the client.
+const (
+	reasonNoCert         = "no_cert"
+	reasonChain          = "chain"
+	reasonNoDeviceURI    = "no_device_uri"
+	reasonUnknownDevice  = "unknown_device"
+	reasonSerialMismatch = "serial_mismatch"
+	reasonDeviceMismatch = "device_mismatch"
+)
+
+// checkClientCert returns the reason r's client certificate is refused ("" when
+// accepted) and the device id the certificate claims, if it names one. A
+// non-nil error is a failed device lookup, not a verdict on the certificate.
+func checkClientCert(r *http.Request, ca *agenttls.CA, devices *store.DeviceRepo) (reason, claimed string, err error) {
+	leaf := peerLeaf(r)
+	if leaf == nil {
+		return reasonNoCert, "", nil
+	}
+	id, hasURI := agenttls.DeviceIDFromCert(leaf)
+	if ca.VerifyClient(leaf, time.Now()) != nil || !isClientLeaf(leaf) {
+		return reasonChain, id, nil
+	}
+	if !hasURI {
+		return reasonNoDeviceURI, "", nil
+	}
+	dev, err := devices.GetByID(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return reasonUnknownDevice, id, nil
+	case err != nil:
+		return "", id, err
+	case dev.CertSerial != agenttls.SerialHex(leaf.SerialNumber):
+		return reasonSerialMismatch, id, nil
+	}
+	return "", id, nil
+}
+
+// isClientLeaf is the defense in depth over VerifyClient: x509.Verify accepts a
+// leaf with no ExtKeyUsage for any usage, and does not look at whether a leaf
+// is itself a CA. A device certificate is neither.
+func isClientLeaf(leaf *x509.Certificate) bool {
+	return !leaf.IsCA && slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+}
+
+// peerLeaf returns the client's leaf certificate, or nil when it sent none.
+func peerLeaf(r *http.Request) *x509.Certificate {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	return r.TLS.PeerCertificates[0]
+}
+
+// certBindingMW requires the device the HMAC authenticated to be the device the
+// client certificate names, so one device's certificate cannot carry another's
+// signed requests. It must run after hmacMW.
+func certBindingMW(_ huma.API, deps ServerDeps) func(huma.Context, func(huma.Context)) {
+	return func(ctx huma.Context, next func(huma.Context)) {
+		r, w := humago.Unwrap(ctx)
+		var certID string
+		if leaf := peerLeaf(r); leaf != nil {
+			certID, _ = agenttls.DeviceIDFromCert(leaf)
+		}
+		if certID == "" || certID != DeviceIDFrom(ctx.Context()) {
+			rejectClientCert(ctx.Context(), w, deps.Log, reasonDeviceMismatch, certID)
+			return
+		}
+		next(ctx)
+	}
+}
+
+// rejectClientCert logs the reason at WARN and answers the uniform coded 401.
+// claimed comes from the certificate and is attacker-controlled, so it goes
+// through claimedDeviceID before it reaches the log.
+func rejectClientCert(ctx context.Context, w http.ResponseWriter, log *slog.Logger, reason, claimed string) {
+	log.LogAttrs(ctx, slog.LevelWarn, "agent client certificate rejected",
+		slog.String("reason", reason),
+		slog.String("claimed_device_id", claimedDeviceID(claimed)))
+	writeCodedError(w, newCodedError(http.StatusUnauthorized, shared.CodeClientCertRejected, "client certificate rejected"))
+}
