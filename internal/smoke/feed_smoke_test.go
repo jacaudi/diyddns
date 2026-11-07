@@ -288,8 +288,9 @@ func getPageBody(t *testing.T, c *http.Client, rawURL string) string {
 // FINAL status (after the client has followed redirects) equals want. It does
 // the request itself rather than wrapping postForm (notify_smoke_test.go):
 // postForm returns only a body and t.Fatalf's on anything but 200, so it has
-// no status for a caller to assert.
-func postFormExpect(t *testing.T, c *http.Client, rawURL, csrf string, fields map[string]string, want int) {
+// no status for a caller to assert. It returns the final URL path, which a
+// caller checking where a redirect landed can use and the rest ignore.
+func postFormExpect(t *testing.T, c *http.Client, rawURL, csrf string, fields map[string]string, want int) string {
 	t.Helper()
 	form := url.Values{"csrf": {csrf}}
 	for k, v := range fields {
@@ -312,4 +313,5 @@ func postFormExpect(t *testing.T, c *http.Client, rawURL, csrf string, fields ma
 	if resp.StatusCode != want {
 		t.Fatalf("POST %s: status = %d, want %d; body = %s", rawURL, resp.StatusCode, want, body)
 	}
+	return resp.Request.URL.Path
 }

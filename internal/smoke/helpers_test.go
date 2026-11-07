@@ -345,3 +345,43 @@ func newJar(t *testing.T) http.CookieJar {
 	}
 	return jar
 }
+
+// startServerWithYAML runs the real binary against a caller-supplied YAML
+// config, with the same DIYDDNS_* overrides and teardown as startFeedServer.
+// Use it when a test needs config keys that have no DIYDDNS_* override worth
+// spelling out (nested sections such as agent.tls). extraEnv appends further
+// KEY=VALUE entries after the defaults, so a later entry wins.
+func startServerWithYAML(t *testing.T, bin, addr, yaml string, extraEnv ...string) *server {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "smoke.db")
+
+	s := &server{}
+	cmd := exec.Command(bin, "serve", "--config", configPath)
+	cmd.Env = append(os.Environ(),
+		"DIYDDNS_SERVER_LISTEN="+addr,
+		"DIYDDNS_SERVER_BASE_URL="+browserBaseURL(t, addr),
+		"DIYDDNS_DATABASE_PATH="+dbPath,
+		"DIYDDNS_AUTH_HMAC_SECRET_KEY="+randomKeyB64(t),
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	cmd.Stdout = s
+	cmd.Stderr = s
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	s.cmd = cmd
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+		if t.Failed() {
+			t.Logf("--- server log ---\n%s", s.log())
+		}
+	})
+	return s
+}
