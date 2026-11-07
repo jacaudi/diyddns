@@ -44,6 +44,12 @@ type Device struct {
 	// tie-break plus a rule for which contacts reset it.
 	V4WarnLevel int
 	V6WarnLevel int
+
+	// CertSerial (lowercase hex; "" when NULL) and CertNotAfter (unix seconds;
+	// 0 when NULL) record the device's current agent mTLS certificate (#173).
+	// Public material only; the device key never reaches the server.
+	CertSerial   string
+	CertNotAfter int64
 }
 
 // DeviceRepo provides persistence operations for Device records.
@@ -78,7 +84,8 @@ func scanInt64(n sql.NullInt64) int64 {
 const deviceColumns = `id, user_id, label, secret_hash,
 	current_ipv4, current_ipv6, hostname, os, client_version,
 	last_seen_at, disabled, created_at, updated_at,
-	v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level`
+	v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level,
+	cert_serial, cert_not_after`
 
 func scanDevice(row interface {
 	Scan(dest ...any) error
@@ -89,6 +96,8 @@ func scanDevice(row interface {
 	var disabled int64
 	var v4Conf, v6Conf sql.NullInt64
 	var v4Level, v6Level int64
+	var certSerial sql.NullString
+	var certNotAfter sql.NullInt64
 
 	err := row.Scan(
 		&d.ID,
@@ -108,6 +117,8 @@ func scanDevice(row interface {
 		&v6Conf,
 		&v4Level,
 		&v6Level,
+		&certSerial,
+		&certNotAfter,
 	)
 	if err != nil {
 		return Device{}, err
@@ -123,6 +134,8 @@ func scanDevice(row interface {
 	d.V6ConfirmedAt = scanInt64(v6Conf)
 	d.V4WarnLevel = int(v4Level)
 	d.V6WarnLevel = int(v6Level)
+	d.CertSerial = scanString(certSerial)
+	d.CertNotAfter = scanInt64(certNotAfter)
 	return d, nil
 }
 
@@ -614,4 +627,86 @@ func (r *DeviceRepo) ExpireFamilies(ctx context.Context, id string, v4Due, v6Due
 		return 0, false, fmt.Errorf("devices.ExpireFamilies: commit: %w", err)
 	}
 	return row.ID, true, nil
+}
+
+// SetCert records the device's current agent certificate unconditionally,
+// replacing any recorded one. Returns ErrNotFound if no row matched.
+func (r *DeviceRepo) SetCert(ctx context.Context, id, serial string, notAfter int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET cert_serial = ?, cert_not_after = ?, updated_at = ? WHERE id = ?`,
+		serial, notAfter, NowUnix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("devices.SetCert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("devices.SetCert: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("devices.SetCert: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// SetCertIfNoLive records the device's agent certificate only if none is
+// recorded or the recorded one has expired (cert_not_after <= now). It is one
+// statement, so of two racing issuances exactly one wins. Returns ErrConflict
+// when a live certificate is recorded, ErrNotFound when the device is absent.
+func (r *DeviceRepo) SetCertIfNoLive(ctx context.Context, id, serial string, notAfter, now int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET cert_serial = ?, cert_not_after = ?, updated_at = ?
+		  WHERE id = ? AND (cert_serial IS NULL OR cert_not_after <= ?)`,
+		serial, notAfter, NowUnix(), id, now,
+	)
+	if err != nil {
+		return fmt.Errorf("devices.SetCertIfNoLive: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("devices.SetCertIfNoLive: RowsAffected: %w", err)
+	}
+	if n == 1 {
+		return nil
+	}
+	if err := r.mustExist(ctx, id); err != nil {
+		return fmt.Errorf("devices.SetCertIfNoLive: %w", err)
+	}
+	return fmt.Errorf("devices.SetCertIfNoLive: %w", ErrConflict)
+}
+
+// ClearCert forgets the device's recorded agent certificate. cleared is false
+// when none was recorded. Returns ErrNotFound if the device is absent.
+func (r *DeviceRepo) ClearCert(ctx context.Context, id string) (cleared bool, err error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET cert_serial = NULL, cert_not_after = NULL, updated_at = ?
+		  WHERE id = ? AND cert_serial IS NOT NULL`,
+		NowUnix(), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("devices.ClearCert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("devices.ClearCert: RowsAffected: %w", err)
+	}
+	if n == 1 {
+		return true, nil
+	}
+	if err := r.mustExist(ctx, id); err != nil {
+		return false, fmt.Errorf("devices.ClearCert: %w", err)
+	}
+	return false, nil
+}
+
+// mustExist returns ErrNotFound if no device has this id. It tells an
+// UPDATE that matched 0 rows because of its guard apart from one that matched
+// 0 rows because the device is gone.
+func (r *DeviceRepo) mustExist(ctx context.Context, id string) error {
+	var one int
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM devices WHERE id = ?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
 }
