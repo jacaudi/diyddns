@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/agenttls"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -35,7 +36,11 @@ var pruneBatchSize = 5000
 // sw is nil when the #127 staleness policy is off (feed disabled, or
 // expire_after_days 0), which is the default install. The nil check is here
 // rather than a no-op implementation because there is exactly one call site.
-func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection, sw *sweeper, log *slog.Logger) {
+//
+// serving is the agent listener's serving certificate, nil when the listener is
+// off. Every tick checks its renewal window via refreshServing, which makes this
+// loop the only caller of ServingCert.Refresh after startup.
+func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection, sw *sweeper, serving *agenttls.ServingCert, log *slog.Logger) {
 	tick := time.Tick(prunerInterval)
 	for {
 		select {
@@ -48,6 +53,7 @@ func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection
 					log.LogAttrs(ctx, slog.LevelWarn, "staleness sweep failed", slog.Any("error", err))
 				}
 			}
+			refreshServing(ctx, serving, time.Now(), log)
 		}
 	}
 }

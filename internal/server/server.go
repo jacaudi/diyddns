@@ -12,12 +12,14 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
+	"github.com/jacaudi/diyddns/internal/server/agenttls"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/server/feed"
 	"github.com/jacaudi/diyddns/internal/server/middleware"
@@ -113,14 +115,16 @@ func (NopInstruments) ObserveDB(*sql.DB) {}
 
 // Server owns the HTTP server lifecycle.
 type Server struct {
-	httpServer *http.Server
-	log        *slog.Logger
-	st         *store.Store
-	oidcMgr    *oidc.Manager
-	notifier   *notify.Worker // nil when notifications are disabled
-	hub        *feed.Hub      // always non-nil; closes live streams on shutdown
-	retention  config.RetentionSection
-	sweeper    *sweeper // nil unless the #127 policy is on (buildSweeper's gate); nil-guarded by runPruner
+	httpServer  *http.Server
+	agentServer *http.Server // nil unless agent.listen is set
+	agent       *agentStack  // nil unless agent.listen is set; owns the agent.tls.dir lock
+	log         *slog.Logger
+	st          *store.Store
+	oidcMgr     *oidc.Manager
+	notifier    *notify.Worker // nil when notifications are disabled
+	hub         *feed.Hub      // always non-nil; closes live streams on shutdown
+	retention   config.RetentionSection
+	sweeper     *sweeper // nil unless the #127 policy is on (buildSweeper's gate); nil-guarded by runPruner
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -135,8 +139,12 @@ type Server struct {
 // It also returns the api.ServerDeps and webui.Deps it built, so tests can
 // prove the two adapters share one instance per service rather than each
 // building its own (see webui.Deps's doc comment and the "One construction
-// site per service" comment below) — production callers (handler) discard
-// them.
+// site per service" comment below). handler reuses the api.ServerDeps for the
+// agent listener's mux and discards the webui.Deps.
+//
+// ca is the agent CA, nil unless the agent listener is enabled. When set,
+// buildMux wires the device-certificate service and advertises the agent URL;
+// RequireMTLS follows cfg either way.
 //
 // It also returns the #127 staleness sweeper, nil unless cfg.Feed.ExpiryEnabled()
 // (see buildSweeper's gate); handler threads it through to New, which hands it
@@ -147,7 +155,7 @@ type Server struct {
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, *sweeper, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls.CA) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, *sweeper, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
 		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: %w", err)
@@ -293,6 +301,11 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger) (*http.Serve
 		Feed:        feedSvc,
 		FeedEnabled: cfg.Feed.Enabled,
 		APIKeys:     apiKeySvc,
+		RequireMTLS: cfg.Agent.RequireMTLS,
+	}
+	if ca != nil {
+		apiDeps.Cert = service.NewCertService(st, ca, cfg.Agent.PublicURL, audit)
+		apiDeps.AgentURL = cfg.Agent.PublicURL
 	}
 	api.Build(mux, apiDeps)
 
@@ -441,10 +454,14 @@ func registerFeed(mux *http.ServeMux, cfg config.Server, st *store.Store, feedAu
 // working no-op) when disabled, so callers pass it unconditionally;
 // NopInstruments{} is for tests and other callers that hold no
 // *telemetry.Providers at all.
-func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, *sweeper, error) {
-	mux, oidcMgr, _, webDeps, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log)
+//
+// The second return is the agent listener's handler: the agent mux behind
+// api.ClientCertMiddleware inside the same middleware chain. It is nil when ca
+// is nil (agent listener disabled).
+func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments, ca *agenttls.CA) (http.Handler, http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, *sweeper, error) {
+	mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log, ca)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	// A genuinely unmatched webui-space request must redirect to /login
 	// (unauthenticated) or the app's own 404 page (authenticated) instead of
@@ -475,12 +492,25 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 	// RequestID sits outside Trace too, and that ordering is unconstrained by
 	// the AccessLog hazard above: nothing in Trace reads the request id, and
 	// RequestID's own r.WithContext is already outside AccessLog either way.
-	return middleware.Chain(wrapped,
-		middleware.RequestID(cfg.Observability.RequestIDHeader),
-		middleware.Trace(inst.Tracer(), inst.RequestDuration()),
-		middleware.AccessLog(log),
-		middleware.Recover(log),
-	), oidcMgr, allowedPrivateCIDRs, hub, sw, nil
+	chain := func(h http.Handler) http.Handler {
+		return middleware.Chain(h,
+			middleware.RequestID(cfg.Observability.RequestIDHeader),
+			middleware.Trace(inst.Tracer(), inst.RequestDuration()),
+			middleware.AccessLog(log),
+			middleware.Recover(log),
+		)
+	}
+	if ca == nil {
+		return chain(wrapped), nil, oidcMgr, allowedPrivateCIDRs, hub, sw, nil
+	}
+	// The agent mux is wrapped by ClientCertMiddleware directly, with nothing
+	// between it and AccessLog: the middleware forwards r untouched, and the
+	// mux must annotate the very request AccessLog holds (see above) and keep
+	// the r.TLS the certificate check reads.
+	agentMux := http.NewServeMux()
+	api.BuildAgent(agentMux, apiDeps)
+	agentHandler := chain(api.ClientCertMiddleware(ca, st.Devices(), log)(agentMux))
+	return chain(wrapped), agentHandler, oidcMgr, allowedPrivateCIDRs, hub, sw, nil
 }
 
 // Handler builds the fully-wrapped http.Handler (see handler) and returns the
@@ -489,7 +519,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 // route can. The OIDC manager and sweeper are only needed by New/Run, so this
 // discards them.
 func Handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *feed.Hub, error) {
-	h, _, _, hub, _, err := handler(cfg, st, log, inst)
+	h, _, _, _, hub, _, err := handler(cfg, st, log, inst, nil)
 	return h, hub, err
 }
 
@@ -497,12 +527,33 @@ func Handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 // OIDC, and service dependency graph via handler. Returns an error if
 // cfg.Auth.HMAC.SecretKey is missing or invalid, or OIDC is required but
 // unreachable (fail-closed).
-func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (*Server, error) {
+//
+// With agent.listen set it also takes the agent.tls.dir lock, loads the CA and
+// serving certificate (setupAgent) and builds the agent listener. The lock then
+// lives as long as the Server: Run releases it after both listeners have shut
+// down, and any failure here releases it before returning.
+func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (_ *Server, err error) {
+	setupCtx, cancel := context.WithTimeout(context.Background(), agentSetupTimeout)
+	defer cancel()
+	stack, err := setupAgent(setupCtx, cfg, st, log)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			stack.release()
+		}
+	}()
+	var ca *agenttls.CA
+	if stack != nil {
+		ca = stack.ca
+	}
+
 	// allowedPrivateCIDRs is parsed once inside handler->buildMux and returned
 	// here rather than re-parsed: commit 74930fa claimed this reuse without
 	// actually doing it (New called notify.ParseAllowed a second time on the
 	// same config value), so this is now the genuine single call.
-	h, mgr, allowedPrivateCIDRs, hub, sw, err := handler(cfg, st, log, inst)
+	h, agentHandler, mgr, allowedPrivateCIDRs, hub, sw, err := handler(cfg, st, log, inst, ca)
 	if err != nil {
 		return nil, err
 	}
@@ -528,27 +579,43 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		log:       log,
-		st:        st,
-		oidcMgr:   mgr,
-		notifier:  notifier,
-		hub:       hub,
-		retention: cfg.Retention,
-		sweeper:   sw,
+		agentServer: buildAgentServer(cfg, agentHandler, stack, log),
+		agent:       stack,
+		log:         log,
+		st:          st,
+		oidcMgr:     mgr,
+		notifier:    notifier,
+		hub:         hub,
+		retention:   cfg.Retention,
+		sweeper:     sw,
 	}, nil
 }
 
-// Run starts the listener and blocks until ctx is cancelled, then gracefully
-// drains in-flight requests. Returns nil on a clean shutdown.
+// Run starts the listeners and blocks until ctx is cancelled or either
+// listener fails, then gracefully drains in-flight requests on both and the
+// stream hub. Returns nil on a clean shutdown after ctx is cancelled, and
+// "server: listen: ..." when a listener failed: serving half the API is worse
+// than serving none, so one failure takes the whole process down.
 func (s *Server) Run(ctx context.Context) error {
-	errCh := make(chan error, 1)
+	// Cancelled on return, so the background workers below stop with the
+	// listeners rather than outliving the lock Run releases.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+
+	errCh := make(chan error, 2)
 	go func() {
 		s.log.LogAttrs(ctx, slog.LevelInfo, "server listening", slog.String("addr", s.httpServer.Addr))
-		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
+		reportListen(errCh, s.httpServer.ListenAndServe())
 	}()
-	go runPruner(ctx, s.st, s.retention, s.sweeper, s.log)
+	var serving *agenttls.ServingCert
+	if s.agentServer != nil {
+		serving = s.agent.serving
+		go func() {
+			s.log.LogAttrs(ctx, slog.LevelInfo, "agent listener", slog.String("addr", s.agentServer.Addr))
+			reportListen(errCh, s.agentServer.ListenAndServeTLS("", ""))
+		}()
+	}
+	go runPruner(ctx, s.st, s.retention, s.sweeper, serving, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 	if s.notifier != nil {
 		go s.notifier.Run(ctx)
@@ -556,24 +623,55 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
+		stop()
+		// The listener failure is the error worth returning; a drain error on
+		// top of it is logged, not lost.
+		if shutErr := s.shutdown(ctx); shutErr != nil {
+			s.log.LogAttrs(ctx, slog.LevelWarn, "shutdown after listener failure incomplete", slog.Any("error", shutErr))
+		}
 		return fmt.Errorf("server: listen: %w", err)
 	case <-ctx.Done():
 		s.log.LogAttrs(ctx, slog.LevelInfo, "server shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		// http.Server.Shutdown ignores hijacked connections, so the hub's
-		// shutdown is the only thing that closes live streams. The two run
-		// concurrently and BOTH are waited for; an error from either is
-		// collected, not returned early.
-		hubErr := make(chan error, 1)
-		go func() { hubErr <- s.hub.Shutdown(shutdownCtx) }()
-		httpErr := s.httpServer.Shutdown(shutdownCtx)
-		if err := <-hubErr; err != nil {
-			s.log.LogAttrs(ctx, slog.LevelWarn, "feed hub shutdown incomplete", slog.Any("error", err))
-		}
-		if httpErr != nil {
-			return fmt.Errorf("server: shutdown: %w", httpErr)
-		}
-		return nil
+		return s.shutdown(ctx)
 	}
+}
+
+// reportListen forwards a listener's exit to errCh unless it is the clean
+// http.ErrServerClosed that Shutdown produces.
+func reportListen(errCh chan<- error, err error) {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errCh <- err
+	}
+}
+
+// shutdown drains the main listener, the agent listener and the stream hub
+// concurrently under one shutdownTimeout, waits for all of them, and only then
+// releases the agent.tls.dir lock, so no listener can still be using the
+// directory when another process takes it.
+//
+// http.Server.Shutdown ignores hijacked connections, so the hub's shutdown is
+// the only thing that closes live streams. An error from any of the three is
+// collected, not returned early; a hub error is logged and the server errors
+// are returned.
+func (s *Server) shutdown(ctx context.Context) error {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+
+	var hubErr, mainErr, agentErr error
+	var wg sync.WaitGroup
+	wg.Go(func() { hubErr = s.hub.Shutdown(shutdownCtx) })
+	wg.Go(func() { mainErr = s.httpServer.Shutdown(shutdownCtx) })
+	if s.agentServer != nil {
+		wg.Go(func() { agentErr = s.agentServer.Shutdown(shutdownCtx) })
+	}
+	wg.Wait()
+	s.agent.release()
+
+	if hubErr != nil {
+		s.log.LogAttrs(ctx, slog.LevelWarn, "feed hub shutdown incomplete", slog.Any("error", hubErr))
+	}
+	if err := errors.Join(mainErr, agentErr); err != nil {
+		return fmt.Errorf("server: shutdown: %w", err)
+	}
+	return nil
 }
