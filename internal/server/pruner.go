@@ -11,12 +11,22 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// prunerInterval is how often the background pruner sweeps. It is deliberately
-// a constant and deliberately does NOT join the retention.* config section:
-// retention windows are day-granular, so an hourly sweep is already 24x finer
-// than the finest policy any operator can express, and no present requirement
-// is served by making it configurable.
-const prunerInterval = time.Hour
+// prunerInterval is how often the background pruner sweeps. It deliberately
+// does NOT join the retention.* config section: retention windows are
+// day-granular, so an hourly sweep is already 24x finer than the finest policy
+// any operator can express, and no present requirement is served by making it
+// configurable.
+//
+// It is a var rather than a const solely so the shutdown-ordering test can make
+// the pruner tick; any test that writes it MUST restore it via t.Cleanup (see
+// pruneBatchSize) and must do so only after Run has returned, since Run's
+// pruner goroutine reads it.
+var prunerInterval = time.Hour
+
+// pruneRefreshServing is the agent serving certificate refresh the pruner runs
+// each tick. A var solely so the shutdown-ordering test can hold the pruner
+// mid-tick; production never reassigns it. Same restore rule as prunerInterval.
+var pruneRefreshServing = refreshServing
 
 // pruneBatchSize bounds how many rows a single retention DELETE removes, so a
 // sweep of a large backlog cannot monopolise the process's single SQLite
@@ -53,7 +63,7 @@ func runPruner(ctx context.Context, st *store.Store, ret config.RetentionSection
 					log.LogAttrs(ctx, slog.LevelWarn, "staleness sweep failed", slog.Any("error", err))
 				}
 			}
-			refreshServing(ctx, serving, time.Now(), log)
+			pruneRefreshServing(ctx, serving, time.Now(), log)
 		}
 	}
 }

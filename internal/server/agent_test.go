@@ -328,6 +328,52 @@ func TestNew_AgentEnabledHoldsLock(t *testing.T) {
 	assertLockFree(t, dir)
 }
 
+// A pruner tick that is mid-refresh when shutdown starts writes agent.key and
+// agent.crt, so Run must wait for it before dropping the agent.tls.dir lock.
+func TestRun_WaitsForPrunerBeforeReleasingLock(t *testing.T) {
+	cfg, dir := agentTestConfig(t)
+	s := newAgentServer(t, cfg, openFileStore(t, cfg.Database.Path), discardLog())
+
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	var enterOnce, openOnce sync.Once
+	open := func() { openOnce.Do(func() { close(gate) }) }
+	oldInterval, oldRefresh := prunerInterval, pruneRefreshServing
+	t.Cleanup(func() { prunerInterval, pruneRefreshServing = oldInterval, oldRefresh })
+	prunerInterval = 5 * time.Millisecond
+	pruneRefreshServing = func(context.Context, *agenttls.ServingCert, time.Time, *slog.Logger) {
+		enterOnce.Do(func() { close(entered) })
+		<-gate
+	}
+	// Registered after the restore above, so it runs first: a failing test must
+	// not leave the pruner parked while runServer's cleanup waits on Run.
+	t.Cleanup(open)
+
+	cancel, done := runServer(t, s)
+	waitDial(t, cfg.Server.Listen)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pruner never reached the serving certificate refresh")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned (%v) while the pruner was still mid-refresh", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := agenttls.AcquireLock(dir); !errors.Is(err, agenttls.ErrLocked) {
+		t.Fatalf("AcquireLock while the pruner is mid-refresh = %v, want ErrLocked", err)
+	}
+
+	open()
+	if err := awaitRun(t, done); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	assertLockFree(t, dir)
+}
+
 func TestNew_ReleasesLockWhenHandlerFails(t *testing.T) {
 	cfg, dir := agentTestConfig(t)
 	cfg.Auth.HMAC.SecretKey = "not a key"
