@@ -14,6 +14,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/client/checkin"
 	"github.com/jacaudi/diyddns/internal/client/credentials"
 	"github.com/jacaudi/diyddns/internal/client/ipdiscovery"
+	"github.com/jacaudi/diyddns/internal/client/mtls"
 	"github.com/jacaudi/diyddns/internal/client/poller"
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -26,31 +27,21 @@ func newRunCmd() *cobra.Command {
 		caCert     string
 		credFile   string
 		configFile string
+		insecure   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Discover this host's public IP and report it to the diyddns server",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			v := viper.New()
-			if err := v.BindPFlag("run.interval", cmd.Flags().Lookup("interval")); err != nil {
-				return err
-			}
-			if err := v.BindPFlag("server.ca_bundle", cmd.Flags().Lookup("ca-cert")); err != nil {
-				return err
-			}
-			cfg, err := config.LoadClient(v, configFile)
+			cfg, err := loadRunConfig(cmd, configFile)
 			if err != nil {
 				return err
 			}
 
-			credPath := credFile
-			if credPath == "" {
-				dp, err := credentials.DefaultPath()
-				if err != nil {
-					return err
-				}
-				credPath = dp
+			credPath, err := resolveCredPath(credFile)
+			if err != nil {
+				return err
 			}
 			creds, err := credentials.Load(credPath)
 			if err != nil {
@@ -64,15 +55,22 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			chk, err := checkin.NewClient(creds.ServerURL, creds.DeviceID, creds.Secret,
-				checkin.Options{CACertPath: cfg.Server.CABundle})
+			logger := newClientLogger(cfg.Logging)
+			mgr, err := mtls.NewManager(mtls.Config{
+				StatePath:         mtls.PathFor(credPath),
+				Creds:             creds,
+				CACertPath:        cfg.Server.CABundle,
+				InsecureProvision: cfg.Run.InsecureProvision,
+				Log:               logger,
+				Now:               time.Now,
+			})
 			if err != nil {
 				return err
 			}
 			host, _ := os.Hostname()
-			p := poller.New(disc, chk, poller.Options{
+			p := poller.New(disc, mgr, poller.Options{
 				Interval:      cfg.Run.Interval,
-				Logger:        newClientLogger(cfg.Logging),
+				Logger:        logger,
 				Hostname:      host,
 				OS:            runtime.GOOS,
 				ClientVersion: version.Current().Version,
@@ -88,7 +86,32 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&caCert, "ca-cert", "", "PEM CA bundle to trust (self-signed servers)")
 	cmd.Flags().StringVar(&credFile, "credentials-file", "", "path to credentials.json (default: user config dir)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to client config.yaml")
+	cmd.Flags().BoolVar(&insecure, "insecure-provision", false, "allow provisioning an mTLS certificate over a plain http:// server URL")
 	return cmd
+}
+
+// loadRunConfig builds the client config for `run`: flags bound over the
+// config file and env.
+func loadRunConfig(cmd *cobra.Command, configFile string) (config.ClientConfig, error) {
+	v := viper.New()
+	if err := v.BindPFlag("run.interval", cmd.Flags().Lookup("interval")); err != nil {
+		return config.ClientConfig{}, err
+	}
+	if err := v.BindPFlag("server.ca_bundle", cmd.Flags().Lookup("ca-cert")); err != nil {
+		return config.ClientConfig{}, err
+	}
+	if err := v.BindPFlag("run.insecure_provision", cmd.Flags().Lookup("insecure-provision")); err != nil {
+		return config.ClientConfig{}, err
+	}
+	return config.LoadClient(v, configFile)
+}
+
+// resolveCredPath returns the --credentials-file value, or the per-user default.
+func resolveCredPath(flag string) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	return credentials.DefaultPath()
 }
 
 // explainRunError turns the poller's credential rejection into the message an
@@ -96,6 +119,9 @@ func newRunCmd() *cobra.Command {
 // "unauthorized". The wrapped sentinel is preserved so errors.Is still holds.
 // Every other error — and nil — passes through untouched.
 func explainRunError(err error, serverURL string) error {
+	if errors.Is(err, checkin.ErrMTLSRequired) {
+		return fmt.Errorf("%w. This client is too old or not provisioned for mTLS: upgrade diyddns-client, and check that it can reach the agent port advertised by %s", err, serverURL)
+	}
 	if err == nil || !errors.Is(err, checkin.ErrUnauthorized) {
 		return err
 	}

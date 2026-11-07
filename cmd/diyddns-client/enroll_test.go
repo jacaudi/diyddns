@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/client/credentials"
 	"github.com/jacaudi/diyddns/internal/client/enroll"
+	"github.com/jacaudi/diyddns/internal/client/mtls"
 )
 
 // oidcMockServer answers capabilities + start + (first-poll) success.
@@ -165,7 +169,11 @@ func TestFinishEnroll_RequiresServer(t *testing.T) {
 func TestFinishEnroll_SavesOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	credPath := filepath.Join(dir, "credentials.json")
-	p := enrollParams{out: &nopWriter{}, server: "https://srv/", credFile: credPath}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`)) // capabilities: no agent_mtls
+	}))
+	defer srv.Close()
+	p := enrollParams{out: &nopWriter{}, server: srv.URL + "/", credFile: credPath}
 	err := finishEnroll(t.Context(), p, func(context.Context, *enroll.Client) (enroll.Result, error) {
 		return enroll.Result{DeviceID: "dev-1", Secret: "c2VjcmV0"}, nil
 	})
@@ -179,14 +187,18 @@ func TestFinishEnroll_SavesOnSuccess(t *testing.T) {
 	if got.DeviceID != "dev-1" || got.Secret != "c2VjcmV0" {
 		t.Errorf("saved creds = %+v", got)
 	}
-	if got.ServerURL != "https://srv" { // trailing slash normalized off
-		t.Errorf("ServerURL = %q, want https://srv", got.ServerURL)
+	if got.ServerURL != srv.URL { // trailing slash normalized off
+		t.Errorf("ServerURL = %q, want %q", got.ServerURL, srv.URL)
 	}
 }
 
 func TestEnrollCmd_Code_EndToEnd(t *testing.T) {
 	var gotCode string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/agent/v1/capabilities" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
 		var body struct {
 			Code string `json:"code"`
 		}
@@ -215,6 +227,69 @@ func TestEnrollCmd_Code_EndToEnd(t *testing.T) {
 	}
 	if creds.DeviceID != "dev-code" {
 		t.Errorf("DeviceID = %q, want dev-code", creds.DeviceID)
+	}
+}
+
+// codeEnrollServer answers capabilities with caps and the code-enroll POST with
+// a fixed device, like TestEnrollCmd_Code_EndToEnd.
+func codeEnrollServer(t *testing.T, caps string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/agent/v1/capabilities" {
+			_, _ = w.Write([]byte(caps))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"device_id": "dev-code", "secret": base64.StdEncoding.EncodeToString([]byte("k")),
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestEnrollForce_DeletesMTLSState(t *testing.T) {
+	srv := codeEnrollServer(t, `{}`)
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := credentials.Save(credPath, credentials.Credentials{ServerURL: srv.URL, DeviceID: "old", Secret: "c2VjcmV0"}, false); err != nil {
+		t.Fatal(err)
+	}
+	statePath := mtls.PathFor(credPath)
+	if err := os.WriteFile(statePath, []byte(`{"device_id":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newEnrollCmd()
+	cmd.SetArgs([]string{"--force", "--code", "ABC-123", "--server", srv.URL, "--credentials-file", credPath})
+	cmd.SetErr(&nopWriter{})
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("enroll --force: %v", err)
+	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("mtls.json still present after enroll --force (stat err = %v)", err)
+	}
+}
+
+func TestEnroll_ProvisionFailureIsWarningNotError(t *testing.T) {
+	// agent_mtls advertised, but the server is plain http:// and no
+	// --insecure-provision: provisioning is refused; enrollment must still succeed.
+	srv := codeEnrollServer(t, `{"agent_mtls":{"agent_url":"https://127.0.0.1:1"}}`)
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+
+	var stderr bytes.Buffer
+	cmd := newEnrollCmd()
+	cmd.SetArgs([]string{"--code", "ABC-123", "--server", srv.URL, "--credentials-file", credPath})
+	cmd.SetErr(&stderr)
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("enroll must exit 0 when provisioning fails: %v", err)
+	}
+	for _, want := range []string{"warning: mTLS not provisioned", "--insecure-provision"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+		}
+	}
+	if _, err := credentials.Load(credPath); err != nil {
+		t.Errorf("credentials not saved: %v", err)
 	}
 }
 

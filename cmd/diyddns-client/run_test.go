@@ -34,6 +34,10 @@ func TestRunCmd_Once_EndToEnd(t *testing.T) {
 	// Fake diyddns server: verify signature, return checkin response.
 	var gotDevice string
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/agent/v1/capabilities" { // unsigned; no agent_mtls, so the device stays on the main port
+			_, _ = w.Write([]byte(`{"server_version":"test"}`))
+			return
+		}
 		gotDevice = r.Header.Get(shared.HeaderDevice)
 		body, _ := io.ReadAll(r.Body)
 		// Reconstruct and verify the client's signature exactly as the real
@@ -150,6 +154,45 @@ func TestExplainRunError_RejectedCredentialNamesTheRemedy(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q lacks %q", msg, want)
 		}
+	}
+}
+
+func TestExplainRunError_MTLSRequired(t *testing.T) {
+	in := fmt.Errorf("poller: %w", fmt.Errorf("%w: upgrade this client", checkin.ErrMTLSRequired))
+	out := explainRunError(in, "https://ddns.example.com")
+	if !errors.Is(out, checkin.ErrMTLSRequired) {
+		t.Fatalf("explained error must still match checkin.ErrMTLSRequired, got %v", out)
+	}
+	msg := out.Error()
+	if n := strings.Count(msg, "server requires mTLS"); n != 1 {
+		t.Errorf("message %q has %d occurrences of %q, want 1", msg, n, "server requires mTLS")
+	}
+	for _, want := range []string{"upgrade diyddns-client", "https://ddns.example.com"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+}
+
+func TestRunFlags_InsecureProvisionBound(t *testing.T) {
+	cmd := newRunCmd()
+	if err := cmd.Flags().Set("insecure-provision", "true"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadRunConfig(cmd, "")
+	if err != nil {
+		t.Fatalf("loadRunConfig: %v", err)
+	}
+	if !cfg.Run.InsecureProvision {
+		t.Error("InsecureProvision = false with --insecure-provision set, want true")
+	}
+
+	cfg, err = loadRunConfig(newRunCmd(), "")
+	if err != nil {
+		t.Fatalf("loadRunConfig (no flag): %v", err)
+	}
+	if cfg.Run.InsecureProvision {
+		t.Error("InsecureProvision = true without the flag, want false")
 	}
 }
 

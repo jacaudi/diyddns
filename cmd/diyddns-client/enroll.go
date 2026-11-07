@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"github.com/jacaudi/diyddns/internal/client/credentials"
 	"github.com/jacaudi/diyddns/internal/client/enroll"
+	"github.com/jacaudi/diyddns/internal/client/mtls"
 	"github.com/jacaudi/diyddns/internal/config"
 )
 
@@ -26,6 +29,7 @@ func newEnrollCmd() *cobra.Command {
 		force      bool
 		credFile   string
 		configFile string
+		insecure   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "enroll",
@@ -39,6 +43,9 @@ func newEnrollCmd() *cobra.Command {
 			if err := v.BindPFlag("server.ca_bundle", cmd.Flags().Lookup("ca-cert")); err != nil {
 				return err
 			}
+			if err := v.BindPFlag("run.insecure_provision", cmd.Flags().Lookup("insecure-provision")); err != nil {
+				return err
+			}
 			cfg, err := config.LoadClient(v, configFile)
 			if err != nil {
 				return err
@@ -49,6 +56,9 @@ func newEnrollCmd() *cobra.Command {
 				caCert:   cfg.Server.CABundle,
 				force:    force,
 				credFile: credFile,
+
+				insecureProvision: cfg.Run.InsecureProvision,
+				log:               newClientLogger(cfg.Logging),
 			}
 			// Dispatch on cmd.Flags().Changed, not on the flag's value: cobra's
 			// MarkFlagsOneRequired is satisfied by an explicitly-set-but-empty flag
@@ -80,6 +90,7 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing credentials.json")
 	cmd.Flags().StringVar(&credFile, "credentials-file", "", "path to credentials.json (default: user config dir)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to client config.yaml")
+	cmd.Flags().BoolVar(&insecure, "insecure-provision", false, "allow provisioning an mTLS certificate over a plain http:// server URL")
 	cmd.MarkFlagsMutuallyExclusive("oidc", "code")
 	cmd.MarkFlagsOneRequired("oidc", "code")
 	return cmd
@@ -91,6 +102,9 @@ type enrollParams struct {
 	caCert   string
 	force    bool
 	credFile string
+
+	insecureProvision bool
+	log               *slog.Logger
 }
 
 // finishEnroll is the shared orchestration for every enroll mode. It resolves the
@@ -99,13 +113,9 @@ type enrollParams struct {
 // and requires the server URL, builds the enroll client, runs the mode-specific
 // operation, and persists the resulting credentials.
 func finishEnroll(ctx context.Context, p enrollParams, do func(context.Context, *enroll.Client) (enroll.Result, error)) error {
-	credPath := p.credFile
-	if credPath == "" {
-		dp, err := credentials.DefaultPath()
-		if err != nil {
-			return err
-		}
-		credPath = dp
+	credPath, err := resolveCredPath(p.credFile)
+	if err != nil {
+		return err
 	}
 
 	// Guard existing credentials BEFORE contacting the server, so a re-enroll
@@ -133,15 +143,44 @@ func finishEnroll(ctx context.Context, p enrollParams, do func(context.Context, 
 	if err != nil {
 		return err
 	}
-	if err := credentials.Save(credPath, credentials.Credentials{
+	creds := credentials.Credentials{
 		ServerURL: p.server,
 		DeviceID:  res.DeviceID,
 		Secret:    res.Secret,
-	}, p.force); err != nil {
+	}
+	if err := credentials.Save(credPath, creds, p.force); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(p.out, "Device %s enrolled. Credentials written to %s\n", res.DeviceID, credPath)
+	// The device is enrolled; a certificate that cannot be provisioned now is
+	// retried by `run`, so it is a warning, never an enroll failure.
+	if err := provisionMTLS(ctx, p, credPath, creds); err != nil {
+		_, _ = fmt.Fprintf(p.out, "warning: mTLS not provisioned: %v\n", err)
+	}
 	return nil
+}
+
+// provisionMTLS drops any mTLS state of the replaced enrollment (--force), then
+// provisions a certificate for the credentials just saved.
+func provisionMTLS(ctx context.Context, p enrollParams, credPath string, creds credentials.Credentials) error {
+	statePath := mtls.PathFor(credPath)
+	if p.force {
+		if err := mtls.Remove(statePath); err != nil {
+			return err
+		}
+	}
+	m, err := mtls.NewManager(mtls.Config{
+		StatePath:         statePath,
+		Creds:             creds,
+		CACertPath:        p.caCert,
+		InsecureProvision: p.insecureProvision,
+		Log:               p.log,
+		Now:               time.Now,
+	})
+	if err != nil {
+		return err
+	}
+	return m.Provision(ctx)
 }
 
 // runOIDCEnroll runs the OIDC device-code flow through the shared orchestrator.
