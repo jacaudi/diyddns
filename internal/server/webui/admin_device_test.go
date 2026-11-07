@@ -233,3 +233,84 @@ func TestAdminDevice_OwnerOnlyActionsAreNotRouted(t *testing.T) {
 		t.Errorf("the device was modified: %+v", got)
 	}
 }
+
+func TestAdminDevice_ResetCertificateShownWhenIssued(t *testing.T) {
+	deps, st, cookie, _, _, dev := adminDeviceFixture(t)
+	h, _ := New(deps)
+	if err := st.Devices().SetCert(t.Context(), dev.ID, "ab12", store.NowUnix()+3600); err != nil {
+		t.Fatalf("SetCert: %v", err)
+	}
+
+	body := getPage(t, h, cookie, "/admin/devices/"+dev.ID).Body.String()
+	for _, want := range []string{
+		`action="/admin/devices/` + dev.ID + `/cert/clear"`,
+		"Reset certificate",
+		"on its next check-in",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+func TestAdminDevice_ResetCertificateHiddenWhenNone(t *testing.T) {
+	deps, _, cookie, _, _, dev := adminDeviceFixture(t)
+	h, _ := New(deps)
+
+	body := getPage(t, h, cookie, "/admin/devices/"+dev.ID).Body.String()
+	for _, forbidden := range []string{"/cert/clear", "Reset certificate"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("body must not contain %q when no certificate is recorded", forbidden)
+		}
+	}
+}
+
+func TestAdminDevice_ClearCertRedirects(t *testing.T) {
+	deps, st, cookie, sess, _, dev := adminDeviceFixture(t)
+	h, _ := New(deps)
+	if err := st.Devices().SetCert(t.Context(), dev.ID, "ab12", store.NowUnix()+3600); err != nil {
+		t.Fatalf("SetCert: %v", err)
+	}
+
+	rec := postForm(t, h, cookie, "/admin/devices/"+dev.ID+"/cert/clear", url.Values{"csrf": {sess.CSRFToken}})
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/devices/"+dev.ID {
+		t.Fatalf("clear = %d → %q, want 303 → /admin/devices/%s", rec.Code, rec.Header().Get("Location"), dev.ID)
+	}
+	got, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil || got.CertSerial != "" {
+		t.Fatalf("CertSerial = %q (%v), want cleared", got.CertSerial, err)
+	}
+	page, err := st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "device.cert_cleared"}, "", 10)
+	if err != nil || len(page.Rows) != 1 || page.Rows[0].IP != "127.0.0.1" {
+		t.Fatalf("device.cert_cleared rows = %+v (%v), want one carrying the session IP 127.0.0.1", page.Rows, err)
+	}
+}
+
+func TestAdminDevice_ClearCertNonAdminIsForbidden(t *testing.T) {
+	deps, st, _, _, _, dev := adminDeviceFixture(t)
+	h, _ := New(deps)
+	if err := st.Devices().SetCert(t.Context(), dev.ID, "ab12", store.NowUnix()+3600); err != nil {
+		t.Fatalf("SetCert: %v", err)
+	}
+	user := seedUser(t, st, "plain@example.com", "user")
+	userCookie := signIn(t, deps, user)
+	userSess := sessionFor(t, deps, userCookie)
+
+	rec := postForm(t, h, userCookie, "/admin/devices/"+dev.ID+"/cert/clear", url.Values{"csrf": {userSess.CSRFToken}})
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-admin POST cert/clear = %d, want 403", rec.Code)
+	}
+	if got, _ := st.Devices().GetByID(t.Context(), dev.ID); got.CertSerial != "ab12" {
+		t.Errorf("a non-admin cleared the certificate: serial = %q", got.CertSerial)
+	}
+}
+
+func TestAdminDevice_ClearCertUnknownIs404(t *testing.T) {
+	deps, _, cookie, sess, _, _ := adminDeviceFixture(t)
+	h, _ := New(deps)
+
+	rec := postForm(t, h, cookie, "/admin/devices/no-such-device/cert/clear", url.Values{"csrf": {sess.CSRFToken}})
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "That device does not exist.") {
+		t.Errorf("POST cert/clear on an unknown device: status = %d, want 404 with the shared copy", rec.Code)
+	}
+}

@@ -20,7 +20,7 @@
 
 {{template "deviceHistoryCard" .}}
 
-{{/* The one admin action (#132 D4). The owner's markup with the action
+{{/* The admin actions (#132 D4, #173). The owner's markup with the action
      swapped; no typed confirmation, because disable is reversible and the
      owner's own control has none either. */}}
 <div class="card danger-zone">
@@ -37,6 +37,19 @@
       <button class="btn danger" type="submit">{{if .Device.Disabled}}Enable{{else}}Disable{{end}}</button>
     </form>
   </div>
+
+  {{if .Device.CertSerial}}
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Reset certificate</strong>
+      <span>Clears this device's mTLS certificate. The device requests a new one automatically on its next check-in.</span>
+    </div>
+    <form method="post" action="/admin/devices/{{.Device.ID}}/cert/clear">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <button class="btn danger" type="submit">Reset</button>
+    </form>
+  </div>
+  {{end}}
 </div>
 
 <p class="muted">Renaming, secret rotation and deletion are only available to the device's owner.</p>

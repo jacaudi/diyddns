@@ -112,6 +112,7 @@ func New(deps Deps) (http.Handler, []string) {
 		{"GET /admin/devices/{id}", h.requireAdmin(h.handleAdminDeviceDetail)},
 		{"GET /admin/devices/{id}/history", h.requireAdmin(h.handleAdminDeviceHistory)},
 		{"POST /admin/devices/{id}/enabled", h.requirePostAdmin(h.handleAdminDeviceSetEnabled)},
+		{"POST /admin/devices/{id}/cert/clear", h.requirePostAdmin(h.handleAdminDeviceClearCert)},
 		{"GET /admin/audit", h.requireAdmin(h.handleAdminAudit)},
 		{"GET /admin/server", h.requireAdmin(h.handleAdminServer)},
 		{"GET /static/", http.FileServerFS(staticFS)},
