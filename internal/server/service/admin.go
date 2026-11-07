@@ -44,8 +44,8 @@ type UpdateUserParams struct {
 }
 
 // AdminService implements admin-only user management (with lockout guards),
-// plus cross-user device reads, the one admin device mutation (#132), and
-// audit reads.
+// plus cross-user device reads, the admin device mutations (#132: enable/disable;
+// #173: clear the agent certificate), and audit reads.
 type AdminService struct {
 	deviceMutator // st, audit, notify — shared with DeviceService (#132 D8)
 	grants        *GrantService
@@ -406,8 +406,8 @@ func (s *AdminService) GetDevice(ctx context.Context, id string) (store.Device, 
 // admin (#132 D4, D7). actor is the admin's session: its UserID is the audit
 // actor and its IP the audit source, following #137. The device's owner is
 // resolved here and is the party the audit row's details and the owner
-// notice name. This is the only admin mutation of a device: rename, secret
-// rotation and deletion stay with the owner (#132 D3).
+// notice name. Besides ClearDeviceCert (#173) this is the only admin mutation of a
+// device: rename, secret rotation and deletion stay with the owner (#132 D3).
 //
 // Idempotent (#132 D11): when the device already holds the requested state
 // nothing is written, audited or mailed — a double-submit must not send the
@@ -434,6 +434,34 @@ func (s *AdminService) SetDeviceEnabled(ctx context.Context, actor store.Session
 	}
 	s.notifyOwner(ctx, actor, owner, dev, disabled)
 	return updated, nil
+}
+
+// ClearDeviceCert forgets the device's recorded agent certificate on behalf of
+// an admin (#173), so the main port will issue it a new one. actor is the
+// admin's session: its UserID is the audit actor and its IP the audit source.
+// The device's owner is resolved here, as SetDeviceEnabled does, and named in
+// the audit details beside the serial that was recorded.
+//
+// Idempotent: when no certificate is recorded nothing is written or audited.
+// Returns store.ErrNotFound for an unknown device id.
+func (s *AdminService) ClearDeviceCert(ctx context.Context, actor store.Session, id string) error {
+	dev, owner, err := s.GetDevice(ctx, id)
+	if err != nil {
+		return fmt.Errorf("service.ClearDeviceCert: %w", err)
+	}
+	cleared, err := s.st.Devices().ClearCert(ctx, id)
+	if err != nil {
+		return fmt.Errorf("service.ClearDeviceCert: %w", err)
+	}
+	if !cleared {
+		return nil
+	}
+	details, _ := json.Marshal(map[string]string{"owner_user_id": owner.ID, "serial": dev.CertSerial})
+	s.audit.Log(ctx, store.AuditEntry{
+		ActorUserID: actor.UserID, EventType: "device.cert_cleared", TargetType: "device", TargetID: id,
+		DetailsJSON: string(details), IP: actor.IP,
+	})
+	return nil
 }
 
 // notifyOwner mails the device's owner that an admin changed its state. It

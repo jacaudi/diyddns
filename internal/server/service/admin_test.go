@@ -745,3 +745,51 @@ func TestAdminService_SetDeviceEnabled_UnknownDeviceWritesNothing(t *testing.T) 
 		t.Fatalf("audit rows %d → %d, want unchanged", before, after)
 	}
 }
+
+func TestAdminService_ClearDeviceCert(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "admin@x", "admin")
+	owner := seedUser(t, st, "owner@x", "user")
+	dev := seedDevice(t, st, owner.ID, "theirs")
+	actor := store.Session{UserID: admin.ID, IP: "198.51.100.7"}
+	if err := st.Devices().SetCert(t.Context(), dev.ID, "abc123", 1_900_000_000); err != nil {
+		t.Fatalf("SetCert: %v", err)
+	}
+
+	if err := svc.ClearDeviceCert(t.Context(), actor, dev.ID); err != nil {
+		t.Fatalf("ClearDeviceCert: %v", err)
+	}
+	row, err := st.Devices().GetByID(t.Context(), dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.CertSerial != "" || row.CertNotAfter != 0 {
+		t.Fatalf("cert columns not cleared: %+v", row)
+	}
+	rows := adminAuditRows(t, st, "device.cert_cleared")
+	if len(rows) != 1 {
+		t.Fatalf("device.cert_cleared rows = %d, want 1", len(rows))
+	}
+	if r := rows[0]; r.ActorUserID != admin.ID || r.IP != "198.51.100.7" || r.TargetType != "device" || r.TargetID != dev.ID {
+		t.Fatalf("row = %+v, want actor=admin ip=198.51.100.7 target=device/%s", r, dev.ID)
+	}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(rows[0].DetailsJSON), &details); err != nil {
+		t.Fatalf("DetailsJSON %q: %v", rows[0].DetailsJSON, err)
+	}
+	if details["owner_user_id"] != owner.ID || details["serial"] != "abc123" {
+		t.Fatalf("details = %v, want owner_user_id=%s serial=abc123", details, owner.ID)
+	}
+
+	// Idempotent: nothing recorded now, so no second audit row.
+	if err := svc.ClearDeviceCert(t.Context(), actor, dev.ID); err != nil {
+		t.Fatalf("second ClearDeviceCert: %v", err)
+	}
+	if n := len(adminAuditRows(t, st, "device.cert_cleared")); n != 1 {
+		t.Fatalf("device.cert_cleared rows = %d after second call, want 1", n)
+	}
+
+	if err := svc.ClearDeviceCert(t.Context(), actor, "no-such-device"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown id err = %v, want store.ErrNotFound", err)
+	}
+}
