@@ -109,3 +109,22 @@ func TestLoadClient_RunEnvOverrides(t *testing.T) {
 		t.Errorf("ProvidersV4 = %v, want %v (env comma-string → slice)", cfg.Run.ProvidersV4, want)
 	}
 }
+
+func TestLoadClient_InsecureProvisionDefaultAndEnv(t *testing.T) {
+	cfg, err := LoadClient(viper.New(), "")
+	if err != nil {
+		t.Fatalf("LoadClient: %v", err)
+	}
+	if cfg.Run.InsecureProvision {
+		t.Error("InsecureProvision default = true, want false")
+	}
+
+	t.Setenv("DIYDDNS_RUN_INSECURE_PROVISION", "true")
+	cfg, err = LoadClient(viper.New(), "")
+	if err != nil {
+		t.Fatalf("LoadClient(env): %v", err)
+	}
+	if !cfg.Run.InsecureProvision {
+		t.Error("InsecureProvision with env = false, want true")
+	}
+}

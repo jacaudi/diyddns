@@ -1343,3 +1343,125 @@ func TestLoad_RegistrationLinkTTL_BareYAMLIntegerIsRejected(t *testing.T) {
 		t.Errorf("error %q must name the key and say a unit is required", err)
 	}
 }
+
+// loadAgent loads a minimal valid config with the given agent.* overrides.
+func loadAgent(t *testing.T, overrides map[string]any) (config.Server, error) {
+	t.Helper()
+	v := viper.New()
+	v.Set("database.path", filepath.Join(t.TempDir(), "diyddns.db"))
+	for k, val := range overrides {
+		v.Set(k, val)
+	}
+	return config.Load(v, "")
+}
+
+func TestLoad_AgentDefaults(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "diyddns.db")
+	v := viper.New()
+	v.Set("database.path", dbPath)
+	cfg, err := config.Load(v, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.Listen != "" {
+		t.Errorf("Agent.Listen = %q, want empty", cfg.Agent.Listen)
+	}
+	if cfg.Agent.RequireMTLS {
+		t.Error("Agent.RequireMTLS = true, want false")
+	}
+	if cfg.Agent.Enabled() {
+		t.Error("Agent.Enabled() = true, want false")
+	}
+	if want := filepath.Dir(dbPath); cfg.Agent.TLS.Dir != want {
+		t.Errorf("Agent.TLS.Dir = %q, want %q (dir of database.path)", cfg.Agent.TLS.Dir, want)
+	}
+}
+
+func TestLoad_AgentEnvBinding(t *testing.T) {
+	t.Setenv("DIYDDNS_AGENT_LISTEN", ":8443")
+	t.Setenv("DIYDDNS_AGENT_PUBLIC_URL", "https://ddns.example.com:8443")
+	t.Setenv("DIYDDNS_AGENT_TLS_DIR", "/srv/tls")
+	t.Setenv("DIYDDNS_AGENT_REQUIRE_MTLS", "true")
+	cfg, err := loadAgent(t, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.Listen != ":8443" {
+		t.Errorf("Listen = %q", cfg.Agent.Listen)
+	}
+	if cfg.Agent.PublicURL != "https://ddns.example.com:8443" {
+		t.Errorf("PublicURL = %q", cfg.Agent.PublicURL)
+	}
+	if cfg.Agent.TLS.Dir != "/srv/tls" {
+		t.Errorf("TLS.Dir = %q", cfg.Agent.TLS.Dir)
+	}
+	if !cfg.Agent.RequireMTLS {
+		t.Error("RequireMTLS = false, want true")
+	}
+	if !cfg.Agent.Enabled() {
+		t.Error("Enabled() = false, want true")
+	}
+	if got := cfg.Agent.PublicHost(); got != "ddns.example.com" {
+		t.Errorf("PublicHost() = %q, want ddns.example.com", got)
+	}
+}
+
+func TestLoad_AgentValidation(t *testing.T) {
+	const mustBeHostPort = "agent.public_url must be https://host:port"
+	tests := []struct {
+		name      string
+		overrides map[string]any
+		wantErr   string
+	}{
+		{"require_mtls without listen", map[string]any{"agent.require_mtls": true, "agent.listen": ""}, "agent.require_mtls requires agent.listen"},
+		{"listen without public_url", map[string]any{"agent.listen": ":8443", "agent.public_url": ""}, "agent.public_url is required when agent.listen is set"},
+		{"http scheme", map[string]any{"agent.listen": ":8443", "agent.public_url": "http://h:8443"}, "agent.public_url must be https"},
+		{"path", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://h:8443/x"}, "agent.public_url must not have a path"},
+		{"query", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://h:8443?q=1"}, mustBeHostPort},
+		{"force query", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://h:8443?"}, mustBeHostPort},
+		{"userinfo", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://u@h:8443"}, mustBeHostPort},
+		{"fragment", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://h:8443#f"}, mustBeHostPort},
+		{"no host", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://:8443"}, mustBeHostPort},
+		{"no port", map[string]any{"agent.listen": ":8443", "agent.public_url": "https://h"}, mustBeHostPort},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadAgent(t, tt.overrides)
+			if err == nil {
+				t.Fatalf("Load accepted %v, want error containing %q", tt.overrides, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not contain %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	accepted := []struct {
+		name, in, wantURL, wantHost string
+	}{
+		{"host and port", "https://h:8443", "https://h:8443", "h"},
+		{"trailing slash is trimmed", "https://h:8443/", "https://h:8443", "h"},
+		{"IPv4 literal", "https://192.0.2.1:8443", "https://192.0.2.1:8443", "192.0.2.1"},
+		{"IPv6 literal", "https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443", "2001:db8::1"},
+	}
+	for _, tt := range accepted {
+		t.Run("accepts "+tt.name, func(t *testing.T) {
+			cfg, err := loadAgent(t, map[string]any{"agent.listen": ":8443", "agent.public_url": tt.in})
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Agent.PublicURL != tt.wantURL {
+				t.Errorf("PublicURL = %q, want %q", cfg.Agent.PublicURL, tt.wantURL)
+			}
+			if got := cfg.Agent.PublicHost(); got != tt.wantHost {
+				t.Errorf("PublicHost() = %q, want %q", got, tt.wantHost)
+			}
+		})
+	}
+}
+
+func TestLoad_AgentDisabledIgnoresPublicURL(t *testing.T) {
+	if _, err := loadAgent(t, map[string]any{"agent.listen": "", "agent.public_url": "garbage"}); err != nil {
+		t.Fatalf("Load with agent disabled rejected public_url: %v", err)
+	}
+}
