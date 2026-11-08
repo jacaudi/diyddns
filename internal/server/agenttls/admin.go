@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/shared/atomicfile"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -229,7 +230,7 @@ func removeAgentFiles(dir string) error {
 			return fmt.Errorf("agenttls: remove %s: %w", name, err)
 		}
 	}
-	return syncDir(dir)
+	return atomicfile.SyncDir(dir)
 }
 
 // Reset is the last resort: it deletes the recorded CA pair, clears every
@@ -264,7 +265,7 @@ func Reset(ctx context.Context, st *store.Store, dir string, now time.Time) ([]s
 		renamed = append(renamed, to)
 	}
 	if len(renamed) > 0 {
-		if err := syncDir(dir); err != nil {
+		if err := atomicfile.SyncDir(dir); err != nil {
 			return renamed, err
 		}
 	}
