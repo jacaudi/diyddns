@@ -1,73 +1,55 @@
 package email
 
-import (
-	"strings"
-	"text/template"
-)
+import "fmt"
 
-// recoveryTmpl, adminNotifyTmpl, inviteTmpl, adminRecoveryTmpl, reRegistrationTmpl,
-// emailChangeConfirmTmpl, emailChangeNoticeTmpl, emailChangedTmpl,
-// adminEmailChangedTmpl (#131, via ChangeConfirmBody, ChangeNoticeBody,
-// ChangedBody and AdminChangedBody) and the two device-state templates (#132,
-// via DeviceStateChangedByAdminBody) are fixed, package-level templates
-// validated at init time via template.Must. Their data is always one or two
-// plain-string fields (no user-supplied templates, no functions that could
-// error), so renderTemplate's error path below is unreachable in practice —
-// it exists only as a safe fallback, not a documented failure mode.
+// The message bodies below are fixed fmt formats filled with plain strings,
+// as internal/server/stale's notices are: no user-supplied formats, nothing
+// that can fail. A verb only ever substitutes an argument, so a value
+// containing '%' or "{{" renders literally.
 //
-// recoveryTmpl is the SELF-SERVICE recovery body: the user asked for the link
+// recoveryFmt is the SELF-SERVICE recovery body: the user asked for the link
 // themselves and their passkeys still work, so it is safe to ignore. When an
 // ADMIN issues the link the passkeys have already been revoked — use
-// adminRecoveryTmpl (via AdminRecoveryLinkBody) instead.
-var recoveryTmpl = template.Must(template.New("recovery-link").Parse(
-	"A passkey recovery link was requested for your DIYDDNS account.\r\n\r\n" +
-		"Use the link below to add a new passkey. It expires in {{.ExpiresIn}} and can only be used once.\r\n\r\n" +
-		"{{.Link}}\r\n\r\n" +
-		"If you did not request this, you can safely ignore this email.\r\n",
-))
+// adminRecoveryFmt (via AdminRecoveryLinkBody) instead.
+const recoveryFmt = "A passkey recovery link was requested for your DIYDDNS account.\r\n\r\n" +
+	"Use the link below to add a new passkey. It expires in %[2]s and can only be used once.\r\n\r\n" +
+	"%[1]s\r\n\r\n" +
+	"If you did not request this, you can safely ignore this email.\r\n"
 
-var adminNotifyTmpl = template.Must(template.New("admin-notify").Parse(
-	"A passkey recovery link was issued for the account {{.Email}} (user {{.ID}}).\r\n\r\n" +
-		"No action is required unless this was unexpected.\r\n",
-))
+const adminNotifyFmt = "A passkey recovery link was issued for the account %s (user %s).\r\n\r\n" +
+	"No action is required unless this was unexpected.\r\n"
 
-var inviteTmpl = template.Must(template.New("invite-link").Parse(
-	"An account has been created for you on DIYDDNS.\r\n\r\n" +
-		"Use the link below to finish setting it up by registering a passkey.\r\n" +
-		"It expires in {{.ExpiresIn}} and can only be used once.\r\n\r\n" +
-		"{{.Link}}\r\n\r\n" +
-		"If you were not expecting this, contact the administrator who invited you.\r\n",
-))
+const inviteFmt = "An account has been created for you on DIYDDNS.\r\n\r\n" +
+	"Use the link below to finish setting it up by registering a passkey.\r\n" +
+	"It expires in %[2]s and can only be used once.\r\n\r\n" +
+	"%[1]s\r\n\r\n" +
+	"If you were not expecting this, contact the administrator who invited you.\r\n"
 
-var adminRecoveryTmpl = template.Must(template.New("admin-recovery-link").Parse(
-	"An administrator has reset the passkeys on your DIYDDNS account.\r\n\r\n" +
-		"Every passkey on the account has already been revoked, so you cannot\r\n" +
-		"sign in until you register a new one. Use the link below to do that;\r\n" +
-		"it expires in {{.ExpiresIn}} and can only be used once.\r\n\r\n" +
-		"{{.Link}}\r\n\r\n" +
-		"If you were not expecting this, contact your administrator. Do not\r\n" +
-		"disregard this message: your existing passkeys no longer work.\r\n",
-))
+const adminRecoveryFmt = "An administrator has reset the passkeys on your DIYDDNS account.\r\n\r\n" +
+	"Every passkey on the account has already been revoked, so you cannot\r\n" +
+	"sign in until you register a new one. Use the link below to do that;\r\n" +
+	"it expires in %[2]s and can only be used once.\r\n\r\n" +
+	"%[1]s\r\n\r\n" +
+	"If you were not expecting this, contact your administrator. Do not\r\n" +
+	"disregard this message: your existing passkeys no longer work.\r\n"
 
-// reRegistrationTmpl is the body ReissueInvite sends to an account that HAD
+// reRegistrationFmt is the body ReissueInvite sends to an account that HAD
 // registered a passkey and has none now (an admin revoked them), so "an account
 // has been created for you" would be false (#75, design D12).
-var reRegistrationTmpl = template.Must(template.New("re-registration-link").Parse(
-	"An administrator has sent you a new link to register a passkey on your\r\n" +
-		"DIYDDNS account. Any earlier registration link for this account no longer\r\n" +
-		"works.\r\n\r\n" +
-		"Use the link below to register a passkey. It expires in {{.ExpiresIn}} and\r\n" +
-		"can only be used once.\r\n\r\n" +
-		"{{.Link}}\r\n\r\n" +
-		"If you were not expecting this, contact your administrator.\r\n",
-))
+const reRegistrationFmt = "An administrator has sent you a new link to register a passkey on your\r\n" +
+	"DIYDDNS account. Any earlier registration link for this account no longer\r\n" +
+	"works.\r\n\r\n" +
+	"Use the link below to register a passkey. It expires in %[2]s and\r\n" +
+	"can only be used once.\r\n\r\n" +
+	"%[1]s\r\n\r\n" +
+	"If you were not expecting this, contact your administrator.\r\n"
 
 // RecoveryLinkBody renders the subject and body of the email sent to a user
 // who requested a passkey recovery link themselves. For an admin-issued
 // recovery link use AdminRecoveryLinkBody. expiresIn is the link's lifetime,
 // already formatted by FormatDuration.
 func RecoveryLinkBody(link, expiresIn string) (subject, body string) {
-	return renderTemplate(recoveryTmpl, "DIYDDNS passkey recovery link", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
+	return "DIYDDNS passkey recovery link", fmt.Sprintf(recoveryFmt, link, expiresIn)
 }
 
 // AdminNotifyBody renders the mail sent to every administrator when a user's
@@ -76,15 +58,14 @@ func RecoveryLinkBody(link, expiresIn string) (subject, body string) {
 // admin (#90): userEmail is folded to 7-bit ASCII (ASCIIFold), and userID
 // names the account unambiguously even when folding made the address lossy.
 func AdminNotifyBody(userEmail, userID string) (subject, body string) {
-	return renderTemplate(adminNotifyTmpl, "DIYDDNS passkey recovery issued",
-		struct{ Email, ID string }{Email: ASCIIFold(userEmail), ID: userID})
+	return "DIYDDNS passkey recovery issued", fmt.Sprintf(adminNotifyFmt, ASCIIFold(userEmail), userID)
 }
 
 // InviteLinkBody renders the subject and body of the email sent to a user an
 // admin has just created an account for. expiresIn is the link's lifetime,
 // already formatted by FormatDuration.
 func InviteLinkBody(link, expiresIn string) (subject, body string) {
-	return renderTemplate(inviteTmpl, "You have been invited to DIYDDNS", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
+	return "You have been invited to DIYDDNS", fmt.Sprintf(inviteFmt, link, expiresIn)
 }
 
 // AdminRecoveryLinkBody renders the subject and body of the email sent when an
@@ -94,7 +75,7 @@ func InviteLinkBody(link, expiresIn string) (subject, body string) {
 // on the account, so disregarding this email leaves the user locked out.
 // expiresIn is the link's lifetime, already formatted by FormatDuration.
 func AdminRecoveryLinkBody(link, expiresIn string) (subject, body string) {
-	return renderTemplate(adminRecoveryTmpl, "Your DIYDDNS passkeys were reset by an administrator", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
+	return "Your DIYDDNS passkeys were reset by an administrator", fmt.Sprintf(adminRecoveryFmt, link, expiresIn)
 }
 
 // ReRegistrationLinkBody renders the subject and body of the email sent when an
@@ -103,7 +84,7 @@ func AdminRecoveryLinkBody(link, expiresIn string) (subject, body string) {
 // InviteLinkBody instead. expiresIn is the link's lifetime, already formatted by
 // FormatDuration.
 func ReRegistrationLinkBody(link, expiresIn string) (subject, body string) {
-	return renderTemplate(reRegistrationTmpl, "A new DIYDDNS registration link from your administrator", struct{ Link, ExpiresIn string }{Link: link, ExpiresIn: expiresIn})
+	return "A new DIYDDNS registration link from your administrator", fmt.Sprintf(reRegistrationFmt, link, expiresIn)
 }
 
 // The four #131 bodies. Every address interpolated below has passed
@@ -113,50 +94,42 @@ func ReRegistrationLinkBody(link, expiresIn string) (subject, body string) {
 // without an exception (#90), and TestRenderedMessagesAreASCII can state it
 // for every renderer.
 
-var emailChangeConfirmTmpl = template.Must(template.New("email-change-confirm").Parse(
-	"A request was made to change the email address on your DIYDDNS account\r\n" +
-		"to this one.\r\n\r\n" +
-		"Nothing changes until you open the link below. You need to be signed in\r\n" +
-		"to DIYDDNS in the same browser when you open it; if you are not, sign in\r\n" +
-		"first and then open the link again. It expires in one hour and can be\r\n" +
-		"used once.\r\n\r\n" +
-		"{{.Link}}\r\n\r\n" +
-		"If you did not request this, you can ignore this email.\r\n",
-))
+const emailChangeConfirmFmt = "A request was made to change the email address on your DIYDDNS account\r\n" +
+	"to this one.\r\n\r\n" +
+	"Nothing changes until you open the link below. You need to be signed in\r\n" +
+	"to DIYDDNS in the same browser when you open it; if you are not, sign in\r\n" +
+	"first and then open the link again. It expires in one hour and can be\r\n" +
+	"used once.\r\n\r\n" +
+	"%s\r\n\r\n" +
+	"If you did not request this, you can ignore this email.\r\n"
 
-var emailChangeNoticeTmpl = template.Must(template.New("email-change-notice").Parse(
-	"A request was made to change the email address on your DIYDDNS account\r\n" +
-		"to {{.NewEmail}}.\r\n\r\n" +
-		"Nothing has changed yet: this address stays in charge of your account\r\n" +
-		"until the new one confirms. If this was not you, sign in and cancel\r\n" +
-		"the pending change from Account, then contact your administrator, who\r\n" +
-		"can end every session on your account.\r\n",
-))
+const emailChangeNoticeFmt = "A request was made to change the email address on your DIYDDNS account\r\n" +
+	"to %s.\r\n\r\n" +
+	"Nothing has changed yet: this address stays in charge of your account\r\n" +
+	"until the new one confirms. If this was not you, sign in and cancel\r\n" +
+	"the pending change from Account, then contact your administrator, who\r\n" +
+	"can end every session on your account.\r\n"
 
-var emailChangedTmpl = template.Must(template.New("email-changed").Parse(
-	"The email address on your DIYDDNS account has been changed to\r\n" +
-		"{{.NewEmail}}. Sign-in and passkey recovery mail now go there.\r\n\r\n" +
-		"If you did not make this change, contact your administrator immediately.\r\n",
-))
+const emailChangedFmt = "The email address on your DIYDDNS account has been changed to\r\n" +
+	"%s. Sign-in and passkey recovery mail now go there.\r\n\r\n" +
+	"If you did not make this change, contact your administrator immediately.\r\n"
 
-var adminEmailChangedTmpl = template.Must(template.New("admin-email-changed").Parse(
-	"An administrator has changed the email address on your DIYDDNS account\r\n" +
-		"to {{.NewEmail}}. Sign-in and passkey recovery mail now go there.\r\n\r\n" +
-		"If this was unexpected, contact your administrator.\r\n",
-))
+const adminEmailChangedFmt = "An administrator has changed the email address on your DIYDDNS account\r\n" +
+	"to %s. Sign-in and passkey recovery mail now go there.\r\n\r\n" +
+	"If this was unexpected, contact your administrator.\r\n"
 
 // ChangeConfirmBody renders the mail sent to a NEW address the account
 // holder wants to move to. Opening the link needs their session (design D6),
 // and the body says so.
 func ChangeConfirmBody(link string) (subject, body string) {
-	return renderTemplate(emailChangeConfirmTmpl, "Confirm your new DIYDDNS email address", struct{ Link string }{Link: link})
+	return "Confirm your new DIYDDNS email address", fmt.Sprintf(emailChangeConfirmFmt, link)
 }
 
 // ChangeNoticeBody renders the heads-up sent to the OLD address when a
 // self-service change is requested, naming the requested address and the two
 // ways to react.
 func ChangeNoticeBody(newEmail string) (subject, body string) {
-	return renderTemplate(emailChangeNoticeTmpl, "A DIYDDNS email address change was requested", struct{ NewEmail string }{NewEmail: ASCIIFold(newEmail)})
+	return "A DIYDDNS email address change was requested", fmt.Sprintf(emailChangeNoticeFmt, ASCIIFold(newEmail))
 }
 
 // ChangedBody renders the notice sent to the OLD address once a change
@@ -164,7 +137,7 @@ func ChangeNoticeBody(newEmail string) (subject, body string) {
 // effect. For an admin-made change use AdminChangedBody: this body's
 // closing line assumes the reader could have made the change themselves.
 func ChangedBody(newEmail string) (subject, body string) {
-	return renderTemplate(emailChangedTmpl, "Your DIYDDNS email address was changed", struct{ NewEmail string }{NewEmail: ASCIIFold(newEmail)})
+	return "Your DIYDDNS email address was changed", fmt.Sprintf(emailChangedFmt, ASCIIFold(newEmail))
 }
 
 // AdminChangedBody renders the notice sent to the OLD address once an
@@ -172,28 +145,24 @@ func ChangedBody(newEmail string) (subject, body string) {
 // the reason AdminRecoveryLinkBody gives: the closing lines say opposite
 // things.
 func AdminChangedBody(newEmail string) (subject, body string) {
-	return renderTemplate(adminEmailChangedTmpl, "Your DIYDDNS email address was changed by an administrator", struct{ NewEmail string }{NewEmail: ASCIIFold(newEmail)})
+	return "Your DIYDDNS email address was changed by an administrator", fmt.Sprintf(adminEmailChangedFmt, ASCIIFold(newEmail))
 }
 
-// deviceDisabledByAdminTmpl and deviceEnabledByAdminTmpl are the owner
+// deviceDisabledByAdminFmt and deviceEnabledByAdminFmt are the owner
 // notices for the one admin action on someone else's device (#132 D4, D10).
 // The label arrives already folded to ASCII (DeviceStateChangedByAdminBody);
-// the id is a UUIDv7 and always ASCII. Neither template's SUBJECT embeds the
-// label: checkSendable rejects CR/LF and non-ASCII in a header, and a label
-// has no charset rule.
-var deviceDisabledByAdminTmpl = template.Must(template.New("device-disabled-by-admin").Parse(
-	"An administrator has disabled your DIYDDNS device \"{{.Label}}\" (id {{.ID}}).\r\n\r\n" +
-		"The device is now rejected when it checks in, so its address is no longer\r\n" +
-		"recorded or published. Its history is kept.\r\n\r\n" +
-		"Sign in to see the device's state. If you were not expecting this, contact\r\n" +
-		"your administrator.\r\n",
-))
+// the id is a UUIDv7 and always ASCII. Neither SUBJECT embeds the label:
+// checkSendable rejects CR/LF and non-ASCII in a header, and a label has no
+// charset rule.
+const deviceDisabledByAdminFmt = "An administrator has disabled your DIYDDNS device \"%s\" (id %s).\r\n\r\n" +
+	"The device is now rejected when it checks in, so its address is no longer\r\n" +
+	"recorded or published. Its history is kept.\r\n\r\n" +
+	"Sign in to see the device's state. If you were not expecting this, contact\r\n" +
+	"your administrator.\r\n"
 
-var deviceEnabledByAdminTmpl = template.Must(template.New("device-enabled-by-admin").Parse(
-	"An administrator has enabled your DIYDDNS device \"{{.Label}}\" (id {{.ID}}).\r\n\r\n" +
-		"The device is accepted when it checks in again.\r\n\r\n" +
-		"Sign in to see the device's state.\r\n",
-))
+const deviceEnabledByAdminFmt = "An administrator has enabled your DIYDDNS device \"%s\" (id %s).\r\n\r\n" +
+	"The device is accepted when it checks in again.\r\n\r\n" +
+	"Sign in to see the device's state.\r\n"
 
 // DeviceStateChangedByAdminBody renders the mail sent to a device's owner
 // when an administrator disables (disabled=true) or re-enables their device.
@@ -201,22 +170,8 @@ var deviceEnabledByAdminTmpl = template.Must(template.New("device-enabled-by-adm
 // device's UUID and is embedded verbatim. The subject is fixed and never
 // carries the label.
 func DeviceStateChangedByAdminBody(label, id string, disabled bool) (subject, body string) {
-	data := struct{ Label, ID string }{Label: ASCIIFold(label), ID: id}
 	if disabled {
-		return renderTemplate(deviceDisabledByAdminTmpl, "An administrator disabled one of your DIYDDNS devices", data)
+		return "An administrator disabled one of your DIYDDNS devices", fmt.Sprintf(deviceDisabledByAdminFmt, ASCIIFold(label), id)
 	}
-	return renderTemplate(deviceEnabledByAdminTmpl, "An administrator enabled one of your DIYDDNS devices", data)
-}
-
-// renderTemplate executes tmpl against data and returns (subject, body). If
-// execution fails — which should not happen for the fixed templates and
-// plain-string data above — it falls back to a subject-only body rather than
-// returning an error, since the exported signatures are (subject, body
-// string) with no error to propagate.
-func renderTemplate(tmpl *template.Template, subject string, data any) (string, string) {
-	var sb strings.Builder
-	if err := tmpl.Execute(&sb, data); err != nil {
-		return subject, subject
-	}
-	return subject, sb.String()
+	return "An administrator enabled one of your DIYDDNS devices", fmt.Sprintf(deviceEnabledByAdminFmt, ASCIIFold(label), id)
 }
