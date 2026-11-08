@@ -15,8 +15,8 @@ require (
 	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
 	github.com/unraid/apprise-go v0.4.0
-	go.opentelemetry.io/contrib/bridges/otelslog v0.20.1
-	go.opentelemetry.io/contrib/processors/minsev v0.16.3
+	go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
+	go.opentelemetry.io/contrib/processors/minsev v0.17.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
