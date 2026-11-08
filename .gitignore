@@ -67,7 +67,6 @@ docs/prompts/
 *.db-shm
 *.db-journal
 sqlite3
-/docs/openapi/*.json
 coverage.txt
 coverage.html
 node_modules/
