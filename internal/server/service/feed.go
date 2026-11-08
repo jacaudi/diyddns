@@ -77,10 +77,6 @@ func (m deviceMutator) flipDisabled(ctx context.Context, dev store.Device, owner
 	return m.st.Devices().GetByID(ctx, dev.ID)
 }
 
-// FeedTokenPrefix re-exports store.FeedTokenPrefix for callers in this
-// package's orbit (tests, the web UI); the constant is owned by store.
-const FeedTokenPrefix = store.FeedTokenPrefix
-
 // ErrTokenMalformed is returned by Authenticate for a value that cannot be a
 // feed token at all (wrong prefix). Distinct from store.ErrNotFound so the
 // middleware can log "malformed" vs "unknown_token".
@@ -136,7 +132,7 @@ func (s *FeedService) ListTokens(ctx context.Context) ([]store.FeedToken, error)
 // trimmed of surrounding whitespace and the trimmed value is what gets
 // stored; MintToken returns ErrInvalidLabel if that leaves it empty, so
 // "envoy" and " envoy " cannot become two distinct tokens and a blank label
-// can never reach the store. The plaintext is FeedTokenPrefix + 32 random
+// can never reach the store. The plaintext is store.FeedTokenPrefix + 32 random
 // bytes (base64url); only its SHA-256 hash is stored (auth.HashToken —
 // hashed, not sealed: the server never needs the plaintext back). Returns
 // store.ErrConflict on a duplicate label.
@@ -150,7 +146,7 @@ func (s *FeedService) MintToken(ctx context.Context, actorID, label string) (sto
 	if err != nil {
 		return store.FeedToken{}, "", fmt.Errorf("service.MintToken: %w", err)
 	}
-	plaintext := FeedTokenPrefix + rnd
+	plaintext := store.FeedTokenPrefix + rnd
 	tok := store.FeedToken{
 		ID:        store.NewID(),
 		Label:     label,
@@ -194,7 +190,7 @@ func (s *FeedService) RevokeToken(ctx context.Context, actorID, id string) error
 // most once per lastUsedThrottle seconds per token; a stamp failure is
 // swallowed — it must never fail a feed read.
 func (s *FeedService) Authenticate(ctx context.Context, plaintext string) (store.FeedToken, error) {
-	if !strings.HasPrefix(plaintext, FeedTokenPrefix) {
+	if !strings.HasPrefix(plaintext, store.FeedTokenPrefix) {
 		return store.FeedToken{}, ErrTokenMalformed
 	}
 	tok, err := s.st.FeedTokens().GetByHash(ctx, auth.HashToken(plaintext))

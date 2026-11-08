@@ -238,7 +238,7 @@ func sessionOrAPIKeyMiddleware(api huma.API, keys *service.APIKeyService, sessio
 		}
 
 		plaintext, ok := strings.CutPrefix(header, "Bearer ")
-		if !ok || !strings.HasPrefix(plaintext, service.APIKeyPrefix) || strings.ContainsAny(plaintext, " \t") {
+		if !ok || !strings.HasPrefix(plaintext, store.APIKeyPrefix) || strings.ContainsAny(plaintext, " \t") {
 			reject("malformed")
 			return
 		}

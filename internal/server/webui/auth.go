@@ -8,18 +8,6 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// authenticateBrowser is this package's thin, one-line delegate to
-// auth.SessionManager.AuthenticateRequest, the single, framework-agnostic
-// home for "authenticate a browser request by its session cookie" (design
-// §9/N2): the cookie->Authenticate knowledge itself lives only there, shared
-// with internal/server/api's huma sessionMiddleware — only the huma-vs-stdlib
-// glue differs between callers. Kept as a named function (rather than having
-// requireSession and handlers.go call AuthenticateRequest directly) since it
-// has two callers in this package.
-func authenticateBrowser(sessions *auth.SessionManager, r *http.Request, cookieName string) (store.User, store.Session, error) {
-	return sessions.AuthenticateRequest(r, cookieName)
-}
-
 // sessionHandler is a page handler that runs only after authentication, with
 // the resolved user and session already in hand.
 type sessionHandler func(w http.ResponseWriter, r *http.Request, usr store.User, sess store.Session)
@@ -30,7 +18,7 @@ type sessionHandler func(w http.ResponseWriter, r *http.Request, usr store.User,
 // regardless of the original request method.
 func (h *handler) requireSession(next sessionHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		usr, sess, err := authenticateBrowser(h.deps.Sessions, r, h.deps.Cfg.Auth.Session.CookieName)
+		usr, sess, err := h.deps.Sessions.AuthenticateRequest(r, h.deps.Cfg.Auth.Session.CookieName)
 		if err != nil {
 			// The browser half of the same gap the API doors have: a user
 			// whose session expired is bounced to /login with no

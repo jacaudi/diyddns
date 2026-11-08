@@ -46,24 +46,15 @@ func RandToken(n int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// GenerateCSRFToken returns a random URL-safe token.
-func GenerateCSRFToken() (string, error) {
-	t, err := RandToken(32)
-	if err != nil {
-		return "", fmt.Errorf("auth.GenerateCSRFToken: %w", err)
-	}
-	return t, nil
-}
-
 // Create mints a new session (opaque id + rotated CSRF token) for userID.
 func (m *SessionManager) Create(ctx context.Context, userID, ip, ua string) (store.Session, error) {
 	id, err := RandToken(32)
 	if err != nil {
 		return store.Session{}, fmt.Errorf("auth.Session.Create: id: %w", err)
 	}
-	csrf, err := GenerateCSRFToken()
+	csrf, err := RandToken(32)
 	if err != nil {
-		return store.Session{}, err
+		return store.Session{}, fmt.Errorf("auth.Session.Create: csrf: %w", err)
 	}
 	now := m.now()
 	return m.sessions.Create(ctx, store.Session{

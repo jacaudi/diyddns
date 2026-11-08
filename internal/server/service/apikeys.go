@@ -12,10 +12,6 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// APIKeyPrefix re-exports store.APIKeyPrefix for callers in this package's
-// orbit (tests, the web UI, the REST layer); the constant is owned by store.
-const APIKeyPrefix = store.APIKeyPrefix
-
 // ErrKeyMalformed is returned by Authenticate for a value that cannot be an
 // API key at all (wrong prefix). Distinct from store.ErrNotFound so the
 // middleware can log "malformed" vs "unknown_key" (design D5).
@@ -49,7 +45,7 @@ func NewAPIKeyService(st *store.Store, audit AuditSink) *APIKeyService {
 
 // MintKey creates a key and returns its plaintext exactly once. label is
 // trimmed of surrounding whitespace; MintKey returns ErrInvalidKeyLabel if
-// that leaves it empty. The plaintext is APIKeyPrefix + 32 random bytes
+// that leaves it empty. The plaintext is store.APIKeyPrefix + 32 random bytes
 // (base64url); only its SHA-256 hash is stored (auth.HashToken). AdminScope
 // is ALWAYS false here -- #149's write-path guarantee (design D2/S6): no
 // parameter or input path in this function can set it otherwise. Returns
@@ -64,7 +60,7 @@ func (s *APIKeyService) MintKey(ctx context.Context, userID, label string) (stor
 	if err != nil {
 		return store.APIKey{}, "", fmt.Errorf("service.MintKey: %w", err)
 	}
-	plaintext := APIKeyPrefix + rnd
+	plaintext := store.APIKeyPrefix + rnd
 	key := store.APIKey{
 		ID:        store.NewID(),
 		UserID:    userID,
@@ -141,7 +137,7 @@ func (s *APIKeyService) RevokeKey(ctx context.Context, userID, id string) error 
 // entry, cleared on process restart) and explicitly not worth more
 // mechanism than that.
 func (s *APIKeyService) Authenticate(ctx context.Context, plaintext string) (store.APIKey, error) {
-	if !strings.HasPrefix(plaintext, APIKeyPrefix) {
+	if !strings.HasPrefix(plaintext, store.APIKeyPrefix) {
 		return store.APIKey{}, ErrKeyMalformed
 	}
 	key, err := s.st.APIKeys().GetByHash(ctx, auth.HashToken(plaintext))

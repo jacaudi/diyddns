@@ -137,7 +137,7 @@ func (h *handler) renderStatus(w http.ResponseWriter, r *http.Request, status in
 // ServeMux is a catch-all prefix and would swallow every unmatched URL,
 // turning genuine 404s into redirects.
 func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := authenticateBrowser(h.deps.Sessions, r, h.deps.Cfg.Auth.Session.CookieName); err != nil {
+	if _, _, err := h.deps.Sessions.AuthenticateRequest(r, h.deps.Cfg.Auth.Session.CookieName); err != nil {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
@@ -153,7 +153,7 @@ func (h *handler) handleRoot(w http.ResponseWriter, r *http.Request) {
 // screen, matching requireSession's own behavior; a signed-in user genuinely
 // hit a nonexistent page and sees a real 404, not a login loop.
 func (h *handler) handleNotFound(w http.ResponseWriter, r *http.Request) {
-	usr, _, err := authenticateBrowser(h.deps.Sessions, r, h.deps.Cfg.Auth.Session.CookieName)
+	usr, _, err := h.deps.Sessions.AuthenticateRequest(r, h.deps.Cfg.Auth.Session.CookieName)
 	if err != nil {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -192,7 +192,7 @@ func (h *handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// A still-valid session cookie is uncommon on /login (mainly: the user
 	// navigated back after signing in) but when present it lets the
 	// recovery-request form carry a real CSRF token instead of "".
-	if _, sess, err := authenticateBrowser(h.deps.Sessions, r, h.deps.Cfg.Auth.Session.CookieName); err == nil {
+	if _, sess, err := h.deps.Sessions.AuthenticateRequest(r, h.deps.Cfg.Auth.Session.CookieName); err == nil {
 		data.CSRFToken = sess.CSRFToken
 	}
 	h.render(w, r, "login", data)
