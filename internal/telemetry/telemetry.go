@@ -15,8 +15,8 @@
 // construction would be captured before SetErrorHandler could otherwise
 // install a channel. That ordering problem is now solved by the CALLER
 // instead: cmd/diyddns-server installs otel.SetLogger against its own logger
-// BEFORE calling New, using server.LazyLoggerProvider to give NewLogger a
-// slot it can fill once New returns the real provider. New goes back to
+// BEFORE calling New, then adds the logs bridge with server.WithOTLP once New
+// returns the real provider. New goes back to
 // installing nothing at all -- SetErrorHandler remains the only place this
 // package ever touches an OTel global, and it is opt-in, called once
 // construction has succeeded.
@@ -140,7 +140,7 @@ const partialShutdownTimeout = 5 * time.Second
 // malformed OTEL_* variable reported from inside exporter construction is the
 // CALLER's responsibility to capture, by installing otel.SetLogger against
 // its own logger before calling New -- see the package doc comment and
-// server.LazyLoggerProvider.
+// server.WithOTLP.
 func New(ctx context.Context, cfg config.OTLPSection, logLevel slog.Level, info version.Info) (*Providers, Status) {
 	if !cfg.Enabled {
 		return inert(), Status{}

@@ -556,7 +556,7 @@ func TestHandler_AccessLogRouteCoversEverySurface(t *testing.T) {
 	// Level debug, not info: /healthz logs at Debug (it's polled every few
 	// seconds by a liveness probe and would spam Info-level logs otherwise),
 	// and the "plain mux health" row below needs its record to exist.
-	log, err := server.NewLogger(config.LoggingSection{Level: "debug", Format: "json", Output: path}, nil)
+	log, err := server.NewLogger(config.LoggingSection{Level: "debug", Format: "json", Output: path})
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
