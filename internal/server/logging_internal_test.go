@@ -13,14 +13,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// A nil provider must build EXACTLY today's handler: no MultiHandler, no
-// bridge. This is NOT the production telemetry-disabled path (Revision 6:
-// cmd/diyddns-server always passes a *LazyLoggerProvider, never a literal
-// nil) -- it is the regression guard for the secondary nil path NewLogger's
-// doc comment describes, exercised directly by any caller with no lazy slot
-// to offer, such as this test.
-func TestNewLogger_NilProviderBuildsNoMultiHandler(t *testing.T) {
-	log, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"}, nil)
+// NewLogger alone builds no MultiHandler and no bridge: the bridge is added
+// only by WithOTLP, once a provider exists.
+func TestNewLogger_BuildsNoMultiHandler(t *testing.T) {
+	log, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"})
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
@@ -29,28 +25,7 @@ func TestNewLogger_NilProviderBuildsNoMultiHandler(t *testing.T) {
 		t.Fatalf("outermost handler is %T, want requestIDHandler", log.Handler())
 	}
 	if _, isMulti := rh.inner.(*slog.MultiHandler); isMulti {
-		t.Error("a nil LoggerProvider must NOT produce a MultiHandler branch")
-	}
-}
-
-// With a provider, the bridge is the second branch -- and requestIDHandler
-// stays OUTERMOST so request_id is added once and cloned into both branches,
-// rather than being computed per branch.
-func TestNewLogger_ProviderAddsMultiHandlerInsideRequestID(t *testing.T) {
-	// The SAME seam Step 10.3's minsev test uses -- do NOT write a second
-	// helper. capturingProcessor is defined in this file (see Step 10.3).
-	lp := telemetry.NewLoggerProvider(&capturingProcessor{}, slog.LevelInfo)
-	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
-	log, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"}, lp)
-	if err != nil {
-		t.Fatalf("NewLogger: %v", err)
-	}
-	rh, ok := log.Handler().(requestIDHandler)
-	if !ok {
-		t.Fatalf("outermost handler is %T, want requestIDHandler", log.Handler())
-	}
-	if _, isMulti := rh.inner.(*slog.MultiHandler); !isMulti {
-		t.Errorf("inner handler is %T, want *slog.MultiHandler", rh.inner)
+		t.Error("NewLogger must NOT produce a MultiHandler branch")
 	}
 }
 
@@ -95,10 +70,11 @@ func TestNewLogger_BridgeHonoursLoggingLevel(t *testing.T) {
 	lp := telemetry.NewLoggerProvider(rec, slog.LevelInfo)
 	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
 
-	log, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"}, lp)
+	base, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"})
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
+	log := WithOTLP(base, lp)
 	log.Debug("this must not be exported")
 	log.Info("this must be exported")
 
@@ -124,10 +100,11 @@ func TestNewLogger_RecordInsideSpanCarriesTraceID(t *testing.T) {
 	lp := telemetry.NewLoggerProvider(rec, slog.LevelInfo)
 	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
 
-	log, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"}, lp)
+	base, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"})
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
+	log := WithOTLP(base, lp)
 
 	tp := sdktrace.NewTracerProvider()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
@@ -147,47 +124,52 @@ func TestNewLogger_RecordInsideSpanCarriesTraceID(t *testing.T) {
 	}
 }
 
-// Fix round 1, C2. This is the SAME logger otelslog.NewHandler builds once
-// and holds for its lifetime -- and Task 13's own documented startup order
-// (otel.SetLogger(telemetry.OtelLogr(log)) BEFORE telemetry.New, per the package doc
-// comment on server.LazyLoggerProvider) guarantees a real caller will ask this
-// logger to log at least once while the slot is still empty: logr's slog sink
-// calls Handler.Enabled first (go-logr/logr@v1.4.4/slogsink.go:68-70), and
-// that lands here through otelslog before Store has ever run.
-//
-// A lazyLogger implementation that caches an EMPTY-SLOT miss (as opposed to
-// only caching a genuine resolution) would silently and permanently stop
-// exporting from that point on -- for the life of the process, since
-// otelslog.Handler.WithAttrs/WithGroup copy the struct and reuse the SAME
-// h.logger (otelslog@v0.20.1/handler.go:274,292). This test drives exactly
-// that sequence: log while empty, THEN fill the slot, THEN log again, and
-// requires the second record to actually reach the exporter.
-func TestNewLogger_LazyProviderFillsAfterEmptySlotMiss(t *testing.T) {
-	var lazy LazyLoggerProvider
-	log, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"}, &lazy)
+// cmd/diyddns-server builds its logger BEFORE telemetry.New (so otel.SetLogger
+// can catch a malformed OTEL_* variable reported from inside exporter
+// construction) and adds the bridge with WithOTLP once the provider exists.
+// Records logged before that point reach only the local output; records
+// logged through the returned logger reach the exporter too, with
+// request_id still added once, outermost.
+func TestWithOTLP_AddsBridgeToExistingLogger(t *testing.T) {
+	base, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"})
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
-
-	// A miss while the slot is empty: must not panic, and must not poison the
-	// logger against ever exporting once the slot is filled.
-	log.Info("before store")
+	base.Info("before bridge")
 
 	rec := &capturingProcessor{}
 	lp := telemetry.NewLoggerProvider(rec, slog.LevelInfo)
 	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
-	lazy.Store(lp)
+	log := WithOTLP(base, lp)
 
-	log.Info("after store")
+	rh, ok := log.Handler().(requestIDHandler)
+	if !ok {
+		t.Fatalf("outermost handler is %T, want requestIDHandler", log.Handler())
+	}
+	if _, isMulti := rh.inner.(*slog.MultiHandler); !isMulti {
+		t.Errorf("inner handler is %T, want *slog.MultiHandler", rh.inner)
+	}
 
+	log.Info("after bridge")
 	if err := lp.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("ForceFlush: %v", err)
 	}
 	got := rec.records()
 	if len(got) != 1 {
-		t.Fatalf("exported %d records after Store, want 1 (an empty-slot miss must not be cached)", len(got))
+		t.Fatalf("exported %d records, want 1", len(got))
 	}
-	if got[0].Body().AsString() != "after store" {
-		t.Errorf("exported record body = %q, want %q", got[0].Body().AsString(), "after store")
+	if got[0].Body().AsString() != "after bridge" {
+		t.Errorf("exported record body = %q, want %q", got[0].Body().AsString(), "after bridge")
+	}
+}
+
+// A nil provider (telemetry off or inert) returns the logger unchanged.
+func TestWithOTLP_NilProviderIsIdentity(t *testing.T) {
+	base, err := NewLogger(config.LoggingSection{Level: "info", Format: "json", Output: "stderr"})
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	if got := WithOTLP(base, nil); got != base {
+		t.Error("WithOTLP(log, nil) must return log itself")
 	}
 }

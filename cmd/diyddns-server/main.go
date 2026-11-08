@@ -71,11 +71,9 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 
-			// otlpSlot starts empty; NewLogger's MultiHandler branch built around
-			// it is a safe no-op until telemetry.New's real provider lands in it
-			// below (server.LazyLoggerProvider's doc comment).
-			var otlpSlot server.LazyLoggerProvider
-			log, err := server.NewLogger(cfg.Logging, &otlpSlot)
+			// No OTLP branch yet: server.WithOTLP adds it below, once
+			// telemetry.New has built the provider.
+			log, err := server.NewLogger(cfg.Logging)
 			if err != nil {
 				return err
 			}
@@ -110,7 +108,9 @@ func serveCmd() *cobra.Command {
 					slog.Bool("fatal", status.Fatal),
 				)
 			}
-			otlpSlot.Store(tel.LoggerProvider())
+			// SetErrorHandler re-installs otel.SetLogger against this final
+			// logger when telemetry is live.
+			log = server.WithOTLP(log, tel.LoggerProvider())
 			tel.SetErrorHandler(log)
 			defer func() {
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), server.TelemetryShutdownTimeout)
