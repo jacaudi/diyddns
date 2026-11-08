@@ -26,13 +26,6 @@ func SetPingTimeout(d time.Duration) func() {
 	return func() { pingTimeout = old }
 }
 
-// SetWriteTimeout shortens the per-write timeout for tests.
-func SetWriteTimeout(d time.Duration) func() {
-	old := writeTimeout
-	writeTimeout = d
-	return func() { writeTimeout = old }
-}
-
 // SetBeforeSnapshot installs the hook the stream handler calls immediately
 // before rendering the snapshot.
 func SetBeforeSnapshot(fn func()) func() {
