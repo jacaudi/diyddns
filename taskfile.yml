@@ -123,9 +123,16 @@ tasks:
 
   db:backup:
     desc: "Safely back up the SQLite database file (Usage: task db:backup -- <src.db> <out.db>)"
+    # VACUUM INTO writes a consistent copy even while the server is writing
+    # (WAL), and refuses to overwrite an existing <out.db>. The -f check
+    # matters: sqlite3 would otherwise CREATE an empty <src.db> and back it up.
     cmds:
-      - >
-        go run github.com/pressly/goose/v3/cmd/goose@latest -h >/dev/null 2>&1 || true ;
-        echo "Use the SQLite VACUUM INTO API:" ;
-        echo "  sqlite3 {{.CLI_ARGS}}" ;
-        echo "or, programmatically, .DB().ExecContext(ctx, \"VACUUM INTO ?\", outPath)"
+      - |
+        set -eu
+        set -- {{.CLI_ARGS}}
+        [ "$#" -eq 2 ] || { echo "usage: task db:backup -- <src.db> <out.db>" >&2; exit 1; }
+        command -v sqlite3 >/dev/null || { echo "db:backup: sqlite3 not installed (it runs VACUUM INTO)" >&2; exit 1; }
+        [ -f "$1" ] || { echo "db:backup: $1: no such database file" >&2; exit 1; }
+        out=$(printf '%s' "$2" | sed "s/'/''/g")
+        sqlite3 "$1" "VACUUM INTO '$out'"
+        echo "backed up $1 to $2"
