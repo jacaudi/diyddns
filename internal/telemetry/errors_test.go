@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/jacaudi/diyddns/internal/logtest"
 	"go.opentelemetry.io/otel"
 )
@@ -196,47 +195,29 @@ func TestRateLimited_LevelIsExactlyWarn(t *testing.T) {
 	}
 }
 
-// setDiagnostics is SetErrorHandler's real body; this captures what it
-// installs without touching OTel's actual global state (see setDiagnostics's
-// doc comment for why reading that state back is either order-dependent or,
-// for the logger, impossible). It closes the same 5 mutations the coordinator
-// named: dropping p.logger = logger, dropping either otel setter call, and
-// -- because it inspects the actual VALUES passed to each setter -- omitting
-// either the `log:` or `now:` field on the constructed *rateLimited (both of
-// which would panic in production the first time an exporter's goroutine
-// calls Handle against a nil field).
-func TestSetDiagnostics_InstallsBothChannels(t *testing.T) {
+// SetErrorHandler installs a working *rateLimited as OTel's global error
+// handler and stores p.logger. It drives the REAL otel.SetErrorHandler and
+// reads it back through otel.GetErrorHandler, which returns the handler most
+// recently set (otel@v1.47.0 internal/errorhandler/errorhandler.go:67-69,93);
+// Cleanup restores the previous one so no later test inherits this buffer.
+// Handle on a *rateLimited missing its log or now field panics, so one Handle
+// call pins both fields. The otel.SetLogger half cannot be read back (OtelLogr's
+// doc comment); its value is pinned by TestOtelLogr_ErrorIsStructuredWarnStaysBelowInfo.
+func TestSetErrorHandler_InstallsTheGlobalErrorHandler(t *testing.T) {
+	prev := otel.GetErrorHandler()
+	t.Cleanup(func() { otel.SetErrorHandler(prev) })
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	p := &Providers{shutdown: []func(context.Context) error{func(context.Context) error { return nil }}}
-
-	var gotHandler otel.ErrorHandler
-	var gotLogr logr.Logger
-	p.setDiagnostics(logger,
-		func(h otel.ErrorHandler) { gotHandler = h },
-		func(l logr.Logger) { gotLogr = l },
-	)
+	p.SetErrorHandler(logger)
 
 	if p.logger != logger {
-		t.Fatal("setDiagnostics must store p.logger")
+		t.Fatal("SetErrorHandler must store p.logger")
 	}
-	if gotHandler == nil {
-		t.Fatal("setDiagnostics must pass a non-nil otel.ErrorHandler to setErrorHandler")
-	}
-
-	// The captured ErrorHandler must be a genuinely working *rateLimited, not
-	// one missing a field: a `log: nil` or `now: nil` rateLimited panics the
-	// first time Handle runs, which happens in production inside an OTel
-	// exporter's own goroutine.
-	gotHandler.Handle(errors.New("boom"))
+	otel.GetErrorHandler().Handle(errors.New("boom"))
 	if got := records(t, &buf); len(got) != 1 {
-		t.Fatalf("captured ErrorHandler.Handle produced %d records, want 1", len(got))
-	}
-
-	buf.Reset()
-	gotLogr.Error(errors.New("boom2"), "exporter failed")
-	if got := records(t, &buf); len(got) != 1 {
-		t.Fatalf("captured logr.Logger.Error produced %d records, want 1", len(got))
+		t.Fatalf("installed ErrorHandler.Handle produced %d records, want 1", len(got))
 	}
 }
 
