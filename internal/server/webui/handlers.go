@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -221,11 +222,6 @@ func (d registerData) IsFirstRun() bool { return d.State == service.RegisterFirs
 // existing passkeys.
 func (d registerData) IsRecovery() bool { return d.Reason == "recovery" }
 
-// statusClientClosedRequest is the status for a request whose client went away
-// before the page was rendered (nginx's 499). net/http has no constant for it.
-// api declares its own copy: the two adapters share no HTTP-layer package.
-const statusClientClosedRequest = 499
-
 // handleRegister renders /register from GrantService.ClassifyRegistration, so
 // the page and POST /api/v1/register/begin can never disagree about which flow
 // a token is in (#188): a live grant names its flow and account (no Email
@@ -245,7 +241,7 @@ func (h *handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if store.Cancelled(ctx, err) {
 			h.deps.Log.LogAttrs(ctx, slog.LevelInfo, "webui: register cancelled", slog.Any("error", err))
-			w.WriteHeader(statusClientClosedRequest)
+			w.WriteHeader(shared.StatusClientClosedRequest)
 			return
 		}
 		h.logAndFail(w, r, store.User{}, "classify registration", err)

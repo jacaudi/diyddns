@@ -20,6 +20,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/semconv/v1.43.0/httpconv"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // maxRequestIDLen bounds an inbound correlation id. 128 admits a UUIDv7 (36)
@@ -60,22 +62,11 @@ func RequestIDFromContext(ctx context.Context) string {
 // emit. They are different rules over different values and are expected to
 // diverge.
 //
-// It is likewise not shared with api.claimedDeviceID, which applies the same
-// 128-byte printable-ASCII bound to the agent device header. That one's limit
-// is set by what this server mints, this one's by what upstream proxies emit,
-// and internal/server/api does not import this package — unifying them would
-// buy a cross-package edge for a rule the two sides do not co-own. Identical
-// today; keep them in step or diverge them deliberately.
+// The byte rule is shared.PrintableASCII, the same one api.claimedDeviceID and
+// serverAddress apply; the LENGTH is this header's own (api's device-id bound
+// is set by what this server mints, this one by what upstream proxies emit).
 func validRequestID(s string) bool {
-	if s == "" || len(s) > maxRequestIDLen {
-		return false
-	}
-	for i := range len(s) {
-		if s[i] < 0x20 || s[i] > 0x7E {
-			return false
-		}
-	}
-	return true
+	return s != "" && shared.PrintableASCII(s, maxRequestIDLen)
 }
 
 // RequestID assigns each request a correlation id: it honors an inbound
@@ -267,10 +258,9 @@ const maxServerAddressLen = 253
 // every span batched with it, and a caller repeating it stops trace export
 // process-wide. That is a remote, unauthenticated denial of observability.
 //
-// The predicate is duplicated from validRequestID rather than extracted, for
-// the same reason the two length bounds are separate: a correlation id and a
-// hostname have different legitimate alphabets and are expected to diverge.
-// They coincide at printable ASCII today by arithmetic, not by a shared rule.
+// The byte rule is shared.PrintableASCII, as for validRequestID; the length
+// bound is this attribute's own. Should a hostname's alphabet ever need to
+// diverge from a correlation id's, give this call its own predicate again.
 //
 // IPv6 is asymmetric here, and deliberately so: net.SplitHostPort splits
 // "[2001:db8::1]:8080" into "2001:db8::1" (port AND brackets stripped), but
@@ -279,13 +269,8 @@ const maxServerAddressLen = 253
 // server.address values for the same host; verified against net.SplitHostPort
 // directly, not assumed.
 func serverAddress(host string) string {
-	if len(host) > maxServerAddressLen {
+	if !shared.PrintableASCII(host, maxServerAddressLen) {
 		return ""
-	}
-	for i := range len(host) {
-		if host[i] < 0x20 || host[i] > 0x7E {
-			return ""
-		}
 	}
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		return h

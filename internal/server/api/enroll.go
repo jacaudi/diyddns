@@ -9,6 +9,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -35,7 +36,7 @@ func enrollErr(ctx context.Context, deps ServerDeps, err error) error {
 		return huma.Error409Conflict(errDeviceLabelTaken)
 	case store.Cancelled(ctx, err):
 		deps.Log.LogAttrs(ctx, slog.LevelInfo, "enroll device cancelled", slog.Any("error", err))
-		return huma.NewError(statusClientClosedRequest, msgClientClosedRequest)
+		return huma.NewError(shared.StatusClientClosedRequest, msgClientClosedRequest)
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, "enroll device failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to enroll device")
