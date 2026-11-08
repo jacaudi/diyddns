@@ -77,7 +77,7 @@ func pinOTLPEnv(t *testing.T) {
 
 // TestServe_OtelSetLoggerInstalledBeforeTelemetryNew defends the ordering
 // Task 6 first pinned and Revision 6 moved into serveCmd:
-// otel.SetLogger(telemetry.OtelLogr(log)) MUST run before telemetry.New, or a
+// otel.SetLogger(logr.FromSlogHandler(log.Handler())) MUST run before telemetry.New, or a
 // malformed OTEL_* variable -- reported from inside exporter construction,
 // the only place it is ever surfaced -- is silently dropped instead of
 // reaching the operator's log.
@@ -91,7 +91,7 @@ func pinOTLPEnv(t *testing.T) {
 // file if otel.SetLogger was installed against it before telemetry.New ran.
 //
 // To verify this test actually catches the regression it exists for: move
-// the otel.SetLogger(telemetry.OtelLogr(log)) call in serveCmd to AFTER the
+// the otel.SetLogger(logr.FromSlogHandler(log.Handler())) call in serveCmd to AFTER the
 // telemetry.New call and re-run -- the "parse duration" line disappears from
 // the log file and this test fails.
 func TestServe_OtelSetLoggerInstalledBeforeTelemetryNew(t *testing.T) {

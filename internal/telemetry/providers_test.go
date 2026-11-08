@@ -13,10 +13,11 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/version"
-	"go.opentelemetry.io/contrib/processors/minsev"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	otellog "go.opentelemetry.io/otel/log"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -183,32 +184,48 @@ func TestNew_MalformedTimeoutIsNotFatal(t *testing.T) {
 	}
 }
 
-// minsevFor is an EXACT conversion (minsev.Severity IS the slog scale by
-// construction), not a lossy approximation. The offset case -- slog.Level(2),
+// The minsev threshold is the slog level EXACTLY (minsev.Severity IS the slog
+// scale by construction), not a lossy table. The offset case -- slog.Level(2),
 // what "info+2" parses to via slog.Level.UnmarshalText with no validator on
 // logging.level -- is the one a four-branch table over named levels alone
-// gets wrong (a table would round it to SeverityWarn); it is the whole point
-// of this test.
-func TestMinsevFor(t *testing.T) {
+// gets wrong (it would round it to SeverityWarn and drop INFO3 over OTLP while
+// stdout still emits it). Driven through NewLoggerProvider, the same
+// construction New uses.
+func TestNewLoggerProvider_GatesAtTheExactSlogLevel(t *testing.T) {
 	tests := []struct {
-		name string
-		in   slog.Level
-		want minsev.Severity
+		name    string
+		level   slog.Level
+		atLevel otellog.Severity // the OTel severity of a record AT level
+		below   otellog.Severity // one step below it
 	}{
-		{"debug", slog.LevelDebug, minsev.SeverityDebug},
-		{"info", slog.LevelInfo, minsev.SeverityInfo},
-		{"warn", slog.LevelWarn, minsev.SeverityWarn},
-		{"error", slog.LevelError, minsev.SeverityError},
-		{"offset (info+2)", slog.Level(2), minsev.Severity(2)},
+		{"debug", slog.LevelDebug, otellog.SeverityDebug, otellog.SeverityTrace4},
+		{"info", slog.LevelInfo, otellog.SeverityInfo, otellog.SeverityDebug4},
+		{"warn", slog.LevelWarn, otellog.SeverityWarn, otellog.SeverityInfo4},
+		{"error", slog.LevelError, otellog.SeverityError, otellog.SeverityWarn4},
+		{"offset (info+2)", slog.Level(2), otellog.SeverityInfo3, otellog.SeverityInfo2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := minsevFor(tt.in); got != tt.want {
-				t.Errorf("minsevFor(%v) = %v, want %v", tt.in, got, tt.want)
+			lp := NewLoggerProvider(enabledProcessor{}, tt.level)
+			t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
+			lg := lp.Logger("test")
+			if !lg.Enabled(t.Context(), otellog.EnabledParameters{Severity: tt.atLevel}) {
+				t.Errorf("a %v record is gated out at logging.level %v, want it exported", tt.atLevel, tt.level)
+			}
+			if lg.Enabled(t.Context(), otellog.EnabledParameters{Severity: tt.below}) {
+				t.Errorf("a %v record is exported at logging.level %v, want it gated out", tt.below, tt.level)
 			}
 		})
 	}
 }
+
+// enabledProcessor accepts everything, so only minsev decides Enabled.
+type enabledProcessor struct{}
+
+func (enabledProcessor) OnEmit(context.Context, *sdklog.Record) error           { return nil }
+func (enabledProcessor) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }
+func (enabledProcessor) Shutdown(context.Context) error                         { return nil }
+func (enabledProcessor) ForceFlush(context.Context) error                       { return nil }
 
 // A partial RetryConfig literal at any of the three call sites zeroes
 // InitialInterval and MaxInterval, which retry.go:73-79 feeds straight into
