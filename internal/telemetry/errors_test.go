@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/jacaudi/diyddns/internal/logtest"
 	"go.opentelemetry.io/otel"
 )
@@ -201,8 +202,8 @@ func TestRateLimited_LevelIsExactlyWarn(t *testing.T) {
 // recently set (otel@v1.47.0 internal/errorhandler/errorhandler.go:67-69,93);
 // Cleanup restores the previous one so no later test inherits this buffer.
 // Handle on a *rateLimited missing its log or now field panics, so one Handle
-// call pins both fields. The otel.SetLogger half cannot be read back (OtelLogr's
-// doc comment); its value is pinned by TestOtelLogr_ErrorIsStructuredWarnStaysBelowInfo.
+// call pins both fields. The otel.SetLogger half cannot be read back (SetErrorHandler's
+// doc comment); its adapter is pinned by TestOtelLogger_ErrorIsStructuredWarnStaysBelowInfo.
 func TestSetErrorHandler_InstallsTheGlobalErrorHandler(t *testing.T) {
 	prev := otel.GetErrorHandler()
 	t.Cleanup(func() { otel.SetErrorHandler(prev) })
@@ -242,15 +243,16 @@ func TestSetErrorHandler_NilLoggerIsNoOp(t *testing.T) {
 	}
 }
 
-// OtelLogr's doc comment makes two checkable claims: Error records arrive
+// SetErrorHandler's doc comment makes two checkable claims about the
+// logr.FromSlogHandler adapter it hands otel.SetLogger: Error records arrive
 // structured, and V(1) Warns (OTel's global.Warn -- internal_logging.go:60-61)
 // land at slog level -1 and stay below Info (go-logr/logr@v1.4.4/slogsink.go
 // :68-73). This test pins both halves so a future reader cannot "fix" the
 // second half wrongly, believing Warns are being dropped by accident.
-func TestOtelLogr_ErrorIsStructuredWarnStaysBelowInfo(t *testing.T) {
+func TestOtelLogger_ErrorIsStructuredWarnStaysBelowInfo(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	lg := OtelLogr(base)
+	lg := logr.FromSlogHandler(base.Handler())
 
 	lg.Error(errors.New("boom"), "exporter failed")
 	rs := records(t, &buf)

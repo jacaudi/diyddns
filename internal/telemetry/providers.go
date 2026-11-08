@@ -51,25 +51,6 @@ var otlpRetry = otlptracehttp.RetryConfig{
 	MaxElapsedTime:  5 * time.Second, // SDK default 1m
 }
 
-// minsevFor maps a slog.Level onto the minsev.Severity minsev gates against.
-//
-// This is an EXACT conversion, not an approximation: minsev.Severity IS the
-// slog scale by construction (minsev@v0.16.3/severity.go:47-81 defines
-// SeverityDebug/Info/Warn/Error as -4/0/4/8, numerically identical to
-// slog.LevelDebug/Info/Warn/Error), and minsev.Severity.Severity() (severity.go
-// :87-103) does the offset translation to OTel's 5/9/13/17 internally. A
-// four-branch table over just the named levels is a LOSSY approximation of
-// this identity conversion: logging.level accepts slog's offset syntax with no
-// validator (config.go's logging.level is free-form, parsed by
-// slog.Level.UnmarshalText), so "info+2" parses to slog.Level(2) and a table
-// keyed only on the four named levels would round it to SeverityWarn, dropping
-// INFO3 records over OTLP that stdout still emits -- a stdout/OTLP divergence
-// design D4 promises cannot happen. Verified with a throwaway probe before
-// making this change (see task-5-report.md, Fix round 2, S2).
-func minsevFor(l slog.Level) minsev.Severity {
-	return minsev.Severity(l)
-}
-
 // newLoggerProvider is THE construction site for the minsev gating. Both the
 // production path (buildLogsFor, below) and the exported NewLoggerProvider seam
 // Task 10 adds go through it, so a test that exercises the seam genuinely
@@ -78,6 +59,13 @@ func minsevFor(l slog.Level) minsev.Severity {
 // It is declared in THIS task, not Task 10, because buildLogsFor is its first
 // user and Task 10 does not modify buildLogsFor: declaring it there would leave
 // Task 5 uncompilable. Same reasoning as InstrumentationName in Task 2.
+//
+// Callers pass sev as minsev.Severity(level): an EXACT conversion, because
+// minsev.Severity IS the slog scale by construction (minsev severity.go
+// defines Debug/Info/Warn/Error as -4/0/4/8). Never a table over the named
+// levels: logging.level accepts slog's offset syntax, and a table would round
+// "info+2" to Warn and drop INFO3 over OTLP while stdout still emits it
+// (TestNewLoggerProvider_GatesAtTheExactSlogLevel).
 func newLoggerProvider(proc sdklog.Processor, sev minsev.Severity, extra ...sdklog.LoggerProviderOption) *sdklog.LoggerProvider {
 	opts := append([]sdklog.LoggerProviderOption{
 		sdklog.WithProcessor(minsev.NewLogProcessor(proc, sev)),
@@ -92,7 +80,7 @@ func newLoggerProvider(proc sdklog.Processor, sev minsev.Severity, extra ...sdkl
 // It takes NO testing.TB: that would link testing, flag and regexp into the
 // server binary. The caller owns the returned provider's Shutdown.
 func NewLoggerProvider(proc sdklog.Processor, level slog.Level) *sdklog.LoggerProvider {
-	return newLoggerProvider(proc, minsevFor(level))
+	return newLoggerProvider(proc, minsev.Severity(level))
 }
 
 // buildTraces constructs the tracer provider and stores p.tracer.
@@ -217,7 +205,7 @@ func (p *Providers) buildLogsFor(level slog.Level) func(context.Context, config.
 		// while leaving every test in Tasks 5 and 10 green -- the only thing
 		// holding this together is the convention of always routing through
 		// newLoggerProvider. Do not inline this call.
-		lp := newLoggerProvider(sdklog.NewBatchProcessor(exp), minsevFor(level), sdklog.WithResource(res))
+		lp := newLoggerProvider(sdklog.NewBatchProcessor(exp), minsev.Severity(level), sdklog.WithResource(res))
 		p.shutdown = append(p.shutdown, lp.Shutdown)
 		p.loggerProvider = lp
 		return Status{}

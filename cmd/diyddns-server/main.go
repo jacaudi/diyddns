@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 
 	"github.com/jacaudi/diyddns/internal/config"
@@ -92,9 +93,9 @@ func serveCmd() *cobra.Command {
 			// state-without-a-requirement, exactly what D10 removed for the
 			// provider globals. Note there is no way to assert this from a
 			// test: OTel exposes no GetLogger and its internal/global package
-			// is unimportable (telemetry.OtelLogr's doc comment).
+			// is unimportable (telemetry.Providers.SetErrorHandler's doc comment).
 			if cfg.Observability.OTLP.Enabled {
-				otel.SetLogger(telemetry.OtelLogr(log))
+				otel.SetLogger(logr.FromSlogHandler(log.Handler()))
 			}
 
 			// Constructed -- and its Shutdown deferred -- before
