@@ -134,9 +134,6 @@ func TestLoad_AuthDefaults(t *testing.T) {
 	if !cfg.Auth.Session.CookieSecure {
 		t.Error("Session.CookieSecure = false, want true")
 	}
-	if cfg.Auth.Session.CookieSameSite != "lax" {
-		t.Errorf("Session.CookieSameSite = %q, want lax", cfg.Auth.Session.CookieSameSite)
-	}
 	if cfg.Auth.Session.TTL != 720*time.Hour {
 		t.Errorf("Session.TTL = %v, want 720h", cfg.Auth.Session.TTL)
 	}

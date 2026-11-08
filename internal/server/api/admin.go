@@ -275,14 +275,13 @@ type serverInfoOIDC struct {
 	AllowOIDCSignup bool     `json:"allow_oidc_signup"`
 }
 type serverInfoResponse struct {
-	Version         string         `json:"version"`
-	Commit          string         `json:"commit"`
-	Date            string         `json:"date"`
-	SkewWindowSecs  int64          `json:"skew_window_secs"`
-	SessionCookie   string         `json:"session_cookie"`
-	SessionSecure   bool           `json:"session_secure"`
-	SessionSameSite string         `json:"session_samesite"`
-	OIDC            serverInfoOIDC `json:"oidc"`
+	Version        string         `json:"version"`
+	Commit         string         `json:"commit"`
+	Date           string         `json:"date"`
+	SkewWindowSecs int64          `json:"skew_window_secs"`
+	SessionCookie  string         `json:"session_cookie"`
+	SessionSecure  bool           `json:"session_secure"`
+	OIDC           serverInfoOIDC `json:"oidc"`
 }
 type serverInfoOutput struct{ Body serverInfoResponse }
 
@@ -404,13 +403,12 @@ func registerAdminOps(a huma.API, deps ServerDeps) {
 		oidc := deps.Cfg.OIDC
 		sess := deps.Cfg.Session
 		return &serverInfoOutput{Body: serverInfoResponse{
-			Version:         deps.Info.Version,
-			Commit:          deps.Info.Commit,
-			Date:            deps.Info.Date,
-			SkewWindowSecs:  int64(deps.Cfg.HMAC.SkewWindow.Seconds()),
-			SessionCookie:   sess.CookieName,
-			SessionSecure:   sess.CookieSecure,
-			SessionSameSite: sess.CookieSameSite,
+			Version:        deps.Info.Version,
+			Commit:         deps.Info.Commit,
+			Date:           deps.Info.Date,
+			SkewWindowSecs: int64(deps.Cfg.HMAC.SkewWindow.Seconds()),
+			SessionCookie:  sess.CookieName,
+			SessionSecure:  sess.CookieSecure,
 			OIDC: serverInfoOIDC{
 				Enabled: oidc.Enabled, Required: oidc.Required, Issuer: oidc.Issuer,
 				ClientID: oidc.ClientID, Scopes: oidc.Scopes,

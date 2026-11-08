@@ -845,7 +845,7 @@ func (h *handler) handleAdminServer(w http.ResponseWriter, r *http.Request, usr 
 		{Label: "Cookie Secure", Value: enabledLabel(r.TLS != nil || cfg.Auth.Session.CookieSecure),
 			Note: "effective value: set whenever the request arrived over TLS, regardless of the config key"},
 		{Label: "Cookie SameSite", Value: "Lax",
-			Note: "the cookie_samesite config key is not currently honored — every cookie is set Lax"},
+			Note: "every cookie this server sets is SameSite=Lax"},
 		{Label: "HMAC skew window", Value: cfg.Auth.HMAC.SkewWindow.String()},
 		{Label: "Device staleness threshold", Value: staleAfter.String(),
 			Note: "a device that has not checked in within this window shows as Stale"},
