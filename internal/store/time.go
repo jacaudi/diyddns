@@ -7,9 +7,3 @@ import "time"
 func NowUnix() int64 {
 	return time.Now().Unix()
 }
-
-// UnixToTime converts a stored unix-seconds value to a UTC time.Time. The
-// inverse of NowUnix() / time.Now().Unix() round-trips at second precision.
-func UnixToTime(sec int64) time.Time {
-	return time.Unix(sec, 0).UTC()
-}
