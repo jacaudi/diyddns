@@ -56,7 +56,7 @@ func newAdminSvcWithPasskeys(t *testing.T) (*store.Store, *AdminService) {
 	audit := NewAuditWriter(st)
 	passkeys := newTestPasskeyService(t, st, audit)
 	grants := NewGrantService(st, passkeys, &fakeMailer{}, "https://ddns.example.com", audit, discardLogger(), testLinkTTL)
-	return st, NewAdminService(st, audit, grants, NopDeviceNotifier{}, &fakeMailer{}, discardLogger())
+	return st, NewAdminService(st, audit, grants, nopDeviceNotifier{}, &fakeMailer{}, discardLogger())
 }
 
 func TestAdminService_CreateUserInvite_RejectsBadRole(t *testing.T) {
@@ -694,7 +694,7 @@ func TestAdminService_SetDeviceEnabled_NoMailWhenMailerDisabledOrNil(t *testing.
 	}
 
 	// A nil mailer is the state testDeps in webui wires; it must not panic.
-	nilSvc := NewAdminService(st, NewAuditWriter(st), nil, NopDeviceNotifier{}, nil, discardLogger())
+	nilSvc := NewAdminService(st, NewAuditWriter(st), nil, nopDeviceNotifier{}, nil, discardLogger())
 	if _, err := nilSvc.SetDeviceEnabled(t.Context(), store.Session{UserID: admin.ID}, dev.ID, false); err != nil {
 		t.Fatal(err)
 	}

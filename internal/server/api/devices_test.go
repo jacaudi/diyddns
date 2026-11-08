@@ -83,8 +83,8 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
-	checkinSvc := service.NewCheckinService(st, service.NopNotifier{})
-	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{}, service.NopDeviceNotifier{})
+	checkinSvc := service.NewCheckinService(st, nopNotifier{})
+	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{}, nopDeviceNotifier{})
 
 	cfg := config.Auth{
 		Session: config.SessionCfg{
@@ -112,7 +112,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	mailer := fakeMailer{}
 	grantsSvc := service.NewGrantService(st, passkeySvc, mailer, "http://localhost", discardAgentAudit{}, log, 15*time.Minute)
 	bootstrapSvc := service.NewBootstrapService(st, log, discardAgentAudit{}, nil, passkeySvc, key)
-	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, service.NopDeviceNotifier{}, mailer, log)
+	adminSvc := service.NewAdminService(st, discardAgentAudit{}, grantsSvc, nopDeviceNotifier{}, mailer, log)
 	feedSvc := service.NewFeedService(st, feed.New(), discardAgentAudit{})
 	apiKeySvc := service.NewAPIKeyService(st, discardAgentAudit{})
 	// EmailChangeService is unconditionally constructed in production
@@ -349,3 +349,14 @@ func TestGetDevice_OwnDeviceReturns200(t *testing.T) {
 		t.Fatalf("got = %+v, want id=%q label=own-laptop", got, devA.ID)
 	}
 }
+
+// nopNotifier and nopDeviceNotifier stand in for the fan-out in tests that do
+// not observe notifications.
+type nopNotifier struct{}
+
+func (nopNotifier) IPChanged(context.Context, store.IPChangeEvent) {}
+
+type nopDeviceNotifier struct{}
+
+func (nopDeviceNotifier) DeviceAdded(context.Context, store.Device)   {}
+func (nopDeviceNotifier) DeviceRemoved(context.Context, store.Device) {}

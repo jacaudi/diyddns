@@ -22,16 +22,6 @@ type DeviceNotifier interface {
 	DeviceRemoved(ctx context.Context, d store.Device)
 }
 
-// NopDeviceNotifier is wired when neither the webhook nor the feed is
-// enabled, so the seams never nil-check.
-type NopDeviceNotifier struct{}
-
-// DeviceAdded does nothing.
-func (NopDeviceNotifier) DeviceAdded(context.Context, store.Device) {}
-
-// DeviceRemoved does nothing.
-func (NopDeviceNotifier) DeviceRemoved(context.Context, store.Device) {}
-
 // inFeed is the Go half of the membership predicate (design D18); the SQL
 // half is store's listFeedQuery. A device is in the gateway feed iff it is
 // enabled, its owner is enabled, and it has at least one address. Every seam

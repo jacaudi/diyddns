@@ -26,7 +26,7 @@ func TestAdminPages_StateTheConfiguredLinkTTL(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, nil, deps.Cfg.Server.BaseURL, audit, deps.Log, 45*time.Minute)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, nopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")

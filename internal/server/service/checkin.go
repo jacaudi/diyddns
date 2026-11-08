@@ -37,13 +37,6 @@ type Notifier interface {
 	IPChanged(ctx context.Context, ev store.IPChangeEvent)
 }
 
-// NopNotifier is wired when notifications are disabled, so Checkin never
-// nil-checks.
-type NopNotifier struct{}
-
-// IPChanged does nothing.
-func (NopNotifier) IPChanged(context.Context, store.IPChangeEvent) {}
-
 // CheckinService records device check-ins, persisting a new ip_history row
 // only when the reported IP addresses differ from what's already stored.
 type CheckinService struct {
