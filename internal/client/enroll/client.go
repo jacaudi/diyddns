@@ -8,17 +8,15 @@ package enroll
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/jacaudi/diyddns/internal/client/agenthttp"
 )
 
 // Capabilities is the subset of GET /agent/v1/capabilities the client reads.
@@ -84,17 +82,9 @@ func NewClient(baseURL string, opts ClientOptions) (*Client, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("enroll: server URL must be http(s): %q", baseURL)
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if opts.CACertPath != "" {
-		pem, err := os.ReadFile(opts.CACertPath)
-		if err != nil {
-			return nil, fmt.Errorf("enroll: read ca cert %s: %w", opts.CACertPath, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("enroll: no certificates in %s", opts.CACertPath)
-		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	transport, err := agenthttp.NewTransport(opts.CACertPath)
+	if err != nil {
+		return nil, fmt.Errorf("enroll: %w", err)
 	}
 	timeout := opts.Timeout
 	if timeout == 0 {
@@ -109,11 +99,11 @@ func (c *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	if err != nil {
 		return Capabilities{}, fmt.Errorf("enroll: capabilities request: %w", err)
 	}
-	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside drainClose below; bodyclose can't trace Close() through a named helper
+	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return Capabilities{}, fmt.Errorf("enroll: capabilities: %w", err)
 	}
-	defer drainClose(resp.Body)
+	defer agenthttp.DrainClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return Capabilities{}, fmt.Errorf("enroll: capabilities: unexpected status %d", resp.StatusCode)
 	}
@@ -130,11 +120,11 @@ func (c *Client) OIDCDeviceStart(ctx context.Context) (DeviceStart, error) {
 	if err != nil {
 		return DeviceStart{}, fmt.Errorf("enroll: start request: %w", err)
 	}
-	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside drainClose below; bodyclose can't trace Close() through a named helper
+	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return DeviceStart{}, fmt.Errorf("enroll: start: %w", err)
 	}
-	defer drainClose(resp.Body)
+	defer agenthttp.DrainClose(resp.Body)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var ds DeviceStart
@@ -165,11 +155,11 @@ func (c *Client) OIDCDevicePoll(ctx context.Context, flowID string) (PollResult,
 		return PollResult{}, fmt.Errorf("enroll: poll request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside drainClose below; bodyclose can't trace Close() through a named helper
+	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return PollResult{}, fmt.Errorf("enroll: poll: %w", err)
 	}
-	defer drainClose(resp.Body)
+	defer agenthttp.DrainClose(resp.Body)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var b struct {
@@ -229,11 +219,11 @@ func (c *Client) doEnroll(ctx context.Context, path string, payload []byte) (Res
 		return Result{}, fmt.Errorf("enroll: request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside drainClose below; bodyclose can't trace Close() through a named helper
+	resp, err := c.http.Do(req) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return Result{}, fmt.Errorf("enroll: post %s: %w", path, err)
 	}
-	defer drainClose(resp.Body)
+	defer agenthttp.DrainClose(resp.Body)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var b struct {
@@ -255,10 +245,4 @@ func (c *Client) doEnroll(ctx context.Context, path string, payload []byte) (Res
 	default:
 		return Result{}, fmt.Errorf("%w: enroll status %d", ErrServer, resp.StatusCode)
 	}
-}
-
-// drainClose drains and closes a response body so the connection can be reused.
-func drainClose(rc io.ReadCloser) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<16))
-	_ = rc.Close()
 }
