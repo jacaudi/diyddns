@@ -46,7 +46,11 @@ func SetBeforeSnapshot(fn func()) func() {
 func (h *Hub) WaitPumps() { h.wg.Wait() }
 
 // Live reports the number of subscribers currently in the map.
-func (h *Hub) Live() int { return h.live() }
+func (h *Hub) Live() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
 
 // SeedMember inserts an enabled user and an enabled device with an IPv4 —
 // one row of the membership predicate (D18). Exported and defined here, not

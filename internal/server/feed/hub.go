@@ -199,10 +199,3 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-
-// live reports the number of subscribers currently in the map.
-func (h *Hub) live() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.subs)
-}

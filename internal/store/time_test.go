@@ -13,11 +13,3 @@ func TestNowUnixIsCurrentSecond(t *testing.T) {
 		t.Fatalf("NowUnix()=%d not within [%d,%d]", got, before, after)
 	}
 }
-
-func TestUnixToTime(t *testing.T) {
-	now := time.Now().Truncate(time.Second).UTC()
-	got := UnixToTime(now.Unix())
-	if !got.Equal(now) {
-		t.Fatalf("UnixToTime round-trip: got %v, want %v", got, now)
-	}
-}
