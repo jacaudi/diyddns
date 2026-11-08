@@ -84,3 +84,7 @@ func (s *Store) Close() error {
 	}
 	return s.db.Close()
 }
+
+// scanner is what every scan* helper reads a row from: *sql.Row and
+// *sql.Rows both satisfy it.
+type scanner interface{ Scan(dest ...any) error }

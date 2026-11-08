@@ -38,9 +38,7 @@ func (s *Store) FeedTokens() *FeedTokenRepo { return &FeedTokenRepo{db: s.db} }
 // credential — renaming is the fix, never a //nolint.
 const feedAuthColumns = `id, label, token_hash, created_by, created_at, last_used_at`
 
-func scanFeedToken(row interface {
-	Scan(dest ...any) error
-}) (FeedToken, error) {
+func scanFeedToken(row scanner) (FeedToken, error) {
 	var t FeedToken
 	var createdBy sql.NullString
 	var lastUsed sql.NullInt64

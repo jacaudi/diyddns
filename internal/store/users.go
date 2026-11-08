@@ -59,9 +59,7 @@ func nullIfEmpty(s string) any {
 
 const userColumns = `id, email, role, oidc_provider, oidc_subject, disabled, created_at, updated_at, pending_email, pending_email_expires_at`
 
-func scanUser(row interface {
-	Scan(dest ...any) error
-}) (User, error) {
+func scanUser(row scanner) (User, error) {
 	var u User
 	var oidcProvider, oidcSubject, pendingEmail sql.NullString
 	var disabled int64

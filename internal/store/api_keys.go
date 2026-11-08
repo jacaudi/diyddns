@@ -42,9 +42,7 @@ func (s *Store) APIKeys() *APIKeyRepo { return &APIKeyRepo{db: s.db} }
 // naming, for the identical reason.
 const apiAuthColumns = `id, user_id, label, key_hash, admin_scope, created_at, last_used_at`
 
-func scanAPIKey(row interface {
-	Scan(dest ...any) error
-}) (APIKey, error) {
+func scanAPIKey(row scanner) (APIKey, error) {
 	var k APIKey
 	var adminScope int
 	var lastUsed sql.NullInt64

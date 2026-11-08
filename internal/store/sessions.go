@@ -27,9 +27,7 @@ func (s *Store) Sessions() *SessionRepo { return &SessionRepo{db: s.db} }
 
 const sessionColumns = `id, user_id, csrf_token, ip, user_agent, created_at, last_seen_at, expires_at`
 
-func scanSession(row interface {
-	Scan(dest ...any) error
-}) (Session, error) {
+func scanSession(row scanner) (Session, error) {
 	var sess Session
 	var ip, userAgent sql.NullString
 	err := row.Scan(

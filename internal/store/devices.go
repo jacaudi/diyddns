@@ -79,9 +79,7 @@ const deviceColumns = `id, user_id, label, secret_hash,
 	v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level,
 	cert_serial, cert_not_after`
 
-func scanDevice(row interface {
-	Scan(dest ...any) error
-}) (Device, error) {
+func scanDevice(row scanner) (Device, error) {
 	var d Device
 	var currentIPv4, currentIPv6, hostname, osCol, clientVersion sql.NullString
 	var lastSeenAt sql.NullInt64
