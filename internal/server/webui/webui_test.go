@@ -220,9 +220,9 @@ func TestAuthenticateBrowser_ValidCookie_ReturnsUser(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/account", nil)
 	req.AddCookie(cookie)
 
-	usr, sess, err := authenticateBrowser(deps.Sessions, req, deps.Cfg.Auth.Session.CookieName)
+	usr, sess, err := deps.Sessions.AuthenticateRequest(req, deps.Cfg.Auth.Session.CookieName)
 	if err != nil {
-		t.Fatalf("authenticateBrowser: %v", err)
+		t.Fatalf("AuthenticateRequest: %v", err)
 	}
 	if usr.Email != "auth@example.com" {
 		t.Errorf("Email = %q, want auth@example.com", usr.Email)
@@ -236,8 +236,8 @@ func TestAuthenticateBrowser_MissingCookie_ReturnsError(t *testing.T) {
 	deps, _ := testDeps(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/account", nil)
-	if _, _, err := authenticateBrowser(deps.Sessions, req, deps.Cfg.Auth.Session.CookieName); err == nil {
-		t.Fatal("authenticateBrowser: want error for missing cookie, got nil")
+	if _, _, err := deps.Sessions.AuthenticateRequest(req, deps.Cfg.Auth.Session.CookieName); err == nil {
+		t.Fatal("AuthenticateRequest: want error for missing cookie, got nil")
 	}
 }
 
@@ -246,8 +246,8 @@ func TestAuthenticateBrowser_InvalidCookie_ReturnsError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/account", nil)
 	req.AddCookie(&http.Cookie{Name: "diyddns_session", Value: "not-a-real-session"})
-	if _, _, err := authenticateBrowser(deps.Sessions, req, deps.Cfg.Auth.Session.CookieName); err == nil {
-		t.Fatal("authenticateBrowser: want error for invalid cookie, got nil")
+	if _, _, err := deps.Sessions.AuthenticateRequest(req, deps.Cfg.Auth.Session.CookieName); err == nil {
+		t.Fatal("AuthenticateRequest: want error for invalid cookie, got nil")
 	}
 }
 

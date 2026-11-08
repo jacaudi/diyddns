@@ -315,7 +315,7 @@ func TestSessionOrAPIKey_401BodyUniform(t *testing.T) {
 	// wrong prefix, right shape is a control -- never touches keys.Authenticate.
 	// unknownKey has the real prefix but no corresponding row: exercises the
 	// unknown_key rejection path (Authenticate -> store.ErrNotFound).
-	unknownKey := service.APIKeyPrefix + "0000000000000000000000000000000000000000"
+	unknownKey := store.APIKeyPrefix + "0000000000000000000000000000000000000000"
 
 	cases := []struct {
 		name   string

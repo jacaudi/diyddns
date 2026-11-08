@@ -150,7 +150,7 @@ func TestFeedService_MintAuthenticateRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintToken: %v", err)
 	}
-	if !strings.HasPrefix(plaintext, FeedTokenPrefix) || len(plaintext) < len(FeedTokenPrefix)+40 {
+	if !strings.HasPrefix(plaintext, store.FeedTokenPrefix) || len(plaintext) < len(store.FeedTokenPrefix)+40 {
 		t.Errorf("plaintext = %q, want the ddf_ prefix and ~43 base64url chars", plaintext)
 	}
 	if tok.Label != "envoy" || tok.CreatedBy != admin.ID || tok.TokenHash == "" || tok.TokenHash == plaintext {
@@ -168,7 +168,7 @@ func TestFeedService_MintAuthenticateRevoke(t *testing.T) {
 	if _, err := svc.Authenticate(ctx, "not-a-token"); !errors.Is(err, ErrTokenMalformed) {
 		t.Errorf("Authenticate(no prefix) err = %v, want ErrTokenMalformed", err)
 	}
-	if _, err := svc.Authenticate(ctx, FeedTokenPrefix+"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := svc.Authenticate(ctx, store.FeedTokenPrefix+"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Authenticate(unknown) err = %v, want store.ErrNotFound", err)
 	}
 

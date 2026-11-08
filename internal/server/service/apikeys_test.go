@@ -47,7 +47,7 @@ func TestAPIKeyService_MintKey_TrimsLabel(t *testing.T) {
 		t.Fatal("MintKey returned an empty plaintext")
 	}
 	if !hasAPIKeyPrefix(plaintext) {
-		t.Errorf("plaintext = %q, want it to start with %q", plaintext, APIKeyPrefix)
+		t.Errorf("plaintext = %q, want it to start with %q", plaintext, store.APIKeyPrefix)
 	}
 	if key.AdminScope {
 		t.Error("MintKey set AdminScope=true; #149 must never set it to anything but false")
@@ -58,7 +58,7 @@ func TestAPIKeyService_MintKey_TrimsLabel(t *testing.T) {
 // just for one prefix check the production code already does via
 // strings.HasPrefix in Authenticate.
 func hasAPIKeyPrefix(s string) bool {
-	return len(s) >= len(APIKeyPrefix) && s[:len(APIKeyPrefix)] == APIKeyPrefix
+	return len(s) >= len(store.APIKeyPrefix) && s[:len(store.APIKeyPrefix)] == store.APIKeyPrefix
 }
 
 func TestAPIKeyService_MintKey_DuplicateLabelSameUserConflicts(t *testing.T) {

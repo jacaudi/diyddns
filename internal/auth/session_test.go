@@ -305,9 +305,9 @@ func TestAuthenticate_NoRevokedReason(t *testing.T) {
 	}
 }
 
-func TestGenerateCSRFToken_Distinct(t *testing.T) {
-	a, _ := GenerateCSRFToken()
-	b, _ := GenerateCSRFToken()
+func TestRandToken_Distinct(t *testing.T) {
+	a, _ := RandToken(32) // the session CSRF token's size
+	b, _ := RandToken(32)
 	if a == "" || a == b {
 		t.Fatal("csrf tokens must be non-empty and unique")
 	}
