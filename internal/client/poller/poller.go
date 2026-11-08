@@ -14,6 +14,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/client/checkin"
 	"github.com/jacaudi/diyddns/internal/client/ipdiscovery"
+	"github.com/jacaudi/diyddns/internal/shared/clock"
 )
 
 // ErrNoQuorum means no address family reached quorum this cycle.
@@ -41,32 +42,12 @@ type Checkiner interface {
 	Checkin(ctx context.Context, r checkin.Report) (checkin.Result, error)
 }
 
-// Clock abstracts time for deterministic scheduling tests.
-type Clock interface {
-	Sleep(ctx context.Context, d time.Duration) error
-}
-
-type systemClock struct{}
-
-// NewSystemClock returns a real-time Clock.
-func NewSystemClock() Clock { return systemClock{} }
-
-func (systemClock) Sleep(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
-// Options configures a Poller. Interval defaults to 5m; Clock to real time;
-// RandFloat to a real [0,1) source; Logger to slog.Default().
+// Options configures a Poller. Interval defaults to 5m; Sleep to clock.Sleep
+// (real time; tests substitute a recording fake); RandFloat to a real [0,1)
+// source; Logger to slog.Default().
 type Options struct {
 	Interval      time.Duration
-	Clock         Clock
+	Sleep         func(ctx context.Context, d time.Duration) error
 	RandFloat     func() float64
 	Logger        *slog.Logger
 	Hostname      string
@@ -79,7 +60,7 @@ type Poller struct {
 	disc      Discoverer
 	chk       Checkiner
 	interval  time.Duration
-	clock     Clock
+	sleep     func(ctx context.Context, d time.Duration) error
 	randFloat func() float64
 	log       *slog.Logger
 	hostname  string
@@ -92,8 +73,8 @@ func New(d Discoverer, c Checkiner, opts Options) *Poller {
 	if opts.Interval <= 0 {
 		opts.Interval = 5 * time.Minute
 	}
-	if opts.Clock == nil {
-		opts.Clock = NewSystemClock()
+	if opts.Sleep == nil {
+		opts.Sleep = clock.Sleep
 	}
 	if opts.RandFloat == nil {
 		opts.RandFloat = defaultRandFloat
@@ -102,7 +83,7 @@ func New(d Discoverer, c Checkiner, opts Options) *Poller {
 		opts.Logger = slog.Default()
 	}
 	return &Poller{
-		disc: d, chk: c, interval: opts.Interval, clock: opts.Clock,
+		disc: d, chk: c, interval: opts.Interval, sleep: opts.Sleep,
 		randFloat: opts.RandFloat, log: opts.Logger,
 		hostname: opts.Hostname, os: opts.OS, clientVer: opts.ClientVersion,
 	}
@@ -162,7 +143,7 @@ func (p *Poller) Run(ctx context.Context) error {
 			backoff, unauthorized = 0, 0
 			d = p.jittered()
 		}
-		if err := p.clock.Sleep(ctx, d); err != nil {
+		if err := p.sleep(ctx, d); err != nil {
 			return nil // ctx cancelled → clean stop
 		}
 	}
