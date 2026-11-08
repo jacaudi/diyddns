@@ -6,7 +6,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -223,42 +222,4 @@ func (r *timedRows) Close() error {
 	err := r.Rows.Close()
 	r.once.Do(r.done)
 	return err
-}
-
-// The column-type methods are forwarded so sql.Rows.ColumnTypes keeps the
-// detail modernc provides.
-
-func (r *timedRows) ColumnTypeDatabaseTypeName(i int) string {
-	if v, ok := r.Rows.(driver.RowsColumnTypeDatabaseTypeName); ok {
-		return v.ColumnTypeDatabaseTypeName(i)
-	}
-	return ""
-}
-
-func (r *timedRows) ColumnTypeLength(i int) (int64, bool) {
-	if v, ok := r.Rows.(driver.RowsColumnTypeLength); ok {
-		return v.ColumnTypeLength(i)
-	}
-	return 0, false
-}
-
-func (r *timedRows) ColumnTypeNullable(i int) (nullable, ok bool) {
-	if v, ok := r.Rows.(driver.RowsColumnTypeNullable); ok {
-		return v.ColumnTypeNullable(i)
-	}
-	return false, false
-}
-
-func (r *timedRows) ColumnTypePrecisionScale(i int) (precision, scale int64, ok bool) {
-	if v, ok := r.Rows.(driver.RowsColumnTypePrecisionScale); ok {
-		return v.ColumnTypePrecisionScale(i)
-	}
-	return 0, 0, false
-}
-
-func (r *timedRows) ColumnTypeScanType(i int) reflect.Type {
-	if v, ok := r.Rows.(driver.RowsColumnTypeScanType); ok {
-		return v.ColumnTypeScanType(i)
-	}
-	return reflect.TypeFor[any]()
 }
