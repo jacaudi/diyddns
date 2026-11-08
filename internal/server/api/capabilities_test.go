@@ -3,8 +3,11 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/oidc/oidctest"
 	"github.com/jacaudi/diyddns/internal/server/api"
 )
@@ -104,4 +107,31 @@ func TestCapabilities_AgentMTLS(t *testing.T) {
 			t.Error("agent_mtls key present, want absent")
 		}
 	})
+}
+
+// skew_window_seconds must report the configured auth.hmac.skew_window, not a
+// constant: a client that trusts it would otherwise misjudge how far its clock
+// may drift. 300s is deliberately not the 120s default.
+func TestCapabilities_ReportsConfiguredSkewWindow(t *testing.T) {
+	mux := http.NewServeMux()
+	api.Build(mux, api.ServerDeps{
+		Log:   discardLogger(),
+		Store: memStore(t),
+		Cfg:   config.Auth{HMAC: config.HMACCfg{SkewWindow: 300 * time.Second}},
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/agent/v1/capabilities")
+	if err != nil {
+		t.Fatalf("get capabilities: %v", err)
+	}
+	defer resp.Body.Close()
+	var got api.Capabilities
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.SkewWindowSeconds != 300 {
+		t.Errorf("SkewWindowSeconds = %d, want 300 (auth.hmac.skew_window)", got.SkewWindowSeconds)
+	}
 }

@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -27,6 +29,7 @@ func newAPIServer(t *testing.T) *httptest.Server {
 		Log:   discardLogger(),
 		Store: memStore(t),
 		Info:  version.Info{Version: "v1.2.3"},
+		Cfg:   config.Auth{HMAC: config.HMACCfg{SkewWindow: 120 * time.Second}}, // the auth.hmac.skew_window default
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
