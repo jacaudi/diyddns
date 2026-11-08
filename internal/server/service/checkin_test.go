@@ -27,7 +27,7 @@ func TestCheckin_FirstReport_StoresAndAppendsHistory(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	res, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{
 		IPv4: "1.2.3.4", Hostname: "lp", OS: "linux", ClientVersion: "1.0.0",
@@ -69,7 +69,7 @@ func TestCheckin_IdenticalReport_TouchesLastSeenButNoHistory(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	report := CheckinReport{IPv4: "1.2.3.4", Hostname: "lp", OS: "linux", ClientVersion: "1.0.0"}
 	if _, err := svc.Checkin(t.Context(), dev.ID, report); err != nil {
@@ -115,7 +115,7 @@ func TestCheckin_ChangedIP_AppendsNewHistoryRow(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4"}); err != nil {
 		t.Fatalf("first Checkin: %v", err)
@@ -145,7 +145,7 @@ func TestCheckin_OmittedFamily_PreservesStoredValue(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	// Establish a dual-stack device: both families stored.
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4", IPv6: "2001:db8::1"}); err != nil {
@@ -199,7 +199,7 @@ func TestCheckin_OmittedFamilyMatchingStored_IsNoOp(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4", IPv6: "2001:db8::1"}); err != nil {
 		t.Fatalf("seed dual-stack Checkin: %v", err)
@@ -231,7 +231,7 @@ func TestCheckinService_Self_ReturnsDevice(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	got, err := svc.Self(t.Context(), dev.ID)
 	if err != nil {
@@ -262,7 +262,7 @@ func TestCheckin_UnchangedIPDoesNotNotify(t *testing.T) {
 	// address before asserting anything about previous values — otherwise
 	// "PrevIPv4 == dev.CurrentIPv4" is "" == "" and passes against an
 	// implementation that never sets PrevIPv4 at all.
-	if _, err := NewCheckinService(st, NopNotifier{}).Checkin(ctx, dev.ID,
+	if _, err := NewCheckinService(st, nopNotifier{}).Checkin(ctx, dev.ID,
 		CheckinReport{IPv4: "198.51.100.7", IPv6: "2001:db8::7"}); err != nil {
 		t.Fatalf("seed prior address: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestCheckin_ChangedIPNotifiesOnceWithPreviousValues(t *testing.T) {
 	ctx := t.Context()
 	usr := seedUser(t, st, "owner@example.com", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	if _, err := NewCheckinService(st, NopNotifier{}).Checkin(ctx, dev.ID,
+	if _, err := NewCheckinService(st, nopNotifier{}).Checkin(ctx, dev.ID,
 		CheckinReport{IPv4: "198.51.100.7", IPv6: "2001:db8::7"}); err != nil {
 		t.Fatalf("seed prior address: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestCheckin_HistoryAppendFails_LeavesDeviceUnchanged(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
 	dev := seedDevice(t, st, usr.ID, "laptop")
-	svc := NewCheckinService(st, NopNotifier{})
+	svc := NewCheckinService(st, nopNotifier{})
 
 	// Establish a known stored address, then make the history write fail.
 	if _, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4"}); err != nil {
@@ -419,3 +419,14 @@ func TestCheckin_HistoryAppendFails_LeavesDeviceUnchanged(t *testing.T) {
 		t.Errorf("ip_history rows = %d, want 1 (only the seed check-in)", len(page.Rows))
 	}
 }
+
+// nopNotifier and nopDeviceNotifier stand in for the fan-out in tests that do
+// not observe notifications.
+type nopNotifier struct{}
+
+func (nopNotifier) IPChanged(context.Context, store.IPChangeEvent) {}
+
+type nopDeviceNotifier struct{}
+
+func (nopDeviceNotifier) DeviceAdded(context.Context, store.Device)   {}
+func (nopDeviceNotifier) DeviceRemoved(context.Context, store.Device) {}

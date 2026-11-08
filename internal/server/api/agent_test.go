@@ -68,7 +68,7 @@ func newAgentHarnessWith(t *testing.T, mutate func(*api.ServerDeps)) agentHarnes
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
-	checkinSvc := service.NewCheckinService(st, service.NopNotifier{})
+	checkinSvc := service.NewCheckinService(st, nopNotifier{})
 
 	deps := api.ServerDeps{
 		Log:      log,

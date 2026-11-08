@@ -350,30 +350,23 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 //
 // The hub is ALWAYS constructed (design §5.3): with the feed off no route
 // registers against it and Broadcast finds no subscribers, so nothing
-// downstream needs a nil check. The fan-out is wired when EITHER transport is
-// on; with both off the nop notifiers keep check-in and the admin seams free
-// of side effects.
+// downstream needs a nil check. So is the fan-out: with notifications off its
+// enqueuer is nil and dispatch skips the outbox, and with the feed off the hub
+// has no subscribers. With BOTH off a change still bumps feed_state, which
+// nothing reads while the feed is off; that one write is the price of having
+// no nop notifiers.
 //
 // The concrete value is returned alongside the interfaces because the sweeper
 // lives in this package and needs (*fanout).ExpireAddresses, which no service
-// interface declares -- and should not, since no service calls it. It is nil
-// when neither transport is on, which is also when the sweeper does not run.
+// interface declares -- and should not, since no service calls it.
 func buildFanout(cfg config.Server, st *store.Store, log *slog.Logger) (*feed.Hub, service.Notifier, service.DeviceNotifier, *fanout) {
 	hub := feed.New()
-	var (
-		notifier    service.Notifier       = service.NopNotifier{}
-		devNotifier service.DeviceNotifier = service.NopDeviceNotifier{}
-		fo          *fanout
-	)
-	if cfg.Notifications.Enabled || cfg.Feed.Enabled {
-		var enqueuer *notify.Enqueuer
-		if cfg.Notifications.Enabled {
-			enqueuer = notify.NewEnqueuer(st, log)
-		}
-		fo = newFanout(st, enqueuer, hub, log)
-		notifier, devNotifier = fo, fo
+	var enqueuer *notify.Enqueuer
+	if cfg.Notifications.Enabled {
+		enqueuer = notify.NewEnqueuer(st, log)
 	}
-	return hub, notifier, devNotifier, fo
+	fo := newFanout(st, enqueuer, hub, log)
+	return hub, fo, fo, fo
 }
 
 // buildSweeper constructs the #127 staleness sweeper, gated, and logs its
@@ -386,15 +379,9 @@ func buildFanout(cfg config.Server, st *store.Store, log *slog.Logger) (*feed.Hu
 // convenience -- stale.FirstRung and stale.DueRung are defined only for a
 // positive window (see newSweeper's own doc comment), so an ungated sweeper
 // would mass-expire every device with an address on its very first tick.
-//
-// The `fan != nil` conjunct is belt-and-braces, not a second independent
-// gate: ExpiryEnabled() implies cfg.Feed.Enabled, which is one of buildFanout's
-// two OR'd conditions for constructing a non-nil fan-out, so fan is already
-// guaranteed non-nil whenever the first conjunct holds. Kept anyway as a
-// defensive check on that invariant, per the plan.
 func buildSweeper(cfg config.Server, st *store.Store, fan *fanout, mailer email.Mailer, log *slog.Logger) *sweeper {
 	var sw *sweeper
-	if cfg.Feed.ExpiryEnabled() && fan != nil {
+	if cfg.Feed.ExpiryEnabled() {
 		dispatcher := stale.NewDispatcher(
 			stale.NewMailChannel(mailer),
 			func(ctx context.Context) ([]store.User, error) {

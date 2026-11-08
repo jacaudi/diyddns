@@ -86,9 +86,9 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Sessions:    sessions,
 		Cfg:         cfg,
 		Log:         log,
-		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, service.NopDeviceNotifier{}),
+		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, nopDeviceNotifier{}),
 		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit, log),
-		Admin:       service.NewAdminService(st, audit, grants, service.NopDeviceNotifier{}, nil, log),
+		Admin:       service.NewAdminService(st, audit, grants, nopDeviceNotifier{}, nil, log),
 		Grants:      grants,
 		EmailChange: emailChange,
 		Notify:      notify,
@@ -2911,7 +2911,7 @@ func TestAdminUserInvite_RelativeLinkGetsPrefixed(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, nil, "", audit, deps.Log, 15*time.Minute)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, nopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3559,7 +3559,7 @@ func renderInvitePage(t *testing.T, mailer emailpkg.Mailer) (int, string) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, mailer, deps.Cfg.Server.BaseURL, audit, deps.Log, 15*time.Minute)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, nopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin@example.com", "admin")
@@ -3643,7 +3643,7 @@ func TestAdminUserRecovery_DisabledTargetRendersSuppressedNote(t *testing.T) {
 		t.Fatalf("NewPasskeyService: %v", err)
 	}
 	deps.Grants = service.NewGrantService(st, passkeys, stubMailer{enabled: true}, deps.Cfg.Server.BaseURL, audit, deps.Log, 15*time.Minute)
-	deps.Admin = service.NewAdminService(st, audit, deps.Grants, service.NopDeviceNotifier{}, nil, deps.Log)
+	deps.Admin = service.NewAdminService(st, audit, deps.Grants, nopDeviceNotifier{}, nil, deps.Log)
 	h, _ := New(deps)
 
 	admin := seedUser(t, st, "admin-disabled-recovery@example.com", "admin")
@@ -3936,3 +3936,10 @@ func TestAdminDevices_EmptyStates(t *testing.T) {
 		t.Error("a filtered-empty list is described as an empty server")
 	}
 }
+
+// nopDeviceNotifier stands in for the fan-out in tests that do not observe
+// feed membership events.
+type nopDeviceNotifier struct{}
+
+func (nopDeviceNotifier) DeviceAdded(context.Context, store.Device)   {}
+func (nopDeviceNotifier) DeviceRemoved(context.Context, store.Device) {}
