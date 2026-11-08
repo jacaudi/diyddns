@@ -23,41 +23,12 @@ func GenerateSecret() ([]byte, error) {
 
 // SealSecret AES-256-GCM-encrypts secret under key (must be 32 bytes) and returns
 // base64(nonce || ciphertext). A fresh random 96-bit nonce is used per call.
-func SealSecret(key, secret []byte) (string, error) {
-	gcm, err := newGCM(key)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := randRead(nonce); err != nil {
-		return "", fmt.Errorf("auth.SealSecret: nonce: %w", err)
-	}
-	ct := gcm.Seal(nonce, nonce, secret, nil)
-	return base64.StdEncoding.EncodeToString(ct), nil
-}
+// It is SealWithAAD with no additional data.
+func SealSecret(key, secret []byte) (string, error) { return SealWithAAD(key, secret, nil) }
 
 // OpenSecret reverses SealSecret. Returns an error if the key is wrong, the
 // payload is malformed, or the GCM tag fails to authenticate.
-func OpenSecret(key []byte, sealed string) ([]byte, error) {
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := base64.StdEncoding.DecodeString(sealed)
-	if err != nil {
-		return nil, fmt.Errorf("auth.OpenSecret: decode: %w", err)
-	}
-	ns := gcm.NonceSize()
-	if len(raw) < ns {
-		return nil, fmt.Errorf("auth.OpenSecret: ciphertext too short")
-	}
-	nonce, ct := raw[:ns], raw[ns:]
-	pt, err := gcm.Open(nil, nonce, ct, nil)
-	if err != nil {
-		return nil, fmt.Errorf("auth.OpenSecret: %w", err)
-	}
-	return pt, nil
-}
+func OpenSecret(key []byte, sealed string) ([]byte, error) { return OpenWithAAD(key, sealed, nil) }
 
 // SealWithAAD AES-256-GCM-encrypts plaintext under key (32 bytes) binding aad
 // as additional authenticated data, and returns base64(nonce || ciphertext).
