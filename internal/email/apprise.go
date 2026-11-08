@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 
 	apprise "github.com/unraid/apprise-go"
-
-	"github.com/jacaudi/diyddns/internal/config"
 )
 
 // maxInFlightSends bounds how many SMTP conversations may exist at once,
@@ -54,7 +52,7 @@ type sendFunc func(rawURL, subject, body string) error
 // newAppriseMailer is the only construction path in the tree and always
 // makes it; never build an appriseMailer with a bare struct literal.
 type appriseMailer struct {
-	cfg   config.EmailSection
+	cfg   Config
 	log   *slog.Logger
 	slots chan struct{} // capacity is the in-flight cap; see the type comment
 	send  sendFunc      // production: appriseSend
@@ -66,7 +64,7 @@ type appriseMailer struct {
 	fromName, fromAddr string
 }
 
-func newAppriseMailer(cfg config.EmailSection, log *slog.Logger) *appriseMailer {
+func newAppriseMailer(cfg Config, log *slog.Logger) *appriseMailer {
 	name, addr, _ := SplitFrom(cfg.From) // a refused From: see the fromName/fromAddr comment
 	return &appriseMailer{
 		cfg:      cfg,
