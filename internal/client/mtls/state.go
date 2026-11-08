@@ -1,8 +1,8 @@
 // Package mtls holds the client's agent-port mTLS state: the single
 // mtls.json file (device key, device cert, pinned CA bundle, agent URL) and
-// the key/CSR generation that feeds it. Everything here is stdlib-only and
-// must never import internal/server/ (guarded by cmd/diyddns-client's deps
-// test).
+// the key/CSR generation that feeds it. Everything here is stdlib-only (plus
+// the stdlib-only internal/shared/atomicfile) and must never import
+// internal/server/ (guarded by cmd/diyddns-client's deps test).
 package mtls
 
 import (
@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/jacaudi/diyddns/internal/shared/atomicfile"
 )
 
 // FileName is the state file's name, next to credentials.json.
@@ -91,55 +93,13 @@ func discard(path, reason string, cause error, log *slog.Logger) error {
 // Save writes s to path as mode 0600. It writes a temp file in the same
 // directory, fsyncs it, renames it over path in one step and fsyncs the
 // directory, so a crash leaves the old file or the whole new one.
-func Save(path string, s State) (err error) {
+func Save(path string, s State) error {
 	data, err := json.Marshal(s) // #nosec G117 -- persisting the device key to mtls.json is the design (0600, atomic); the agent needs it on disk to present its client cert.
 	if err != nil {
 		return fmt.Errorf("mtls: marshal state: %w", err)
 	}
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, "."+FileName+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("mtls: create temp in %s: %w", dir, err)
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if _, err = f.Write(data); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("mtls: write %s: %w", tmp, err)
-	}
-	if err = f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("mtls: sync %s: %w", tmp, err)
-	}
-	if err = f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("mtls: chmod %s: %w", tmp, err)
-	}
-	if err = f.Close(); err != nil {
-		return fmt.Errorf("mtls: close %s: %w", tmp, err)
-	}
-	if err = os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("mtls: rename into %s: %w", path, err)
-	}
-	return syncDir(dir)
-}
-
-// syncDir fsyncs dir so the rename survives power loss.
-func syncDir(dir string) error {
-	d, err := os.Open(dir) // #nosec G304 -- directory of the operator-provided credentials file.
-	if err != nil {
-		return fmt.Errorf("mtls: open dir %s for sync: %w", dir, err)
-	}
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("mtls: sync dir %s: %w", dir, err)
-	}
-	if err := d.Close(); err != nil {
-		return fmt.Errorf("mtls: close dir %s: %w", dir, err)
+	if err := atomicfile.WriteFile(filepath.Dir(path), filepath.Base(path), data); err != nil {
+		return fmt.Errorf("mtls: save %s: %w", path, err)
 	}
 	return nil
 }

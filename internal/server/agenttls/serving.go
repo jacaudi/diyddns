@@ -17,6 +17,8 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
+
+	"github.com/jacaudi/diyddns/internal/shared/atomicfile"
 )
 
 // ServingCert is the agent listener's TLS server certificate. GetCertificate
@@ -124,10 +126,10 @@ func (s *ServingCert) issue(now time.Time) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agenttls: marshal serving key: %w", err)
 	}
-	if err := writeFileAtomic(s.dir, AgentKeyFile, pem.EncodeToMemory(&pem.Block{Type: ecKeyPEMType, Bytes: keyDER})); err != nil {
+	if err := atomicfile.WriteFile(s.dir, AgentKeyFile, pem.EncodeToMemory(&pem.Block{Type: ecKeyPEMType, Bytes: keyDER})); err != nil {
 		return nil, err
 	}
-	if err := writeFileAtomic(s.dir, AgentCertFile, certPEM(leaf)); err != nil {
+	if err := atomicfile.WriteFile(s.dir, AgentCertFile, certPEM(leaf)); err != nil {
 		return nil, err
 	}
 	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
