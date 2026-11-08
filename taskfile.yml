@@ -114,7 +114,7 @@ tasks:
   clean:
     desc: Remove build artefacts
     cmds:
-      - rm -rf {{.BIN_DIR}} ui/dist docs/openapi/*.json
+      - rm -rf {{.BIN_DIR}}
 
   migrate:new:
     desc: "Create a new SQL migration in migrations/ (Usage: task migrate:new -- <name>)"
