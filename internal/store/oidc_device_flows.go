@@ -27,9 +27,7 @@ func (s *Store) OIDCDeviceFlows() *OIDCDeviceFlowRepo { return &OIDCDeviceFlowRe
 
 const oidcDeviceFlowColumns = `flow_id, device_code, interval, expires_at, last_polled_at, created_at`
 
-func scanOIDCDeviceFlow(row interface {
-	Scan(dest ...any) error
-}) (OIDCDeviceFlow, error) {
+func scanOIDCDeviceFlow(row scanner) (OIDCDeviceFlow, error) {
 	var f OIDCDeviceFlow
 	if err := row.Scan(&f.FlowID, &f.DeviceCode, &f.Interval, &f.ExpiresAt, &f.LastPolledAt, &f.CreatedAt); err != nil {
 		return OIDCDeviceFlow{}, err

@@ -109,9 +109,7 @@ func (s *Store) NotificationEndpoints() *NotificationEndpointRepo {
 
 const notificationEndpointColumns = `id, label, url, secret_sealed, enabled, created_at, updated_at`
 
-func scanNotificationEndpoint(row interface {
-	Scan(dest ...any) error
-}) (NotificationEndpoint, error) {
+func scanNotificationEndpoint(row scanner) (NotificationEndpoint, error) {
 	var e NotificationEndpoint
 	var enabled int64
 	err := row.Scan(

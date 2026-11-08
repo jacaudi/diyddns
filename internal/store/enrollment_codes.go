@@ -26,9 +26,7 @@ func (s *Store) EnrollmentCodes() *EnrollmentCodeRepo { return &EnrollmentCodeRe
 
 const enrollmentCodeColumns = `code, user_id, label, expires_at, used_at, device_id`
 
-func scanEnrollmentCode(row interface {
-	Scan(dest ...any) error
-}) (EnrollmentCode, error) {
+func scanEnrollmentCode(row scanner) (EnrollmentCode, error) {
 	var c EnrollmentCode
 	var usedAt sql.NullInt64
 	var deviceID sql.NullString

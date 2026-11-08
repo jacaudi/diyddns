@@ -30,9 +30,7 @@ func (s *Store) WebAuthnCredentials() *WebAuthnCredentialRepo {
 
 const webAuthnCredentialColumns = `credential_id, user_id, credential_json, name, aaguid, created_at, last_used_at` // #nosec G101 -- SQL column list, not a credential value; gosec's keyword heuristic fires on "credential" in the identifier name
 
-func scanWebAuthnCredential(row interface {
-	Scan(dest ...any) error
-}) (WebAuthnCredential, error) {
+func scanWebAuthnCredential(row scanner) (WebAuthnCredential, error) {
 	var c WebAuthnCredential
 	var aaguid []byte
 	var lastUsedAt sql.NullInt64

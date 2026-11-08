@@ -34,9 +34,7 @@ func (s *Store) IPHistory() *IPHistoryRepo { return &IPHistoryRepo{db: s.db} }
 
 const ipHistoryColumns = `id, device_id, ipv4, ipv6, observed_at, client_version`
 
-func scanIPHistory(row interface {
-	Scan(dest ...any) error
-}) (IPHistory, error) {
+func scanIPHistory(row scanner) (IPHistory, error) {
 	var h IPHistory
 	var ipv4, ipv6, clientVersion sql.NullString
 	err := row.Scan(

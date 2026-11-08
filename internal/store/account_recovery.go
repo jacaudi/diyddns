@@ -27,9 +27,7 @@ func (s *Store) AccountRecovery() *AccountRecoveryRepo { return &AccountRecovery
 
 const recoveryTokenColumns = `token_hash, user_id, reason, expires_at, used_at` // #nosec G101 -- SQL column list, not a credential value; gosec's keyword heuristic fires on "Token" in the identifier name
 
-func scanRecoveryToken(row interface {
-	Scan(dest ...any) error
-}) (RecoveryToken, error) {
+func scanRecoveryToken(row scanner) (RecoveryToken, error) {
 	var t RecoveryToken
 	var usedAt sql.NullInt64
 

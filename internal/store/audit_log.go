@@ -44,9 +44,7 @@ func (s *Store) AuditLog() *AuditLogRepo { return &AuditLogRepo{db: s.db} }
 
 const auditLogColumns = `id, actor_user_id, event_type, target_type, target_id, details_json, ip, user_agent, created_at`
 
-func scanAuditEntry(row interface {
-	Scan(dest ...any) error
-}) (AuditEntry, error) {
+func scanAuditEntry(row scanner) (AuditEntry, error) {
 	var e AuditEntry
 	var actorUserID, targetType, targetID, detailsJSON, ip, userAgent sql.NullString
 	err := row.Scan(
