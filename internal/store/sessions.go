@@ -45,8 +45,8 @@ func scanSession(row interface {
 	if err != nil {
 		return Session{}, err
 	}
-	sess.IP = scanString(ip)
-	sess.UserAgent = scanString(userAgent)
+	sess.IP = ip.String
+	sess.UserAgent = userAgent.String
 	return sess, nil
 }
 

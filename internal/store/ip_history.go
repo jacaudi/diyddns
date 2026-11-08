@@ -50,9 +50,9 @@ func scanIPHistory(row interface {
 	if err != nil {
 		return IPHistory{}, err
 	}
-	h.IPv4 = scanString(ipv4)
-	h.IPv6 = scanString(ipv6)
-	h.ClientVersion = scanString(clientVersion)
+	h.IPv4 = ipv4.String
+	h.IPv6 = ipv6.String
+	h.ClientVersion = clientVersion.String
 	return h, nil
 }
 

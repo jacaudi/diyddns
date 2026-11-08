@@ -47,8 +47,8 @@ func scanFeedToken(row interface {
 	if err := row.Scan(&t.ID, &t.Label, &t.TokenHash, &createdBy, &t.CreatedAt, &lastUsed); err != nil {
 		return FeedToken{}, err
 	}
-	t.CreatedBy = scanString(createdBy)
-	t.LastUsedAt = scanInt64(lastUsed)
+	t.CreatedBy = createdBy.String
+	t.LastUsedAt = lastUsed.Int64
 	return t, nil
 }
 

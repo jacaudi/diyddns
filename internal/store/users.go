@@ -57,14 +57,6 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
-// scanString scans a possibly-NULL TEXT column to a Go string ("" if NULL).
-func scanString(ns sql.NullString) string {
-	if ns.Valid {
-		return ns.String
-	}
-	return ""
-}
-
 const userColumns = `id, email, role, oidc_provider, oidc_subject, disabled, created_at, updated_at, pending_email, pending_email_expires_at`
 
 func scanUser(row interface {
@@ -89,11 +81,11 @@ func scanUser(row interface {
 	if err != nil {
 		return User{}, err
 	}
-	u.OIDCProvider = scanString(oidcProvider)
-	u.OIDCSubject = scanString(oidcSubject)
+	u.OIDCProvider = oidcProvider.String
+	u.OIDCSubject = oidcSubject.String
 	u.Disabled = disabled != 0
-	u.PendingEmail = scanString(pendingEmail)
-	u.PendingEmailExpiresAt = scanInt64(pendingExpires)
+	u.PendingEmail = pendingEmail.String
+	u.PendingEmailExpiresAt = pendingExpires.Int64
 	return u, nil
 }
 
