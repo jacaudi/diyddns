@@ -12,19 +12,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/mail"
 	"net/netip"
 	"net/textproto"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spf13/viper"
 
+	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
 
@@ -60,21 +58,10 @@ type LoggingSection struct {
 	Output string
 }
 
-// EmailSection holds SMTP settings for outbound account email (e.g. passkey
-// recovery notices). Enabled gates whether the email subsystem is active.
-// internal/email renders these into an Apprise mailto URL per send; the
-// three validateEmail rules below that go beyond "is it set" mirror that
-// transport's own behaviour (paired credentials, no edge whitespace, a
-// dotted From domain).
-type EmailSection struct {
-	Enabled  bool
-	Host     string
-	Port     int
-	Username string
-	Password string
-	From     string
-	TLS      string // "starttls", "implicit", or "none" — see validateEmail
-}
+// EmailSection is internal/email's Config: the type lives there so
+// validateEmail can apply email.SplitFrom, the send path's own From rule,
+// instead of a copy that must be kept in lockstep with it.
+type EmailSection = email.Config
 
 // RetentionSection holds data-retention windows for the tables the background
 // pruner sweeps on policy rather than on expiry. Every field defaults to 0,
@@ -522,7 +509,7 @@ func validateEmailBaseURL(baseURL string) error {
 	// server.base_url is also read by ResolveWebAuthn and
 	// InsecureCookieWarning, and rejecting an IDN base URL for a deployment
 	// that sends no mail is out of scope.
-	if !isASCII(baseURL) {
+	if !email.IsASCII(baseURL) {
 		return fmt.Errorf(`config: email.enabled requires a 7-bit ASCII server.base_url (outbound messages declare 7bit and cannot carry it), got %q`, baseURL)
 	}
 	return nil
@@ -534,90 +521,29 @@ func isLocalhostHost(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// isASCII reports whether s is entirely 7-bit ASCII.
-//
-// This deliberately duplicates email.IsASCII. internal/config CANNOT import
-// internal/email — internal/email imports internal/config, and reversing that
-// would invert the dependency. Extracting a shared leaf package for two callers
-// is more structure than they justify; promote it if a third appears. The two
-// copies must stay in lockstep: if they diverge, a value accepted at startup
-// could be rejected at send time, which is the permanently-unmailable state
-// #80 exists to remove.
-func isASCII(s string) bool {
-	for i := range len(s) {
-		if s[i] > unicode.MaxASCII {
-			return false
-		}
-	}
-	return true
-}
-
-// isRoutableFrom deliberately duplicates email.IsRoutableFrom, for the same
-// reason isASCII duplicates email.IsASCII: internal/config cannot import
-// internal/email. It is the transport's own From predicate
-// (unraid/apprise-go internal/notify/smtp2go.go:13, isSimpleEmail, applied to
-// From by mailto_target.go parseMailtoFrom with no delimiter split). The two
-// copies must stay in lockstep, and TestFromValidationMatchesTheEmailPackage
-// pins that: if they diverge, an email.from accepted at startup is refused by
-// the transport at every send, and the deployment boots clean while mailing
-// NOTHING.
-func isRoutableFrom(addr string) bool {
-	return routableFromRe.MatchString(addr)
-}
-
-var routableFromRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
-
-// displayNameRe deliberately duplicates internal/email's (validate.go), for
-// the reason isASCII duplicates email.IsASCII: internal/config cannot import
-// internal/email. It is one or more RFC 5322 atext words separated by single
-// spaces, the display names the transport writes UNQUOTED into the From
-// header and still produces a well-formed header. Interpreted string, not
-// raw: the pattern contains a backtick.
-var displayNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+( [A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$")
-
 // fromFormErr is the error for an email.from that parses but is in neither
 // accepted form. The accepted symbol set is not spelled out because it
 // contains a backtick; docs/email.md lists it.
 const fromFormErr = `config: email.from must be a bare address or "Name <address>" with a plain ASCII name (letters, digits and simple symbols, words separated by single spaces; no quotes, commas or dots), e.g. "DIYDDNS <diyddns@example.com>", got %q`
 
-// validateFromAddress enforces route 4 (#80), the transport's own From rule,
-// and #94's display-name form. It MUST accept exactly what internal/email's
-// send-path check (checkSendable, via SplitFrom) accepts, and nothing more:
-// a bare address that is 7-bit, canonical and routable, or `Name <address>`
-// with a displayNameRe name, written exactly that way, around such an address.
-// #94 widened it from bare-only, in lockstep with email.SplitFrom.
-//
-// If this check and internal/email's diverge, a From accepted at startup is
-// rejected at send and the deployment sends NOTHING while booting clean — the
-// permanently-unmailable state #80 exists to remove, moved from one account to
-// every message. TestFromValidationMatchesTheEmailPackage pins both sides.
+// validateFromAddress applies email.SplitFrom, the exact From rule the send
+// path (checkSendable) applies, so a From accepted at startup is never
+// refused at send (#80, #94). Its sentinels are translated into
+// operator-facing config errors.
 func validateFromAddress(from string) error {
-	addr, err := mail.ParseAddress(from)
-	if err != nil {
+	_, _, err := email.SplitFrom(from)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, email.ErrNotASCII):
+		return fmt.Errorf(`config: email.from must be 7-bit ASCII (outbound messages declare 7bit and cannot carry it), got %q`, from)
+	case errors.Is(err, email.ErrAddressNotCanonical), errors.Is(err, email.ErrAddressUnsupported):
+		return fmt.Errorf(fromFormErr, from)
+	case errors.Is(err, email.ErrAddressUnroutable):
+		return fmt.Errorf(`config: email.from must be a bare address whose domain contains a dot, as the transport requires ("diyddns@localhost" is refused; use the domain your MTA accepts mail from, e.g. "diyddns@example.com"), got %q`, from)
+	default:
 		return fmt.Errorf("config: email.from is not a valid address: %w", err)
 	}
-	if addr.Name == "" {
-		return validateBareFrom(from, addr.Address)
-	}
-	if !isASCII(addr.Name) || !displayNameRe.MatchString(addr.Name) || from != addr.Name+" <"+addr.Address+">" {
-		return fmt.Errorf(fromFormErr, from)
-	}
-	return validateBareFrom(addr.Address, addr.Address)
-}
-
-// validateBareFrom applies the bare-address rules to raw, whose parsed
-// addr-spec is parsed: 7-bit, already canonical, routable by the transport.
-func validateBareFrom(raw, parsed string) error {
-	if !isASCII(parsed) {
-		return fmt.Errorf(`config: email.from must be 7-bit ASCII (outbound messages declare 7bit and cannot carry it), got %q`, raw)
-	}
-	if parsed != raw {
-		return fmt.Errorf(fromFormErr, raw)
-	}
-	if !isRoutableFrom(raw) {
-		return fmt.Errorf(`config: email.from must be a bare address whose domain contains a dot, as the transport requires ("diyddns@localhost" is refused; use the domain your MTA accepts mail from, e.g. "diyddns@example.com"), got %q`, raw)
-	}
-	return nil
 }
 
 // validateEmail enforces that an enabled email subsystem is actually usable.

@@ -100,9 +100,8 @@ var (
 // set of names the transport writes UNQUOTED into the From header and still
 // produces a well-formed header (unraid/apprise-go formatMIMEAddress writes an
 // ASCII name as `name <addr>` with no quoting), so a quote, a comma or a dot
-// is refused rather than mangled. internal/config carries an identical copy
-// (validateFromAddress); TestFromValidationMatchesTheEmailPackage pins the
-// two. Interpreted string, not raw: the pattern contains a backtick.
+// is refused rather than mangled. Interpreted string, not raw: the pattern
+// contains a backtick.
 var displayNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+( [A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$")
 
 // SplitFrom validates an email.from value and returns its display name (empty
@@ -113,7 +112,7 @@ var displayNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+( [A-Za-
 // displayNameRe and the value is written exactly that way (one space, no
 // quotes, no comments). A name or form violation wraps ErrAddressNotCanonical;
 // the address part is then held to checkAddress like a bare one. Exported so
-// internal/config's lockstep test can pin its own copy against this one.
+// internal/config applies this same rule at startup.
 func SplitFrom(from string) (name, addr string, err error) {
 	parsed, perr := mail.ParseAddress(from)
 	if perr != nil || parsed.Name == "" {
@@ -137,8 +136,7 @@ func SplitFrom(from string) (name, addr string, err error) {
 // match the library's recipient predicate. It is at least as strict as the
 // library (a value the library would mangle rather than drop, such as one
 // with a trailing space, is also refused; checkAddress rejects those
-// earlier anyway). Exported for the external test package; SplitFrom is
-// the one internal/config pins its From duplicate against.
+// earlier anyway). Exported for the external test package.
 func IsRoutable(addr string) bool {
 	parts := libraryListDelims.Split(addr, -1)
 	parts = slices.DeleteFunc(parts, func(p string) bool { return p == "" })

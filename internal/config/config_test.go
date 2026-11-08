@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/jacaudi/diyddns/internal/config"
-	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
 
@@ -586,91 +585,6 @@ func TestLoad_NonASCIIBaseURLIsAcceptedWhenEmailIsOff(t *testing.T) {
 
 	if _, err := config.Load(v, ""); err != nil {
 		t.Fatalf("Load with email disabled: %v, want nil", err)
-	}
-}
-
-// TestFromValidationMatchesTheEmailPackage pins the ONE deliberate duplication
-// in this change. internal/config cannot import internal/email without
-// inverting the dependency, so it carries its own isASCII and its own
-// validateFromAddress. If the two sides ever disagree, an email.from accepted at
-// startup is rejected at every send and the deployment boots clean while mailing
-// NOTHING — the permanently-unmailable state #80 exists to remove, scaled from
-// one account to every message.
-//
-// It must pin BOTH halves. An earlier draft pinned only the 7-bit half and
-// therefore passed while exactly that divergence shipped.
-//
-// config.isASCII and config.validateFromAddress are unexported and this is an
-// external test package, so the config side is exercised through Load, which is
-// the only caller that matters.
-func TestFromValidationMatchesTheEmailPackage(t *testing.T) {
-	tests := []struct {
-		name    string
-		from    string
-		wantErr bool
-	}{
-		{name: "ascii", from: "diyddns@example.com"},
-		{name: "accented", from: "nöreply@example.com", wantErr: true},
-		{name: "cjk", from: "日本@example.com", wantErr: true},
-		{name: "em dash", from: "a—b@example.com", wantErr: true},
-
-		// The form half. A display name is accepted only as plain ASCII atext
-		// words, single-spaced, written exactly `Name <address>` (#94): the
-		// transport writes an ASCII name UNQUOTED into the From header, so a
-		// quoted or comma-bearing name would go out malformed. Everything
-		// here is pure ASCII except one row, so an isASCII-only check would
-		// accept the rest -- and a deployment would boot clean and mail
-		// nothing.
-		{name: "display name", from: "DIYDDNS <noreply@example.com>"},
-		{name: "multi-word display name", from: "DIYDDNS Alerts <noreply@example.com>"},
-		{name: "atext symbols in display name", from: "O'Brien+Co <noreply@example.com>"},
-		{name: "dot in display name", from: "DIYDDNS.Alerts <noreply@example.com>", wantErr: true},
-		{name: "quoted display name", from: `"DIYDDNS" <noreply@example.com>`, wantErr: true},
-		{name: "comma in display name", from: "DIYDDNS, Inc <noreply@example.com>", wantErr: true},
-		{name: "non-ascii display name", from: "Nöreply <noreply@example.com>", wantErr: true},
-		{name: "double space before address", from: "DIYDDNS  <noreply@example.com>", wantErr: true},
-		{name: "no space before address", from: "DIYDDNS<noreply@example.com>", wantErr: true},
-		{name: "display name with dot-less domain", from: "DIYDDNS <noreply@localhost>", wantErr: true},
-		{name: "trailing space", from: "noreply@example.com ", wantErr: true},
-		{name: "quoted local part", from: `"john doe"@example.com`, wantErr: true},
-
-		// The routable half. A dot-less domain canonicalises cleanly, so an
-		// isASCII-plus-canonical check accepts it — and then the transport
-		// refuses the From, so the deployment boots clean and mails nothing.
-		// A domain literal is a working From under the transport (its From
-		// rule has no delimiter split) and must stay accepted on both sides.
-		{name: "dot-less domain", from: "diyddns@localhost", wantErr: true},
-		{name: "domain literal", from: "diyddns@[192.168.1.1]"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			v := viper.New()
-			v.Set("database.path", ":memory:")
-			v.Set("email.enabled", true)
-			v.Set("email.tls", "starttls")
-			v.Set("server.base_url", "https://d.example.com")
-			v.Set("email.host", "smtp.example.com")
-			v.Set("email.port", 587)
-			v.Set("email.from", tt.from)
-
-			_, err := config.Load(v, "")
-			gotRejected := err != nil && strings.Contains(err.Error(), "email.from")
-			if gotRejected != tt.wantErr {
-				t.Fatalf("config rejected %q = %v, want %v (err=%v)", tt.from, gotRejected, tt.wantErr, err)
-			}
-			// The email package must agree, decision for decision. This is the
-			// check that actually matters: SplitFrom is exactly what the send
-			// path (checkSendable) applies to From, so if config accepts
-			// something it rejects, that deployment boots clean and sends
-			// nothing.
-			_, _, splitErr := email.SplitFrom(tt.from)
-			emailRejects := splitErr != nil
-			if emailRejects != tt.wantErr {
-				t.Errorf("internal/email %s %q but config %s it — the two sides have diverged",
-					map[bool]string{true: "rejects", false: "accepts"}[emailRejects], tt.from,
-					map[bool]string{true: "rejected", false: "accepted"}[gotRejected])
-			}
-		})
 	}
 }
 

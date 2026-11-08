@@ -1,10 +1,6 @@
 package email
 
-import (
-	"log/slog"
-
-	"github.com/jacaudi/diyddns/internal/config"
-)
+import "log/slog"
 
 // NewMailerForTest constructs the apprise-backed Mailer with the two seams
 // the transport tests need and production never sets: a smaller in-flight
@@ -12,7 +8,7 @@ import (
 // and a send function, so a test can stall, panic or fail a send without any
 // network I/O. It lives in export_test.go (compiled only under test), keeping
 // the seams out of the shipped API. A nil send keeps the production send.
-func NewMailerForTest(cfg config.EmailSection, log *slog.Logger, inFlight int, send func(rawURL, subject, body string) error) Mailer {
+func NewMailerForTest(cfg Config, log *slog.Logger, inFlight int, send func(rawURL, subject, body string) error) Mailer {
 	if inFlight < 1 {
 		// An unbuffered slots channel refuses every send, silently -- the
 		// trap appriseMailer's type comment warns about.
@@ -28,6 +24,6 @@ func NewMailerForTest(cfg config.EmailSection, log *slog.Logger, inFlight int, s
 
 // TargetURLForTest exposes the rendered mailto URL so a test can assert its
 // shape without a network round-trip.
-func TargetURLForTest(cfg config.EmailSection, to string) string {
+func TargetURLForTest(cfg Config, to string) string {
 	return newAppriseMailer(cfg, slog.New(slog.DiscardHandler)).targetURL(to)
 }
