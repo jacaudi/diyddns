@@ -64,7 +64,10 @@ func certErr(ctx context.Context, deps ServerDeps, deviceID string, err error) e
 	case errors.Is(err, agenttls.ErrBadCSR):
 		return huma.Error400BadRequest("invalid CSR")
 	case errors.Is(err, store.ErrNotFound):
-		return huma.Error401Unauthorized("unauthorized")
+		// The route is HMAC-signed, so the 401 names that credential (#191).
+		h := http.Header{}
+		h.Set(shared.HeaderWWWAuthenticate, shared.ChallengeHMAC)
+		return huma.ErrorWithHeaders(huma.Error401Unauthorized("unauthorized"), h)
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, "issue device certificate failed",
 			slog.String("device_id", deviceID), slog.Any("error", err))
