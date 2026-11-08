@@ -39,9 +39,9 @@ func (r *BootstrapRepo) Get(ctx context.Context) (BootstrapState, error) {
 		return BootstrapState{}, fmt.Errorf("bootstrap.Get: %w", err)
 	}
 	return BootstrapState{
-		TokenHash:  scanString(tokenHash),
+		TokenHash:  tokenHash.String,
 		CreatedAt:  createdAt,
-		ConsumedAt: scanInt64(consumedAt),
+		ConsumedAt: consumedAt.Int64,
 	}, nil
 }
 

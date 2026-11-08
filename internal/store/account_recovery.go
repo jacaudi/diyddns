@@ -43,7 +43,7 @@ func scanRecoveryToken(row interface {
 	if err != nil {
 		return RecoveryToken{}, err
 	}
-	t.UsedAt = scanInt64(usedAt)
+	t.UsedAt = usedAt.Int64
 	return t, nil
 }
 

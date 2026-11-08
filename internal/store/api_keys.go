@@ -52,7 +52,7 @@ func scanAPIKey(row interface {
 		return APIKey{}, err
 	}
 	k.AdminScope = adminScope != 0
-	k.LastUsedAt = scanInt64(lastUsed)
+	k.LastUsedAt = lastUsed.Int64
 	return k, nil
 }
 

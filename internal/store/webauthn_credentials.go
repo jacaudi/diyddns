@@ -50,7 +50,7 @@ func scanWebAuthnCredential(row interface {
 		return WebAuthnCredential{}, err
 	}
 	c.AAGUID = aaguid
-	c.LastUsedAt = scanInt64(lastUsedAt)
+	c.LastUsedAt = lastUsedAt.Int64
 	return c, nil
 }
 

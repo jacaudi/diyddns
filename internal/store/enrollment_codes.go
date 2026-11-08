@@ -44,8 +44,8 @@ func scanEnrollmentCode(row interface {
 	if err != nil {
 		return EnrollmentCode{}, err
 	}
-	c.UsedAt = scanInt64(usedAt)
-	c.DeviceID = scanString(deviceID)
+	c.UsedAt = usedAt.Int64
+	c.DeviceID = deviceID.String
 	return c, nil
 }
 

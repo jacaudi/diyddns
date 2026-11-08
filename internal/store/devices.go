@@ -73,14 +73,6 @@ func placeholders(n int) string {
 	return strings.Join(slices.Repeat([]string{"?"}, n), ",")
 }
 
-// scanInt64 scans a possibly-NULL INTEGER column to a Go int64 (0 if NULL).
-func scanInt64(n sql.NullInt64) int64 {
-	if n.Valid {
-		return n.Int64
-	}
-	return 0
-}
-
 const deviceColumns = `id, user_id, label, secret_hash,
 	current_ipv4, current_ipv6, hostname, os, client_version,
 	last_seen_at, disabled, created_at, updated_at,
@@ -123,19 +115,19 @@ func scanDevice(row interface {
 	if err != nil {
 		return Device{}, err
 	}
-	d.CurrentIPv4 = scanString(currentIPv4)
-	d.CurrentIPv6 = scanString(currentIPv6)
-	d.Hostname = scanString(hostname)
-	d.OS = scanString(osCol)
-	d.ClientVersion = scanString(clientVersion)
-	d.LastSeenAt = scanInt64(lastSeenAt)
+	d.CurrentIPv4 = currentIPv4.String
+	d.CurrentIPv6 = currentIPv6.String
+	d.Hostname = hostname.String
+	d.OS = osCol.String
+	d.ClientVersion = clientVersion.String
+	d.LastSeenAt = lastSeenAt.Int64
 	d.Disabled = disabled != 0
-	d.V4ConfirmedAt = scanInt64(v4Conf)
-	d.V6ConfirmedAt = scanInt64(v6Conf)
+	d.V4ConfirmedAt = v4Conf.Int64
+	d.V6ConfirmedAt = v6Conf.Int64
 	d.V4WarnLevel = int(v4Level)
 	d.V6WarnLevel = int(v6Level)
-	d.CertSerial = scanString(certSerial)
-	d.CertNotAfter = scanInt64(certNotAfter)
+	d.CertSerial = certSerial.String
+	d.CertNotAfter = certNotAfter.Int64
 	return d, nil
 }
 
@@ -289,7 +281,7 @@ func (r *DeviceRepo) ListAll(ctx context.Context) ([]Device, error) {
 // confirmation instant and resets its warning level. For a device whose
 // instant was never set (the common case: this is often the first write for a
 // newly seeded or newly enrolled device), passing false instead would leave
-// it NULL, which scanInt64 maps to 0 and the sweep reads as "never
+// it NULL, which sql.NullInt64 scans as 0 and the sweep reads as "never
 // confirmed", expiring the device on the next tick.
 func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt int64) error {
 	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os,
@@ -532,9 +524,9 @@ func (r *DeviceRepo) ListFeed(ctx context.Context) ([]FeedDevice, error) {
 		if err := rows.Scan(&d.ID, &d.Label, &v4, &v6, &seen); err != nil {
 			return nil, fmt.Errorf("devices.ListFeed: scan: %w", err)
 		}
-		d.IPv4 = scanString(v4)
-		d.IPv6 = scanString(v6)
-		d.LastSeenAt = scanInt64(seen)
+		d.IPv4 = v4.String
+		d.IPv6 = v6.String
+		d.LastSeenAt = seen.Int64
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {

@@ -63,12 +63,12 @@ func scanAuditEntry(row interface {
 	if err != nil {
 		return AuditEntry{}, err
 	}
-	e.ActorUserID = scanString(actorUserID)
-	e.TargetType = scanString(targetType)
-	e.TargetID = scanString(targetID)
-	e.DetailsJSON = scanString(detailsJSON)
-	e.IP = scanString(ip)
-	e.UserAgent = scanString(userAgent)
+	e.ActorUserID = actorUserID.String
+	e.TargetType = targetType.String
+	e.TargetID = targetID.String
+	e.DetailsJSON = detailsJSON.String
+	e.IP = ip.String
+	e.UserAgent = userAgent.String
 	return e, nil
 }
 
