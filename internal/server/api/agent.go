@@ -141,5 +141,6 @@ func rejectClientCert(ctx context.Context, w http.ResponseWriter, log *slog.Logg
 	log.LogAttrs(ctx, slog.LevelWarn, "agent client certificate rejected",
 		slog.String("reason", reason),
 		slog.String("claimed_device_id", claimedDeviceID(claimed)))
+	w.Header().Set(shared.HeaderWWWAuthenticate, shared.ChallengeHMAC) // #191: every 401 carries a challenge
 	writeCodedError(w, newCodedError(http.StatusUnauthorized, shared.CodeClientCertRejected, "client certificate rejected"))
 }

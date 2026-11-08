@@ -518,3 +518,39 @@ func TestAgentListener_RejectionLog(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentListener_CertRejectionCarriesTheChallenge: the coded 401 from both
+// places the agent port rejects a client certificate (ClientCertMiddleware and
+// certBindingMW) names the agent port's credential, HMAC (RFC 9110 §15.5.2, #191).
+func TestAgentListener_CertRejectionCarriesTheChallenge(t *testing.T) {
+	l := newAgentListener(t)
+	a := l.newDevice(t, "agent-challenge-a@example.com")
+	b := l.newDevice(t, "agent-challenge-b@example.com")
+	ghost := issueClientCert(t, l.ca, "no-such-device")
+
+	tests := []struct {
+		name string
+		cert tls.Certificate
+		req  *http.Request
+	}{
+		{"certificate names no device", ghost,
+			signedRequest(t, http.MethodGet, l.url, "/agent/v1/self", a.id, a.secret, nil, "challenge-nonce-1")},
+		{"certificate and HMAC name different devices", a.cert,
+			signedRequest(t, http.MethodGet, l.url, "/agent/v1/self", b.id, b.secret, nil, "challenge-nonce-2")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := l.client(t, tt.cert).Do(tt.req.WithContext(t.Context()))
+			if err != nil {
+				t.Fatalf("%s: %v", tt.req.URL.Path, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+			if got := resp.Header.Get("WWW-Authenticate"); got != challengeHMAC {
+				t.Errorf("WWW-Authenticate = %q, want %q", got, challengeHMAC)
+			}
+		})
+	}
+}
