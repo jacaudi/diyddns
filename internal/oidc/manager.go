@@ -18,6 +18,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/shared/clock"
 )
 
 // ErrNotReady is returned by flow methods when the provider has not been
@@ -60,16 +61,7 @@ func NewManager(cfg config.OIDCCfg, baseURL string, log *slog.Logger) *Manager {
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
 		},
 	}
-	m.sleep = func(ctx context.Context, d time.Duration) bool {
-		t := time.NewTimer(d)
-		defer t.Stop()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-t.C:
-			return true
-		}
-	}
+	m.sleep = func(ctx context.Context, d time.Duration) bool { return clock.Sleep(ctx, d) == nil }
 	return m
 }
 

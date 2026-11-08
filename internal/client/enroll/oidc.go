@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/jacaudi/diyddns/internal/shared/clock"
 )
 
 // Clock abstracts time so the poll loop is testable without real sleeps. Sleep
@@ -97,14 +99,5 @@ func NewSystemClock() Clock { return systemClock{} }
 
 type systemClock struct{}
 
-func (systemClock) Now() time.Time { return time.Now() }
-func (systemClock) Sleep(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
+func (systemClock) Now() time.Time                                   { return time.Now() }
+func (systemClock) Sleep(ctx context.Context, d time.Duration) error { return clock.Sleep(ctx, d) }

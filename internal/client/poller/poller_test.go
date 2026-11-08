@@ -101,7 +101,7 @@ func TestRun_BackoffThenReset(t *testing.T) {
 	clk := &fakeClock{cancel: cancel, stopAt: 3}
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &fakeChk{err: fmt.Errorf("%w: status 500", checkin.ErrServer)} // a 5xx backs off, forever
-	p := New(d, c, Options{Interval: 5 * time.Minute, Clock: clk, RandFloat: func() float64 { return 0.5 }, Logger: testLogger()})
+	p := New(d, c, Options{Interval: 5 * time.Minute, Sleep: clk.Sleep, RandFloat: func() float64 { return 0.5 }, Logger: testLogger()})
 	_ = p.Run(ctx)
 	// First two failures back off: min(30s,interval)=30s, then 60s.
 	if len(clk.sleeps) < 2 || clk.sleeps[0] != 30*time.Second || clk.sleeps[1] != 60*time.Second {
@@ -114,7 +114,7 @@ func TestRun_SuccessJitterWithinBound(t *testing.T) {
 	clk := &fakeClock{cancel: cancel, stopAt: 1}
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &fakeChk{res: checkin.Result{Stored: true}}
-	p := New(d, c, Options{Interval: 100 * time.Second, Clock: clk, RandFloat: func() float64 { return 1.0 }, Logger: testLogger()})
+	p := New(d, c, Options{Interval: 100 * time.Second, Sleep: clk.Sleep, RandFloat: func() float64 { return 1.0 }, Logger: testLogger()})
 	_ = p.Run(ctx)
 	// rand=1.0 → interval*(1 + 0.1*(2*1-1)) = 110s (upper bound).
 	if clk.sleeps[0] != 110*time.Second {
@@ -128,7 +128,7 @@ func TestRun_ThreeConsecutiveUnauthorized_Terminates(t *testing.T) {
 	clk := &fakeClock{cancel: cancel, stopAt: 10} // never reached: Run must stop on its own
 	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
 	c := &seqChk{errs: []error{checkin.ErrUnauthorized}}
-	p := New(d, c, Options{Interval: 5 * time.Minute, Clock: clk, RandFloat: func() float64 { return 0.5 }, Logger: testLogger()})
+	p := New(d, c, Options{Interval: 5 * time.Minute, Sleep: clk.Sleep, RandFloat: func() float64 { return 0.5 }, Logger: testLogger()})
 
 	err := p.Run(ctx)
 
@@ -154,7 +154,7 @@ func TestRun_UnauthorizedStreakResetsOnSuccess(t *testing.T) {
 	// 401, 401, ok, 401, ok — never three in a row, so Run keeps going until
 	// the clock cancels the context after the fifth sleep.
 	c := &seqChk{errs: []error{checkin.ErrUnauthorized, checkin.ErrUnauthorized, nil, checkin.ErrUnauthorized, nil}}
-	p := New(d, c, Options{Interval: 5 * time.Minute, Clock: clk, RandFloat: func() float64 { return 0.5 }, Logger: testLogger()})
+	p := New(d, c, Options{Interval: 5 * time.Minute, Sleep: clk.Sleep, RandFloat: func() float64 { return 0.5 }, Logger: testLogger()})
 
 	if err := p.Run(ctx); err != nil {
 		t.Fatalf("Run returned %v, want nil (clean stop on cancel; the streak was broken)", err)
