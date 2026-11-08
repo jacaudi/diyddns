@@ -560,7 +560,6 @@ code {
    empty two thirds looked like a fault; now that it is the same dl.kv as the
    card beside it the heights are close, and matching edges beat ragged ones. */
 .grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 /* A strip of stat tiles is a band of its own above the rest of the page, so
@@ -1002,7 +1001,6 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 
 /* ---------- Utilities ---------- */
 
-.stack-sm > * + * { margin-top: var(--space-3); }
 /* The per-family countdown under an address in a .kv value. Its own line, and
    clear of the copy pill above it. */
 .kv .expiry { margin-top: var(--space-2); font-size: var(--type-2); }
@@ -1032,7 +1030,7 @@ table.grid-table { width: 100%; border-collapse: collapse; font-size: var(--type
 /* ---------- Responsive ---------- */
 
 @media (max-width: 780px) {
-  .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
+  .grid.cols-2, .grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
   /* The fixed action column has nowhere to go at this width; stack it under
      the description rather than squeezing both. */
   .danger-item { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-3); }
