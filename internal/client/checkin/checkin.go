@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,11 +16,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/client/agenthttp"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
 
@@ -100,20 +99,12 @@ func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, erro
 	if err != nil || len(key) == 0 {
 		return nil, fmt.Errorf("checkin: secret is not valid base64")
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	switch {
-	case opts.TLSConfig != nil:
+	var transport *http.Transport
+	if opts.TLSConfig != nil {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
 		transport.TLSClientConfig = opts.TLSConfig
-	case opts.CACertPath != "":
-		pem, err := os.ReadFile(opts.CACertPath) // operator-provided CA bundle path (enroll/client.go reads the same way, no #nosec needed — gosec does not flag this pattern here)
-		if err != nil {
-			return nil, fmt.Errorf("checkin: read ca cert %s: %w", opts.CACertPath, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("checkin: no certificates in %s", opts.CACertPath)
-		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	} else if transport, err = agenthttp.NewTransport(opts.CACertPath); err != nil {
+		return nil, fmt.Errorf("checkin: %w", err)
 	}
 	timeout := opts.Timeout
 	if timeout == 0 {
@@ -148,11 +139,11 @@ func (c *Client) Checkin(ctx context.Context, r Report) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("checkin: marshal: %w", err)
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/agent/v1/checkin", body)
+	resp, err := c.do(ctx, http.MethodPost, "/agent/v1/checkin", body) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return Result{}, err
 	}
-	defer drainClose(resp)
+	defer agenthttp.DrainClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, classify(resp)
 	}
@@ -168,11 +159,11 @@ func (c *Client) Checkin(ctx context.Context, r Report) (Result, error) {
 // accepted the device's credentials (and, on the agent port, its certificate);
 // the response body is not read.
 func (c *Client) Self(ctx context.Context) error {
-	resp, err := c.do(ctx, http.MethodGet, "/agent/v1/self", nil)
+	resp, err := c.do(ctx, http.MethodGet, "/agent/v1/self", nil) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return err
 	}
-	defer drainClose(resp)
+	defer agenthttp.DrainClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return classify(resp)
 	}
@@ -189,11 +180,11 @@ func (c *Client) RequestCert(ctx context.Context, csrPEM []byte) (CertResponse, 
 	if err != nil {
 		return CertResponse{}, fmt.Errorf("checkin: marshal: %w", err)
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/agent/v1/cert", body)
+	resp, err := c.do(ctx, http.MethodPost, "/agent/v1/cert", body) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return CertResponse{}, err
 	}
-	defer drainClose(resp)
+	defer agenthttp.DrainClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return CertResponse{}, classify(resp)
 	}
@@ -258,12 +249,6 @@ func classify(resp *http.Response) error {
 	default:
 		return fmt.Errorf("%w: status %d: %s", ErrServer, resp.StatusCode, p.Detail)
 	}
-}
-
-// drainClose drains and closes a response body so the connection can be reused.
-func drainClose(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	_ = resp.Body.Close()
 }
 
 // randNonce returns a fresh 16-byte hex nonce (server replay-nonce table
