@@ -16,6 +16,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -61,15 +62,7 @@ func splitChallenge(value string) (flow registerFlow, sealed string) {
 	return registerFlow(tag), sealed
 }
 
-// statusClientClosedRequest is the status for a request whose client went away
-// before the server finished it (nginx's 499, which Google's API mapping uses
-// for a cancelled operation). net/http has no constant for it. It is a 4xx, so
-// the trace span stays unset, and unlike 401 it does not claim the caller
-// lacked credentials. webui declares its own copy: the two adapters share no
-// HTTP-layer package.
-const statusClientClosedRequest = 499
-
-// msgClientClosedRequest is the detail sent with statusClientClosedRequest.
+// msgClientClosedRequest is the detail sent with shared.StatusClientClosedRequest.
 const msgClientClosedRequest = "client closed request"
 
 // webauthnChallengeCookieMaxAge bounds how long an unconsumed challenge
@@ -236,7 +229,7 @@ func passkeyErr(ctx context.Context, deps ServerDeps, action string, err error) 
 		// The client went away mid-request (or the store reported it): not an
 		// infrastructure failure, so Info, not Error, and not a 5xx.
 		deps.Log.LogAttrs(ctx, slog.LevelInfo, action+" cancelled", slog.Any("error", err))
-		return huma.NewError(statusClientClosedRequest, msgClientClosedRequest)
+		return huma.NewError(shared.StatusClientClosedRequest, msgClientClosedRequest)
 	default:
 		deps.Log.LogAttrs(ctx, slog.LevelError, action+" failed", slog.Any("error", err))
 		return huma.Error500InternalServerError("failed to " + action)

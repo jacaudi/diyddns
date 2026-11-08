@@ -159,21 +159,12 @@ func hmacMiddleware(api huma.API, v *auth.Verifier, maxBody int64, log *slog.Log
 // its place. See middleware.validRequestID for what this bound is actually
 // defending against (it is not what it looks like).
 //
-// Same limit as middleware.validRequestID, deliberately by its own predicate
-// rather than a shared one: internal/server/api does not import
-// internal/server/middleware, and the two bounds have different owners — this
-// one is set by what this server mints, that one by what upstream proxies
-// emit. They are identical today and may diverge; keep them in step or
-// diverge them deliberately. (Mirrors config.isASCII's deliberate
-// duplication.)
+// The byte rule is shared.PrintableASCII, as for middleware.validRequestID; the
+// 128-byte bound is this header's own (set by what this server mints, where
+// the request-id bound is set by what upstream proxies emit).
 func claimedDeviceID(s string) string {
-	if len(s) > 128 {
+	if !shared.PrintableASCII(s, 128) {
 		return ""
-	}
-	for i := range len(s) {
-		if s[i] < 0x20 || s[i] > 0x7E {
-			return ""
-		}
 	}
 	return s
 }
