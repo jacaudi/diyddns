@@ -78,8 +78,8 @@ func (h *rateLimited) recordFailure() (suppressed int, shouldLog bool) {
 // -- so observing what otel.SetLogger installed is not merely order-dependent,
 // it is IMPOSSIBLE from outside go.opentelemetry.io/otel. (This is a
 // materially different, and stronger, reason than otel.SetErrorHandler's:
-// that one COULD be read back through the once-only otel.GetErrorHandler, and
-// tests avoid it only to stay order-independent -- see setDiagnostics below.)
+// that one IS read back through otel.GetErrorHandler, by
+// TestSetErrorHandler_InstallsTheGlobalErrorHandler.)
 //
 // Note what this does NOT do: logr's slog sink maps V(n) to slog.Level(-n)
 // (go-logr/logr@v1.4.4/slogsink.go:68-73), and OTel's global.Warn is V(1)
@@ -107,43 +107,10 @@ func OtelLogr(logger *slog.Logger) logr.Logger {
 // call is the same "structure without a present requirement" design D10 removed
 // for the provider globals.
 func (p *Providers) SetErrorHandler(logger *slog.Logger) {
-	p.setDiagnostics(logger, otel.SetErrorHandler, otel.SetLogger)
-}
-
-// setDiagnostics is SetErrorHandler's body, with the two otel setters taken as
-// parameters. This is the seam TestSetDiagnostics_InstallsBothChannels uses to
-// capture what gets installed without touching OTel's real global state: both
-// otel.SetErrorHandler's delegation (handler.go:24-29) and, per OtelLogr's
-// doc comment, otel.SetLogger's target are otherwise unobservable from a test
-// in this package without becoming order-dependent or, for the logger,
-// impossible outright.
-//
-// `go tool cover -func` reports 100% for both this function and
-// SetErrorHandler, and that number is misleading if read as "everything is
-// verified": coverage tracks whether a STATEMENT ran, not whether the
-// function VALUE passed to it was ever actually invoked. No test that
-// exercises setDiagnostics calls the REAL otel.SetErrorHandler or
-// otel.SetLogger -- TestSetErrorHandler_InertIsNoOp and
-// TestSetErrorHandler_NilLoggerIsNoOp only reach the early-return guards
-// above (the real functions are referenced, never called), and
-// TestSetDiagnostics_InstallsBothChannels deliberately substitutes capturing
-// fakes for setErrorHandler/setLogger specifically to avoid touching OTel's
-// global state. setDiagnostics is now the ONLY call site in this package that
-// touches either real otel setter (Revision 6 removed New's early install).
-// The honest, unverifiable-from-inside-this-module floor is exactly the one
-// line `p.setDiagnostics(logger, otel.SetErrorHandler, otel.SetLogger)` in
-// SetErrorHandler -- reading back whether IT did what it says is either
-// order-dependent (the error handler, via the once-only
-// otel.GetErrorHandler) or impossible outright (the logger, per OtelLogr's
-// doc comment). Everything else in setDiagnostics -- the nil guards, and the
-// actual *rateLimited and logr.Logger values constructed -- IS genuinely
-// exercised through this seam, values and behavior both, not just
-// statement-executed.
-func (p *Providers) setDiagnostics(logger *slog.Logger, setErrorHandler func(otel.ErrorHandler), setLogger func(logr.Logger)) {
 	if p == nil || len(p.shutdown) == 0 || logger == nil {
 		return
 	}
 	p.logger = logger
-	setErrorHandler(&rateLimited{log: logger, now: time.Now})
-	setLogger(OtelLogr(logger))
+	otel.SetErrorHandler(&rateLimited{log: logger, now: time.Now})
+	otel.SetLogger(OtelLogr(logger))
 }
