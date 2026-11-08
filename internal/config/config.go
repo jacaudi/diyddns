@@ -117,11 +117,10 @@ type Auth struct {
 // mapstructure tags are required for multi-word keys — viper lowercases field
 // names but does not split them (see ServerSection.BaseURL above).
 type SessionCfg struct {
-	CookieName     string        `mapstructure:"cookie_name"`
-	CookieSecure   bool          `mapstructure:"cookie_secure"`
-	CookieSameSite string        `mapstructure:"cookie_samesite"`
-	TTL            time.Duration `mapstructure:"ttl"`
-	SlideWindow    time.Duration `mapstructure:"slide_window"`
+	CookieName   string        `mapstructure:"cookie_name"`
+	CookieSecure bool          `mapstructure:"cookie_secure"`
+	TTL          time.Duration `mapstructure:"ttl"`
+	SlideWindow  time.Duration `mapstructure:"slide_window"`
 }
 
 // HMACCfg holds agent request-signing settings.
@@ -238,25 +237,24 @@ func (a AgentSection) PublicHost() string {
 // Env binding is explicit: config.Load has no viper.AutomaticEnv(), so every
 // key MUST be listed here or its DIYDDNS_* env var is silently ignored.
 var keyDefaults = map[string]any{
-	"server.listen":                ":8080",
-	"server.base_url":              "",
-	"database.path":                "",
-	"logging.level":                "info",
-	"logging.format":               "json",
-	"logging.output":               "stderr",
-	"auth.session.cookie_name":     "diyddns_session",
-	"auth.session.cookie_secure":   true,
-	"auth.session.cookie_samesite": "lax",
-	"auth.session.ttl":             "720h",
-	"auth.session.slide_window":    "168h",
-	"auth.hmac.skew_window":        "120s",
-	"auth.hmac.nonce_ttl":          "120s",
-	"auth.hmac.secret_key":         "",
-	"auth.oidc.enabled":            false,
-	"auth.oidc.required":           false,
-	"auth.oidc.issuer":             "",
-	"auth.oidc.client_id":          "",
-	"auth.oidc.client_secret":      "",
+	"server.listen":              ":8080",
+	"server.base_url":            "",
+	"database.path":              "",
+	"logging.level":              "info",
+	"logging.format":             "json",
+	"logging.output":             "stderr",
+	"auth.session.cookie_name":   "diyddns_session",
+	"auth.session.cookie_secure": true,
+	"auth.session.ttl":           "720h",
+	"auth.session.slide_window":  "168h",
+	"auth.hmac.skew_window":      "120s",
+	"auth.hmac.nonce_ttl":        "120s",
+	"auth.hmac.secret_key":       "",
+	"auth.oidc.enabled":          false,
+	"auth.oidc.required":         false,
+	"auth.oidc.issuer":           "",
+	"auth.oidc.client_id":        "",
+	"auth.oidc.client_secret":    "",
 	// auth.oidc.scopes cannot be set via the DIYDDNS_AUTH_OIDC_SCOPES env var
 	// (viper delivers env values as a single string, not []string). Configure
 	// scopes via YAML or flags; the default covers the common case.

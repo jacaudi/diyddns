@@ -104,12 +104,6 @@ auth:
     # set this to false for that environment.
     cookie_secure: true
 
-    # Default "lax". NOTE: currently inert — sessionCookie hardcodes
-    # SameSite=Lax. The value is only echoed back by the admin config
-    # endpoint. Left here because it is a real config key; do not expect
-    # changing it to change the cookie.
-    cookie_samesite: "lax"
-
     # Absolute session lifetime. Default "720h" (30 days).
     ttl: "720h"
     # Sliding-renewal window: activity within this window extends the
