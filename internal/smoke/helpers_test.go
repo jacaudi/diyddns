@@ -349,9 +349,8 @@ func newJar(t *testing.T) http.CookieJar {
 // startServerWithYAML runs the real binary against a caller-supplied YAML
 // config, with the same DIYDDNS_* overrides and teardown as startFeedServer.
 // Use it when a test needs config keys that have no DIYDDNS_* override worth
-// spelling out (nested sections such as agent.tls). extraEnv appends further
-// KEY=VALUE entries after the defaults, so a later entry wins.
-func startServerWithYAML(t *testing.T, bin, addr, yaml string, extraEnv ...string) *server {
+// spelling out (nested sections such as agent.tls).
+func startServerWithYAML(t *testing.T, bin, addr, yaml string) *server {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
@@ -367,7 +366,6 @@ func startServerWithYAML(t *testing.T, bin, addr, yaml string, extraEnv ...strin
 		"DIYDDNS_DATABASE_PATH="+dbPath,
 		"DIYDDNS_AUTH_HMAC_SECRET_KEY="+randomKeyB64(t),
 	)
-	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdout = s
 	cmd.Stderr = s
 	if err := cmd.Start(); err != nil {

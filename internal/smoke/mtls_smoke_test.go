@@ -56,10 +56,7 @@ func TestAgentMTLSSmoke(t *testing.T) {
   tls:
     dir: %q
 `, agentAddr, agentPort, tlsDir)
-	// The server refuses an agent.tls.dir under os.TempDir(), and t.TempDir()
-	// lives there. Pointing the server process's TMPDIR somewhere else keeps
-	// the guard intact; this is process configuration, not a test seam.
-	srv := startServerWithYAML(t, serverBin, addr, yaml, "TMPDIR="+t.TempDir())
+	srv := startServerWithYAML(t, serverBin, addr, yaml)
 	waitHealthy(t, baseURL)
 
 	step(t, "first boot generated the CA, warned about the backup key, wrote 0600 files")

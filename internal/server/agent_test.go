@@ -56,14 +56,6 @@ func jsonLog() (*slog.Logger, *syncBuffer) {
 	return slog.New(slog.NewJSONHandler(buf, nil)), buf
 }
 
-// allowAgentTemp lifts the temp-directory guard for t: every t.TempDir lives
-// under os.TempDir, which the guard exists to refuse.
-func allowAgentTemp(t *testing.T) {
-	t.Helper()
-	agentTempDirAllowed = true
-	t.Cleanup(func() { agentTempDirAllowed = false })
-}
-
 // freeAddr returns a loopback address nothing is listening on.
 func freeAddr(t *testing.T) string {
 	t.Helper()
@@ -79,7 +71,6 @@ func freeAddr(t *testing.T) string {
 // directory and both listeners on free loopback ports.
 func agentTestConfig(t *testing.T) (config.Server, string) {
 	t.Helper()
-	allowAgentTemp(t)
 	dir := t.TempDir()
 	cfg := routesTestConfig(t)
 	cfg.Database.Path = filepath.Join(dir, "diyddns.db")
@@ -195,7 +186,6 @@ func TestCheckAgentDirs(t *testing.T) {
 		name     string
 		dbPath   string
 		dir      func(t *testing.T) string
-		allow    bool
 		wantErr  string
 		wantMode bool
 	}{
@@ -203,63 +193,25 @@ func TestCheckAgentDirs(t *testing.T) {
 			name:    "memory database",
 			dbPath:  ":memory:",
 			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "a") },
-			allow:   true,
 			wantErr: "database.path",
 		},
 		{
 			name:    "shared-cache memory database",
 			dbPath:  "file::memory:?cache=shared",
 			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "a") },
-			allow:   true,
 			wantErr: "database.path",
 		},
 		{
-			name:    "the temp dir itself",
-			dbPath:  "/data/diyddns.db",
-			dir:     func(*testing.T) string { return os.TempDir() },
-			wantErr: "agent.tls.dir",
-		},
-		{
-			name:    "fresh dir under the temp dir",
-			dbPath:  "/data/diyddns.db",
-			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "agent") },
-			wantErr: "agent.tls.dir",
-		},
-		{
-			name:     "fresh dir under the temp dir with the seam on",
+			// Where agent.tls.dir lives is the operator's call (#6).
+			name:     "fresh dir under the temp dir",
 			dbPath:   "/data/diyddns.db",
 			dir:      func(t *testing.T) string { return filepath.Join(t.TempDir(), "agent") },
-			allow:    true,
 			wantMode: true,
-		},
-		{
-			name:   "symlink into a TMPDIR that lies elsewhere",
-			dbPath: "/data/diyddns.db",
-			dir: func(t *testing.T) string {
-				tmp := filepath.Join(t.TempDir(), "tmp")
-				target := filepath.Join(tmp, "x")
-				if err := os.MkdirAll(target, 0o700); err != nil {
-					t.Fatalf("MkdirAll: %v", err)
-				}
-				t.Setenv("TMPDIR", tmp)
-				out := filepath.Join(t.TempDir(), "out")
-				if err := os.MkdirAll(out, 0o700); err != nil {
-					t.Fatalf("MkdirAll: %v", err)
-				}
-				link := filepath.Join(out, "link")
-				if err := os.Symlink(target, link); err != nil {
-					t.Fatalf("Symlink: %v", err)
-				}
-				return link
-			},
-			wantErr: "agent.tls.dir",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := tt.dir(t)
-			agentTempDirAllowed = tt.allow
-			t.Cleanup(func() { agentTempDirAllowed = false })
 
 			err := checkAgentDirs(tt.dbPath, dir)
 
