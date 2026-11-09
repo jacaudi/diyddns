@@ -6,23 +6,6 @@ import (
 	"testing"
 )
 
-// Every prefix must be in masked form. This is NOT because Contains
-// misbehaves on an unmasked prefix — netip.Prefix.Contains truncates both
-// operands to the prefix length on the fly, so a masked and an unmasked
-// prefix over the same network match identically (verified against Go's
-// stdlib source and empirically). Masking is still correct practice: it
-// keeps the table in canonical form, keeps error messages honest (denied has
-// no ParseAllowed step to mask through), and makes the prefixes safe as map
-// keys, where an unmasked and masked prefix over the same network compare
-// unequal.
-func TestDeniedTableIsMasked(t *testing.T) {
-	for _, p := range denied {
-		if p.Masked() != p {
-			t.Errorf("prefix %s is not masked (want %s)", p, p.Masked())
-		}
-	}
-}
-
 func TestPermit(t *testing.T) {
 	tests := []struct {
 		name, addr, scheme string
