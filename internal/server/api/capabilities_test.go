@@ -135,3 +135,21 @@ func TestCapabilities_ReportsConfiguredSkewWindow(t *testing.T) {
 		t.Errorf("SkewWindowSeconds = %d, want 300 (auth.hmac.skew_window)", got.SkewWindowSeconds)
 	}
 }
+
+func TestCapabilitiesObservedIP(t *testing.T) {
+	h := newFullHarness(t)
+	resp, err := http.Get(h.srv.URL + "/agent/v1/capabilities")
+	if err != nil {
+		t.Fatalf("get capabilities: %v", err)
+	}
+	defer resp.Body.Close()
+	var got struct {
+		ObservedIP *bool `json:"observed_ip"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ObservedIP == nil || !*got.ObservedIP {
+		t.Errorf("observed_ip = %v, want true", got.ObservedIP)
+	}
+}

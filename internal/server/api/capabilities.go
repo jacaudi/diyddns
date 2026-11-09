@@ -15,6 +15,9 @@ type Capabilities struct {
 	AddressFamilies   []string `json:"address_families"`
 	OIDCEnabled       bool     `json:"oidc_enabled"`
 	OIDCDeviceEnabled bool     `json:"oidc_device_enabled"`
+	// ObservedIP tells a client the server records the address it observes and
+	// answers check-ins with ip_source; always true on a server that has it.
+	ObservedIP bool `json:"observed_ip"`
 	// AgentMTLS is present only when the agent listener is enabled (#173).
 	AgentMTLS *AgentMTLSCapability `json:"agent_mtls,omitempty"`
 }
@@ -36,6 +39,7 @@ func registerCapabilities(a huma.API, deps ServerDeps) {
 			AddressFamilies:   []string{"ipv4", "ipv6"},
 			OIDCEnabled:       deps.OIDCMgr.Enabled(),
 			OIDCDeviceEnabled: deps.OIDCMgr.DeviceEnabled(),
+			ObservedIP:        true,
 		}
 		if deps.AgentURL != "" {
 			caps.AgentMTLS = &AgentMTLSCapability{AgentURL: deps.AgentURL}
