@@ -13,7 +13,6 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/jacaudi/diyddns/internal/server/agenttls"
-	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -23,7 +22,7 @@ import (
 // no OpenAPI document, docs page or schemas route, so the listener answers 404
 // for every other path. Each route is HMAC-authenticated and then bound to the
 // client certificate; the certificate itself is verified by ClientCertMiddleware
-// wrapped around the whole mux. Cert is renewal-only here (CertListenerAgent).
+// wrapped around the whole mux. Cert is renewal-only here.
 func BuildAgent(mux *http.ServeMux, deps ServerDeps) {
 	cfg := huma.DefaultConfig("DIYDDNS Agent mTLS API", deps.Info.Version)
 	cfg.OpenAPIPath, cfg.DocsPath, cfg.SchemasPath = "", "", ""
@@ -31,7 +30,7 @@ func BuildAgent(mux *http.ServeMux, deps ServerDeps) {
 
 	mws := huma.Middlewares{hmacMW(a, deps), certBindingMW(a, deps)}
 	registerCheckinOps(a, deps, mws)
-	registerCertOps(a, deps, service.CertListenerAgent, mws)
+	registerCertOps(a, deps, true, mws)
 }
 
 // ClientCertMiddleware verifies the TLS client certificate on every request to

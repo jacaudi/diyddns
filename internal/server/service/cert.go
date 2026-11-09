@@ -11,18 +11,6 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// CertListener names the listener a certificate request arrived on. It
-// decides whether issuance is allowed (#173).
-type CertListener string
-
-const (
-	// CertListenerMain issues only when the device has no live certificate.
-	CertListenerMain CertListener = "main"
-	// CertListenerAgent always issues: the caller already proved it holds the
-	// current certificate, so this is a renewal.
-	CertListenerAgent CertListener = "agent"
-)
-
 // ErrCertAlreadyIssued is returned for a main-listener request when the device
 // already has a live certificate. Mapped to HTTP 409 by the API layer.
 var ErrCertAlreadyIssued = errors.New("service: device already has a live certificate")
@@ -50,7 +38,10 @@ func NewCertService(st *store.Store, ca *agenttls.CA, agentURL string, audit Aud
 }
 
 // Issue signs a certificate for deviceID over csrPEM's public key and records
-// its serial and expiry on the device row.
+// its serial and expiry on the device row. renewal is true on the agent
+// listener, where the caller already proved it holds the current certificate,
+// so Issue always issues; on the main listener (renewal false) it issues only
+// when the device has no live certificate (#173).
 //
 // The crypto runs before the database write, so the store's single connection
 // is never held across it. On the main listener the write is a
@@ -58,9 +49,9 @@ func NewCertService(st *store.Store, ca *agenttls.CA, agentURL string, audit Aud
 // and the other gets ErrCertAlreadyIssued. A cheap read first rejects the
 // common case before any signing. Returns agenttls.ErrBadCSR for an unusable
 // CSR and store.ErrNotFound for an unknown device.
-func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte, l CertListener) (IssuedCert, error) {
+func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte, renewal bool) (IssuedCert, error) {
 	now := s.now()
-	if l == CertListenerMain {
+	if !renewal {
 		dev, err := s.st.Devices().GetByID(ctx, deviceID)
 		if err != nil {
 			return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", err)
@@ -74,7 +65,7 @@ func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte,
 		return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", err)
 	}
 	notAfter := issued.NotAfter.Unix()
-	if l == CertListenerMain {
+	if !renewal {
 		err = s.st.Devices().SetCertIfNoLive(ctx, deviceID, issued.Serial, notAfter, now.Unix())
 		if errors.Is(err, store.ErrConflict) {
 			return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", ErrCertAlreadyIssued)
@@ -85,11 +76,15 @@ func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte,
 	if err != nil {
 		return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", err)
 	}
+	listener := "main"
+	if renewal {
+		listener = "agent"
+	}
 	details, _ := json.Marshal(struct {
-		Listener CertListener `json:"listener"`
-		Serial   string       `json:"serial"`
-		NotAfter int64        `json:"not_after"`
-	}{l, issued.Serial, notAfter})
+		Listener string `json:"listener"`
+		Serial   string `json:"serial"`
+		NotAfter int64  `json:"not_after"`
+	}{listener, issued.Serial, notAfter})
 	s.audit.Log(ctx, store.AuditEntry{
 		EventType: "device.cert_issued", TargetType: "device", TargetID: deviceID,
 		DetailsJSON: string(details),

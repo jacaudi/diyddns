@@ -117,7 +117,7 @@ func registerAgentOps(a huma.API, deps ServerDeps) {
 	registerEnrollOps(a, deps)
 	registerCheckinOps(a, deps, mainAgentMWs(a, deps))
 	if deps.Cert != nil {
-		registerCertOps(a, deps, service.CertListenerMain, huma.Middlewares{hmacMW(a, deps)})
+		registerCertOps(a, deps, false, huma.Middlewares{hmacMW(a, deps)})
 	}
 }
 
