@@ -44,6 +44,10 @@ type Server struct {
 type ServerSection struct {
 	Listen  string
 	BaseURL string `mapstructure:"base_url"`
+	// TrustedProxies lists the reverse proxies whose X-Forwarded-For header the
+	// server believes, as CIDR prefixes or bare IPs. Empty (the default) means
+	// no header is ever read. Entries are parsed by ParseTrustedProxies.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
 // DatabaseSection holds the SQLite database location.
@@ -204,6 +208,9 @@ type AgentSection struct {
 	// RequireMTLS closes the HMAC-only check-in path on the main listener, so
 	// every check-in must arrive on the agent listener.
 	RequireMTLS bool `mapstructure:"require_mtls"`
+	// ProxyProtocol makes the agent listener accept a PROXY protocol header
+	// from a trusted upstream. Independent of server.trusted_proxies.
+	ProxyProtocol bool `mapstructure:"proxy_protocol"`
 }
 
 // AgentTLSSection locates the agent PKI material on disk.
@@ -239,6 +246,7 @@ func (a AgentSection) PublicHost() string {
 var keyDefaults = map[string]any{
 	"server.listen":              ":8080",
 	"server.base_url":            "",
+	"server.trusted_proxies":     []string{},
 	"database.path":              "",
 	"logging.level":              "info",
 	"logging.format":             "json",
@@ -285,6 +293,7 @@ var keyDefaults = map[string]any{
 	"agent.public_url":                       "",
 	"agent.tls.dir":                          "",
 	"agent.require_mtls":                     false,
+	"agent.proxy_protocol":                   false,
 	"retention.ip_history_days":              0,
 	"retention.ip_history_per_device_max":    0,
 	"retention.audit_log_days":               0,
@@ -405,6 +414,9 @@ func validateSections(cfg *Server) error {
 		return err
 	}
 	if err := validateObservability(*cfg); err != nil {
+		return err
+	}
+	if err := validateTrustedProxies(*cfg); err != nil {
 		return err
 	}
 	return validateAgent(cfg)
@@ -663,6 +675,84 @@ func NotificationsEgressWarning(cfg Server) string {
 	return fmt.Sprintf(
 		"notifications.allowed_private_cidrs contains very broad or sensitive prefixes %v: "+
 			"the server may be directed at internal addresses by any user", broad)
+}
+
+// ParseTrustedProxies turns server.trusted_proxies entries into prefixes. Each
+// entry is trimmed; a bare IP becomes a /32 or /128; the result is Masked so a
+// host-bits spelling ("10.1.2.3/8") compares equal to its network. Every bad
+// entry is reported, each named, so one restart fixes them all.
+//
+// It lives here, not in the server's clientip package, because internal/config
+// is also linked into the client binary, which must not import server packages
+// (cmd/diyddns-client/deps_test.go).
+func ParseTrustedProxies(entries []string) ([]netip.Prefix, error) {
+	var (
+		out      []netip.Prefix
+		problems []error
+	)
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		p, err := parseProxyEntry(e)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("%q: %w", e, err))
+			continue
+		}
+		out = append(out, p.Masked())
+	}
+	return out, errors.Join(problems...)
+}
+
+// parseProxyEntry parses one trimmed entry as a prefix, or as a bare IP that
+// becomes a host prefix.
+func parseProxyEntry(e string) (netip.Prefix, error) {
+	if strings.Contains(e, "/") {
+		return netip.ParsePrefix(e)
+	}
+	a, err := netip.ParseAddr(e)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// validateTrustedProxies rejects server.trusted_proxies entries that do not
+// parse, so a mistyped proxy list stops startup instead of silently trusting
+// nothing.
+func validateTrustedProxies(cfg Server) error {
+	if _, err := ParseTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return fmt.Errorf("config: server.trusted_proxies: %w", err)
+	}
+	return nil
+}
+
+// TrustedProxiesWarning returns a non-empty warning when server.trusted_proxies
+// holds a prefix that is almost certainly a mistake: a /0 trusts every peer, so
+// any client could forge its address; a 4-in-6 prefix never matches, because
+// the trust check unmaps the peer address first. Returned rather than logged
+// for the same reason as NotificationsEgressWarning.
+func TrustedProxiesWarning(cfg Server) string {
+	prefixes, _ := ParseTrustedProxies(cfg.Server.TrustedProxies) // validateTrustedProxies already rejected bad entries
+	var broad, mapped []string
+	for _, p := range prefixes {
+		switch {
+		case p.Bits() == 0:
+			broad = append(broad, p.String())
+		case p.Addr().Is4In6():
+			mapped = append(mapped, p.String())
+		}
+	}
+	var warnings []string
+	if len(broad) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"server.trusted_proxies contains zero-length prefixes %v: every peer would be trusted "+
+				"and any client could forge its observed address", broad))
+	}
+	if len(mapped) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"server.trusted_proxies contains 4-in-6 prefixes %v that never match: "+
+				"write the IPv4 form instead", mapped))
+	}
+	return strings.Join(warnings, "; ")
 }
 
 // ResolveWebAuthn derives the WebAuthn Relying Party ID and origin, falling

@@ -44,6 +44,13 @@ server:
   # In every other configuration base_url is required.
   base_url: "http://localhost:8080"
 
+  # Reverse proxies whose X-Forwarded-For header the server believes when it
+  # records a device's address from the connection (CIDR prefixes or bare IPs).
+  # Default [] — no header is ever read, so only a direct connection counts.
+  # Env: DIYDDNS_SERVER_TRUSTED_PROXIES, comma-separated. A malformed entry
+  # stops startup; a /0 prefix is warned about. See docs/deployment.md.
+  # trusted_proxies: ["10.0.0.0/8"]
+
 database:
   # REQUIRED. Path to the SQLite database file; it is created on first run
   # along with its schema. The server refuses to start without it
@@ -295,6 +302,12 @@ agent:
   # Closes the HMAC-only check-in path on the main listener, so check-ins are
   # accepted only on the agent listener. Requires `listen`.
   require_mtls: false
+
+  # Accept a PROXY protocol header on the agent listener, so a TCP passthrough
+  # proxy in front of it can pass the device's real address. Default false (the
+  # listener is not wrapped). Only a peer inside server.trusted_proxies may send
+  # the header; every other peer's header is ignored. See docs/deployment.md.
+  # proxy_protocol: false
 
 # Data retention for ip_history and audit_log. Disabled by default: neither
 # table loses a row to this policy until you set one of the three keys below,
