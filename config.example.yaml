@@ -48,7 +48,10 @@ server:
   # records a device's address from the connection (CIDR prefixes or bare IPs).
   # Default [] — no header is ever read, so only a direct connection counts.
   # Env: DIYDDNS_SERVER_TRUSTED_PROXIES, comma-separated. A malformed entry
-  # stops startup; a /0 prefix is warned about. See docs/deployment.md.
+  # stops startup. A /0 prefix (it trusts every peer, so any client could forge
+  # its address) and a 4-in-6 prefix such as ::ffff:10.0.0.0/104 (it never
+  # matches; write the IPv4 form) are each warned about at startup.
+  # See docs/deployment.md.
   # trusted_proxies: ["10.0.0.0/8"]
 
 database:
@@ -305,8 +308,10 @@ agent:
 
   # Accept a PROXY protocol header on the agent listener, so a TCP passthrough
   # proxy in front of it can pass the device's real address. Default false (the
-  # listener is not wrapped). Only a peer inside server.trusted_proxies may send
-  # the header; every other peer's header is ignored. See docs/deployment.md.
+  # listener is not wrapped). Independent of trusted_proxies, but it reads that
+  # list: a peer inside server.trusted_proxies MUST send the PROXY header, or
+  # its connection fails; every other peer's header is read and discarded.
+  # See docs/deployment.md.
   # proxy_protocol: false
 
 # Data retention for ip_history and audit_log. Disabled by default: neither

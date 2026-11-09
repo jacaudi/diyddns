@@ -1,9 +1,10 @@
 # DIYDDNS
 
-A self-hosted, multi-user public-IP tracker. The client agent discovers its own
-public IP from a quorum of independent lookup providers and reports it to a
-central server, which stores per-device IP history in SQLite and exposes both
-a JSON API and a server-rendered web UI.
+A self-hosted, multi-user public-IP tracker. Each device's public IP is the
+address the server observes its check-in coming from; a client that the server
+cannot observe falls back to asking a quorum of independent lookup providers.
+The server stores per-device IP history in SQLite and exposes both a JSON API
+and a server-rendered web UI.
 
 DIYDDNS is **not** an authoritative DNS server and does not push records to
 third-party DNS providers. It is an IP registry: clients check in, the server
@@ -107,6 +108,7 @@ services:
     environment:
       DIYDDNS_DATABASE_PATH: /data/diyddns.db
       DIYDDNS_SERVER_BASE_URL: https://ddns.example.com
+      DIYDDNS_SERVER_TRUSTED_PROXIES: <the proxy network CIDR>   # the docker network Traefik reaches diyddns on
     env_file: .env   # DIYDDNS_AUTH_HMAC_SECRET_KEY, kept out of git
     volumes:
       - diyddns-data:/data
@@ -152,6 +154,14 @@ DIYDDNS_AUTH_HMAC_SECRET_KEY=<output of: head -c 32 /dev/urandom | base64>
 1. Point `ddns.example.com` (a real domain you control) at this host's public
    IP, and set `--certificatesresolvers.letsencrypt.acme.email` to an address
    you actually read.
+
+   Replace `<the proxy network CIDR>` with the subnet of the docker network
+   Traefik reaches diyddns on (`docker network inspect <network> --format
+   '{{(index .IPAM.Config 0).Subnet}}'`). That is how the server learns to
+   believe the `X-Forwarded-For` header Traefik sets, and so record each
+   device's real address. Without it the server cannot see past Traefik and
+   clients fall back to looking their address up. See
+   [Deployment](docs/deployment.md#server-observed-ip).
 
 2. `docker compose up -d` — Traefik requests and renews the certificate
    automatically via the HTTP-01 challenge on port 80; no manual step.
@@ -206,15 +216,21 @@ requires an external database, queue, or cache.
 
 - **The client** does one job.
 
-  Ask a quorum of independent IP-discovery providers what your address is,
-  and check in with the server over an HMAC-signed request whenever it
-  changes (or periodically, to prove it's still alive). It carries no
-  credentials beyond its own device secret and makes no other decisions.
+  Check in with the server over an HMAC-signed request on a schedule, to
+  prove it's still alive. By default it sends no address: the server records
+  the one it sees the check-in coming from. Only when the server cannot see a
+  public address (an old server, a private network path, a proxy it was not
+  told about) does the client fall back to asking a quorum of independent
+  IP-discovery providers. It carries no credentials beyond its own device
+  secret and makes no other decisions. See
+  [Client](docs/deployment.md#client-ip-discovery).
 
 - **The server** is a single process.
 
-  It receives check-ins, writes them to SQLite (the device's current address
-  plus an append-only `ip_history`), and fans out from there. Every other
+  It receives check-ins, takes each device's address from the connection (or,
+  behind a trusted proxy, from `X-Forwarded-For`), writes it to SQLite (the
+  device's current address plus an append-only `ip_history`), and fans out
+  from there. Every other
   feature reads that same store; nothing is cached or duplicated elsewhere.
 
 - **The web UI** is what a human uses.
@@ -264,6 +280,7 @@ feed and feed expiry) and documented on its own. Every key also has a
 | Doc | Default | Covers |
 |---|---|---|
 | [Deployment](docs/deployment.md) | — | Containers, production Docker/Compose/Kubernetes, client credential volumes |
+| [Server-observed IP](docs/deployment.md#server-observed-ip) | **on** | Trusted proxies, the agent port's PROXY protocol, client IP discovery, private paths, threat model |
 | [Admin](docs/admin.md) | — | Cross-user device REST views for administrators |
 | [API Keys](docs/api-keys.md) | — | Account-scoped bearer credentials for programmatic /api/v1 access |
 | [Agent mTLS](docs/deployment.md#agent-mtls-optional) | off | Mutual-TLS listener and per-device client certificates for agents |
