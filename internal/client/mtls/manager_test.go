@@ -972,6 +972,31 @@ func TestNewManager_DefaultsNowAndLog(t *testing.T) {
 	mustCycle(t, m)
 }
 
+// failingTransport is a RoundTripper that fails every request with err.
+type failingTransport struct{ err error }
+
+func (f failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, f.err }
+
+// doErr returns the error http.Client.Do reports when the transport fails with err.
+func doErr(t *testing.T, err error) error {
+	t.Helper()
+	req, rerr := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://agent.invalid/agent/v1/checkin", nil)
+	if rerr != nil {
+		t.Fatalf("NewRequest: %v", rerr)
+	}
+	resp, got := (&http.Client{Transport: failingTransport{err}}).Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if got == nil {
+		t.Fatal("Do succeeded through a failing transport")
+	}
+	return got
+}
+
+// Every agent-port error comes out of http.Client.Do (checkin.Client.do wraps
+// it with %w), and Do wraps every transport failure in *url.Error, so the
+// *url.Error check alone covers each TLS and x509 type.
 func TestIsRoundTripFailure(t *testing.T) {
 	tests := []struct {
 		name string
@@ -980,10 +1005,12 @@ func TestIsRoundTripFailure(t *testing.T) {
 	}{
 		{"url error", &url.Error{Op: "Post", URL: "https://x", Err: errors.New("refused")}, true},
 		{"wrapped url error", fmt.Errorf("checkin: %w", &url.Error{Err: errors.New("eof")}), true},
-		{"verification error", &tls.CertificateVerificationError{Err: errors.New("bad")}, true},
-		{"unknown authority", x509.UnknownAuthorityError{}, true},
-		{"hostname error", x509.HostnameError{}, true},
-		{"invalid cert", x509.CertificateInvalidError{}, true},
+		{"verification error via Do", doErr(t, &tls.CertificateVerificationError{Err: errors.New("bad")}), true},
+		{"unknown authority via Do", doErr(t, x509.UnknownAuthorityError{}), true},
+		{"hostname error via Do", doErr(t, x509.HostnameError{}), true},
+		{"invalid cert via Do", doErr(t, x509.CertificateInvalidError{}), true},
+		{"transport error via Do, wrapped like checkin", fmt.Errorf("checkin: POST /agent/v1/checkin: %w", doErr(t, errors.New("refused"))), true},
+		{"bare x509 error, not from Do", x509.UnknownAuthorityError{}, false},
 		{"unauthorized", checkin.ErrUnauthorized, false},
 		{"server error", checkin.ErrServer, false},
 	}
@@ -991,6 +1018,41 @@ func TestIsRoundTripFailure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isRoundTripFailure(tt.err); got != tt.want {
 				t.Errorf("isRoundTripFailure(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// Real handshake failures against a TLS server: an unpinned CA and a name the
+// certificate does not carry.
+func TestIsRoundTripFailure_RealHandshake(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	tests := []struct {
+		name string
+		cfg  *tls.Config
+	}{
+		{"unknown authority", &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: x509.NewCertPool()}},
+		{"hostname mismatch", &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: "wrong.invalid"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &http.Client{Transport: &http.Transport{TLSClientConfig: tt.cfg}, Timeout: 5 * time.Second}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			resp, err := c.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
+				t.Fatalf("Do err = %v, want a certificate verification failure", err)
+			}
+			if !isRoundTripFailure(err) {
+				t.Errorf("isRoundTripFailure(%v) = false, want true", err)
 			}
 		})
 	}

@@ -2,8 +2,6 @@ package mtls
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -352,16 +350,9 @@ func agentError(err error) error {
 }
 
 // isRoundTripFailure reports a transport or TLS-verification failure: no usable
-// answer came back from the agent port.
+// answer came back from the agent port. Every such error comes out of
+// http.Client.Do, which wraps it in *url.Error.
 func isRoundTripFailure(err error) bool {
-	return hasType[*url.Error](err) ||
-		hasType[*tls.CertificateVerificationError](err) ||
-		hasType[x509.UnknownAuthorityError](err) ||
-		hasType[x509.HostnameError](err) ||
-		hasType[x509.CertificateInvalidError](err)
-}
-
-func hasType[E error](err error) bool {
-	_, ok := errors.AsType[E](err)
+	_, ok := errors.AsType[*url.Error](err)
 	return ok
 }
