@@ -132,6 +132,7 @@ services:
     environment:
       DIYDDNS_DATABASE_PATH: /data/diyddns.db
       DIYDDNS_SERVER_BASE_URL: https://ddns.example.com
+      DIYDDNS_SERVER_TRUSTED_PROXIES: <the proxy network CIDR>   # the docker network Caddy reaches diyddns on
     env_file: .env   # DIYDDNS_AUTH_HMAC_SECRET_KEY, and anything else kept out of git
     volumes:
       - diyddns-data:/data
@@ -170,7 +171,12 @@ DIYDDNS_AUTH_HMAC_SECRET_KEY=<output of: head -c 32 /dev/urandom | base64>
 Caddy obtains and renews the TLS certificate automatically. Swap in Traefik,
 nginx, or whatever reverse proxy you already run — the only requirement is
 that it forwards to `diyddns:8080` over plain HTTP and terminates TLS for
-everything in front of it.
+everything in front of it. Whichever proxy you pick, set
+`DIYDDNS_SERVER_TRUSTED_PROXIES` to the subnet of the docker network it reaches
+diyddns on (`docker network inspect <network>`). Without it the server cannot
+see past the proxy: it records no address from the check-in, logs a `WARN`, and
+clients in `auto` mode fall back to looking their address up. See
+[Server-observed IP](#server-observed-ip).
 
 ### Kubernetes (bjw-s `app-template`)
 
@@ -286,6 +292,235 @@ plain HTTP.
 Every setting has a `DIYDDNS_`-prefixed environment variable; see
 [`config.example.yaml`](../config.example.yaml) for the full annotated set. Optional
 subsystems each have their own doc — see the [README's Documentation section](../README.md#documentation).
+
+## Server-observed IP
+
+By default the server takes a device's public IP from the **origin address of
+its check-in**: the address the connection came from, or, behind a reverse
+proxy you list, the address that proxy saw. The client no longer has to ask
+third-party lookup services; it keeps them as a fallback, used automatically
+only when the server cannot observe a public address (see
+[Client IP discovery](#client-ip-discovery)).
+
+Out of the box this is safe. With `server.trusted_proxies` empty no proxy header
+is ever read, and with `agent.proxy_protocol` false the agent listener is not
+wrapped. A device whose observed address is not public (a proxy's own address, a
+LAN or VPN address, any special-purpose block) records nothing, the check-in
+still succeeds, and its client falls back to lookup.
+
+The server only ever records an address that is **public**: not private, not
+loopback or link-local, not `100.64.0.0/10`, not zoned, and not in any IANA
+special-purpose block or transition prefix (for example `64:ff9b::/96`, `2002::/16`).
+
+### Main port behind a proxy
+
+The main listener speaks plain HTTP behind your TLS terminator, so the peer the
+server sees is the proxy. Tell the server which proxies to believe:
+
+| Key | Env | Default |
+|---|---|---|
+| `server.trusted_proxies` | `DIYDDNS_SERVER_TRUSTED_PROXIES`, comma-separated | `[]` |
+
+Entries are CIDR prefixes or bare IPs (a bare IP is a /32 or /128), trimmed of
+whitespace. An entry that does not parse stops startup. A `/0` prefix (it trusts
+every peer, so any client could forge its address) and a 4-in-6 prefix such as
+`::ffff:10.0.0.0/104` (it never matches; write the IPv4 form) are each logged as
+a `WARN` at startup. Peers on a dual-stack listener that arrive as
+`::ffff:10.0.0.5` match a plain `10.0.0.0/8` entry.
+
+How the server picks the origin address:
+
+1. A peer **not** in `trusted_proxies`: the peer's own address. Any
+   `X-Forwarded-For` it sends is ignored.
+2. A peer in `trusted_proxies`: `X-Forwarded-For` is read from right to left
+   (every header line, comma-split), skipping entries that are themselves
+   trusted. The first untrusted entry that parses is the origin.
+3. A malformed entry (including one carrying a port, such as `1.1.1.1:443`), an
+   empty header or one made only of trusted entries: **no observation**. The
+   trusted proxy's own address is never recorded in its place.
+
+Pick the CIDR of the network the proxy reaches diyddns on: the docker network
+in the Compose examples above, or the **Envoy pods' CIDR** on Kubernetes
+(usually the whole pod CIDR). Caddy and Traefik both set `X-Forwarded-For` by
+default; check yours does.
+
+**Kubernetes with Envoy Gateway.** Set
+`DIYDDNS_SERVER_TRUSTED_PROXIES` to the pod CIDR in the `env:` block of the
+values above. Two things keep `X-Forwarded-For` honest:
+
+- Add a `NetworkPolicy` so only the Envoy pods can reach diyddns on port 8080.
+  Any other pod inside `trusted_proxies` could forge the header.
+- Leave Envoy's defaults alone. Envoy Gateway appends the real client address
+  to `X-Forwarded-For` (`use_remote_address` on). **Never set
+  `ClientTrafficPolicy.spec.clientIPDetection.xForwardedFor.disableXForwardedForAppend`**,
+  and note that **any** `clientIPDetection` block flips `use_remote_address`
+  off, after which Envoy no longer appends the connecting address.
+
+### Agent port
+
+Check-ins on the [agent port](#agent-mtls-optional) arrive over a passthrough
+`TLSRoute`, so Envoy cannot add a header; it passes the origin address in a
+PROXY protocol v2 header instead. Four things have to line up:
+
+1. `agent.proxy_protocol: true` (`DIYDDNS_AGENT_PROXY_PROTOCOL`, default
+   `false`). It is independent of `trusted_proxies` but reads that list.
+2. `server.trusted_proxies` covering the Envoy pods. A peer **inside** the list
+   MUST send the PROXY header: the listener requires it, and a connection
+   without one is dropped, and one that sends nothing is dropped after the PROXY
+   library's 10 s header timeout. A
+   peer **outside** the list has any PROXY header it sends read and discarded,
+   so a device that connects directly cannot claim another address.
+3. A passthrough `TLSRoute` for the agent hostname.
+4. A `BackendTrafficPolicy` asking Envoy to send PROXY v2 to the backend:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: diyddns-agent
+spec:
+  parentRefs:
+    - name: external          # your Gateway's name
+      sectionName: agent-tls  # a TLS listener in Passthrough mode
+  hostnames:
+    - ddns.example.com
+  rules:
+    - backendRefs:
+        - name: diyddns       # the Service exposing the agent port
+          port: 8443
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: diyddns-agent
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: TLSRoute
+      name: diyddns-agent
+  proxyProtocol:
+    version: V2
+```
+
+Without the `BackendTrafficPolicy`, Envoy connects without a header, the server
+requires one, and the connection fails on its first read. It shows up as TLS
+handshake errors from the agent listener, logged at `Info` by the agent
+server's `ErrorLog`. If agent check-ins fail and nothing else explains it, look
+there first.
+
+### Client IP discovery
+
+`run.ip_discovery` (env `DIYDDNS_RUN_IP_DISCOVERY`) on the client; any other
+value refuses to start:
+
+```yaml
+# client config.yaml
+run:
+  ip_discovery: auto   # auto | always | never
+```
+
+| Value | What the client does |
+|---|---|
+| `auto` (default) | Sends each enabled family's check-in with no address, one family at a time (IPv4 first), so the server records what it sees. For a family the server cannot observe (an old server, capabilities not yet fetched, the family's connection could not be made, or the server answered `ip_source: none` for it), the client looks that one family up, reports it, and asks the server again about an hour later. A `WARN` explains the fallback, at most once a day per family. |
+| `always` | The previous behaviour: look every family up (quorum of providers), and send one check-in carrying every address. The server records what is reported. |
+| `never` | Never contact a lookup service. If the server records no address for a family, the client logs a `WARN` (once a day) to set `run.ip_discovery` to `auto` or `always`. |
+
+`run.providers_v4` and `run.providers_v6` still apply: in `auto` only as the
+fallback, in `never` not at all (the client warns at startup if you set them).
+
+The check-in response says where each family's address came from:
+`ip_source: {"ipv4": "reported|observed|none", "ipv6": ...}`. The server also
+advertises `observed_ip: true` in its capabilities; a client that does not see
+it assumes an old server and looks up. A server logs one `INFO` line per
+check-in with `device_id`, `peer`, `observed`, `ipv4_source` and `ipv6_source`.
+
+If a client reports an address (`always`, or an `auto` fallback), the
+reported address wins and the observed one is ignored. A reported address that
+is not public is dropped (never replaced by the observed one), the family's
+`ip_source` is `none`, and the server logs a `WARN` (`check-in reported a
+non-public address; dropped`) at most once an hour per device.
+
+### Private paths
+
+The server records only a public address, so a device that reaches it over a
+path with no public address records nothing there and, in `auto`, looks it up:
+
+- **Split-horizon DNS**: the LAN resolver answers the proxy's LAN address, so the
+  device connects from a private address.
+- **Hairpin NAT**: the device reaches its own public address from inside the
+  network and arrives from the router's internal address.
+- **VPN and Tailscale**: the server sees the VPN or tailnet address (`100.64.0.0/10`
+  for Tailscale), which is not public.
+- **`HTTPS_PROXY` / `HTTP_PROXY`**: the client honours them, so its connection
+  goes to the proxy and the server observes the **proxy's** address. A proxy on a
+  private address records nothing and `auto` looks up; a proxy on a public
+  address is recorded as the device (see the threat model below).
+- **NAT64**: a device on an IPv6-only network reaches an IPv4-only server
+  through a translator, so the server sees the translator's address, not the
+  device's. The `64:ff9b::/96` prefix itself is never recorded. If the
+  translator's address is public the server records it, so such a device
+  should use `always`.
+
+In each case the server logs `check-in had no public origin address` (a `WARN`,
+at most once an hour per device) with `device_id`, `peer`, `observed` and a
+`hint`: `server.trusted_proxies` may not cover your proxy, or the device
+reaches the server over a private path (LAN/VPN). Under `never` nothing is
+recorded for that family until the path changes or you switch to `auto`.
+
+### IPv6
+
+The server can only observe an IPv6 address when the device reaches it over
+IPv6: the server (or its proxy) must be reachable on IPv6 and the hostname must
+have an `AAAA` record. A dual-stack device checks in once per family. When the
+server is reachable over IPv4 only, the IPv6 connection cannot be made, so the
+client skips it and looks its IPv6 address up (in `auto`; `always` always looks
+up) and the device still records both families.
+
+### Threat model
+
+Integrity moves. A reported address is covered by the check-in's HMAC
+signature; an observed one rests on an **unsigned header** (`X-Forwarded-For`, or the PROXY v2
+header) on the hop between your proxy and diyddns. That is why
+`trusted_proxies` must list only the proxy, and why a NetworkPolicy (or an
+equivalent firewall rule) should stop anything else from reaching diyddns. It is
+an acceptable move: a device that holds its secret could always report any
+address it liked.
+
+A device behind a public-addressed forward proxy is recorded as that proxy.
+That is inherent to observing a connection.
+
+### Scope
+
+- **What `trusted_proxies` covers:** the check-in IP and the IP in audit
+  entries (login, logout and the rest of the entries that used to record
+  the connection's address). For audit only, when no origin can be determined the
+  entry records the connection's own address.
+- **Unchanged:** `X-Forwarded-Proto` is still not trusted, so behind a
+  TLS-terminating proxy keep `auth.session.cookie_secure` on (the default). The RFC 7239 `Forwarded`
+  header is not read; Envoy, Caddy and Traefik emit `X-Forwarded-For`.
+- **Not stored:** the IP source is returned in the response and logged, not
+  kept in the database. No schema changed.
+- **Querying `sessions.ip` and `audit_log.ip`:** these columns now mix two
+  forms. Behind a trusted proxy the value is a **bare IP** (`203.0.113.9`);
+  otherwise it is the connection's `RemoteAddr`, a **`host:port`**
+  (`203.0.113.9:51234`, `[2001:db8::1]:51234`). If you query by IP, match both,
+  for example `ip = '203.0.113.9' OR ip LIKE '203.0.113.9:%'`.
+
+### Upgrading
+
+- `auto` is the new default in place of always-lookup. Old clients are
+  unaffected: they keep reporting an address, which the server records as
+  before (subject to the public-address check below).
+- A new client against an old server notices that `observed_ip` is missing and
+  falls back to lookup on its own.
+- A new client behind a proxy that is not in `trusted_proxies` falls back to
+  lookup, and the server logs the `WARN` above naming the fix.
+- A dual-stack device now sends up to **two** check-ins per cycle, one per
+  family. When both families change in the same cycle that can produce two
+  `ip_history` rows and two change notifications.
+- A client that reports a private or special-purpose address stops updating
+  that family: the server now applies the same public-address check to reported
+  addresses and drops the others.
 
 ## Agent mTLS (optional)
 
