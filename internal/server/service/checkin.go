@@ -70,7 +70,8 @@ type CheckinService struct {
 	now    func() time.Time
 
 	// One limiter per WARN kind, so a device's no-origin WARN does not
-	// suppress its dropped-family WARN.
+	// suppress its dropped-family WARN. droppedWarn is keyed per device and
+	// family, so dropping v4 does not hide the v6 drop.
 	noOriginWarn, droppedWarn warnLimiter
 }
 
@@ -198,7 +199,7 @@ func (s *CheckinService) reported(deviceID, family, raw string, inFamily func(ne
 	}
 	a, err := netip.ParseAddr(raw)
 	if err != nil || !inFamily(a) || !ipclass.Public(a) {
-		if s.droppedWarn.allow(deviceID, s.now()) {
+		if s.droppedWarn.allow(deviceID+"/"+family, s.now()) {
 			s.log.Warn("check-in reported a non-public address; dropped",
 				"device_id", deviceID, "family", family, "reported", raw)
 		}
