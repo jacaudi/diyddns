@@ -58,6 +58,9 @@ func newTimedConnector(dsn string, log *slog.Logger, threshold time.Duration) dr
 
 // innerConn is every interface modernc's conn implements that database/sql
 // consults. Requiring all of them keeps the wrapper behavior-neutral.
+// PrepareContext is forwarded untimed: database/sql prepares only for an
+// explicit Prepare, which nothing in this module or goose calls, or when
+// ExecContext/QueryContext return driver.ErrSkip, which modernc never does.
 type innerConn interface {
 	driver.Conn
 	driver.ConnBeginTx
@@ -140,11 +143,6 @@ func (t *timedConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.
 	return &timedTx{Tx: tx, c: t.c, ctx: ctx}, nil
 }
 
-// Begin routes the legacy entry point through the timed BeginTx.
-func (t *timedConn) Begin() (driver.Tx, error) {
-	return t.BeginTx(context.Background(), driver.TxOptions{})
-}
-
 // timedTx times Commit and Rollback: modernc runs them directly rather than
 // through ExecContext, and a commit can carry a WAL checkpoint's fsync.
 type timedTx struct {
@@ -161,51 +159,6 @@ func (t *timedTx) Commit() error {
 func (t *timedTx) Rollback() error {
 	defer t.c.report(t.ctx, "ROLLBACK", time.Now())
 	return t.Tx.Rollback()
-}
-
-func (t *timedConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
-	s, err := t.innerConn.PrepareContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	is, ok := s.(innerStmt)
-	if !ok {
-		_ = s.Close()
-		return nil, fmt.Errorf("store: sqlite stmt %T lacks an interface the timing wrapper forwards", s)
-	}
-	return &timedStmt{innerStmt: is, c: t.c, query: query}, nil
-}
-
-// Prepare routes the legacy entry point through the timed PrepareContext.
-func (t *timedConn) Prepare(query string) (driver.Stmt, error) {
-	return t.PrepareContext(context.Background(), query)
-}
-
-type innerStmt interface {
-	driver.Stmt
-	driver.StmtExecContext
-	driver.StmtQueryContext
-}
-
-type timedStmt struct {
-	innerStmt
-	c     *timedConnector
-	query string
-}
-
-func (s *timedStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	defer s.c.report(ctx, s.query, time.Now())
-	return s.innerStmt.ExecContext(ctx, args)
-}
-
-func (s *timedStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	start := time.Now()
-	rows, err := s.innerStmt.QueryContext(ctx, args)
-	if err != nil {
-		s.c.report(ctx, s.query, start)
-		return nil, err
-	}
-	return &timedRows{Rows: rows, done: func() { s.c.report(ctx, s.query, start) }}, nil
 }
 
 // timedRows stops the timer at Close: modernc returns from QueryContext after
