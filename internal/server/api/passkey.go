@@ -312,7 +312,7 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/auth/passkey/login/begin",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies)},
 	}, func(ctx context.Context, _ *struct{}) (*passkeyOptionsOutput, error) {
 		meta := loginMetaFrom(ctx)
 		opts, sealed, err := deps.Passkey.BeginLogin(ctx)
@@ -326,7 +326,7 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/auth/passkey/login/finish",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware(), webauthnMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies), webauthnMetaMiddleware()},
 	}, func(ctx context.Context, in *webauthnFinishInput) (*loginFinishOutput, error) {
 		lmeta := loginMetaFrom(ctx)
 		wmeta := webauthnMetaFrom(ctx, in.RawBody)
@@ -344,7 +344,7 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/account/passkeys/register/begin",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{sessionMW(a, deps), loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{sessionMW(a, deps), loginMetaMiddleware(deps.TrustedProxies)},
 	}, func(ctx context.Context, _ *struct{}) (*passkeyOptionsOutput, error) {
 		u := UserFrom(ctx)
 		meta := loginMetaFrom(ctx)
@@ -432,7 +432,7 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/auth/recovery/request",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies)},
 	}, func(ctx context.Context, in *struct {
 		Body struct {
 			Email string `json:"email"`
@@ -451,14 +451,14 @@ func registerPasskeyOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodPost,
 		Path:          "/api/v1/register/begin",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies)},
 	}, registerBeginHandler(deps))
 
 	huma.Register(a, huma.Operation{
 		Method:        http.MethodPost,
 		Path:          "/api/v1/register/finish",
 		DefaultStatus: http.StatusOK,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware(), webauthnMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies), webauthnMetaMiddleware()},
 	}, registerFinishHandler(deps))
 }
 

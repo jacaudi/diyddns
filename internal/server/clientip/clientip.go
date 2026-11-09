@@ -24,8 +24,9 @@ func Trusted(a netip.Addr, list []netip.Prefix) bool {
 	return slices.ContainsFunc(list, func(p netip.Prefix) bool { return p.Contains(a) })
 }
 
-// peer parses r.RemoteAddr and unmaps it.
-func peer(r *http.Request) (netip.Addr, bool) {
+// Peer parses r.RemoteAddr and unmaps it; ok is false when RemoteAddr is not a
+// host:port address.
+func Peer(r *http.Request) (netip.Addr, bool) {
 	ap, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return netip.Addr{}, false
@@ -37,7 +38,7 @@ func peer(r *http.Request) (netip.Addr, bool) {
 // trusted peer is a proxy, not an origin, and an unparseable RemoteAddr names
 // nothing; both yield no observation.
 func ObservedFromPeer(r *http.Request, trusted []netip.Prefix) (netip.Addr, bool) {
-	a, ok := peer(r)
+	a, ok := Peer(r)
 	if !ok || Trusted(a, trusted) {
 		return netip.Addr{}, false
 	}
@@ -51,7 +52,7 @@ func ObservedFromPeer(r *http.Request, trusted []netip.Prefix) (netip.Addr, bool
 // an empty header, or a header of only trusted entries yields no observation;
 // a trusted address is never returned.
 func ObservedFromXFF(r *http.Request, trusted []netip.Prefix) (netip.Addr, bool) {
-	p, ok := peer(r)
+	p, ok := Peer(r)
 	if !ok {
 		return netip.Addr{}, false
 	}
@@ -80,7 +81,7 @@ func ObservedFromXFF(r *http.Request, trusted []netip.Prefix) (netip.Addr, bool)
 // the peer is a trusted proxy and X-Forwarded-For names an origin, then that
 // origin.
 func AuditIP(r *http.Request, trusted []netip.Prefix) string {
-	if p, ok := peer(r); ok && Trusted(p, trusted) {
+	if p, ok := Peer(r); ok && Trusted(p, trusted) {
 		if a, ok := ObservedFromXFF(r, trusted); ok {
 			return a.String()
 		}

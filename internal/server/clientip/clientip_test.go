@@ -190,3 +190,31 @@ func TestProxyPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestPeer(t *testing.T) {
+	tests := []struct {
+		name   string
+		remote string
+		want   string // empty means no peer
+	}{
+		{"v4", "8.8.8.8:1", "8.8.8.8"},
+		{"v6", "[2001:db8::1]:1", "2001:db8::1"},
+		{"4-in-6 is unmapped", "[::ffff:10.0.0.5]:1", "10.0.0.5"},
+		{"no port", "8.8.8.8", ""},
+		{"unparseable", "bogus", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := clientip.Peer(request(t, tt.remote))
+			if tt.want == "" {
+				if ok || got.IsValid() {
+					t.Errorf("Peer = (%s, %v), want no peer", got, ok)
+				}
+				return
+			}
+			if !ok || got != netip.MustParseAddr(tt.want) {
+				t.Errorf("Peer = (%s, %v), want (%s, true)", got, ok, tt.want)
+			}
+		})
+	}
+}

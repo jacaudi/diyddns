@@ -82,7 +82,7 @@ func registerOIDCOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodGet,
 		Path:          "/api/v1/auth/oidc/start",
 		DefaultStatus: http.StatusFound,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies)},
 	}, func(ctx context.Context, in *struct {
 		Next string `query:"next"`
 	}) (*oidcRedirectOutput, error) {
@@ -116,7 +116,7 @@ func registerOIDCOps(a huma.API, deps ServerDeps) {
 		Method:        http.MethodGet,
 		Path:          "/api/v1/auth/oidc/callback",
 		DefaultStatus: http.StatusFound,
-		Middlewares:   huma.Middlewares{loginMetaMiddleware(), oidcFlowMiddleware()},
+		Middlewares:   huma.Middlewares{loginMetaMiddleware(deps.TrustedProxies), oidcFlowMiddleware()},
 	}, func(ctx context.Context, in *struct {
 		Code  string `query:"code"`
 		State string `query:"state"`

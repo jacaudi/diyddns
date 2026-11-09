@@ -5,7 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"testing"
+
+	"github.com/jacaudi/diyddns/internal/server/api"
+	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/store"
 )
 
 // authTestCookieName mirrors the default cookie name from config's
@@ -108,4 +114,76 @@ func TestLogout_ClearsSessionSoSubsequentMeReturns401(t *testing.T) {
 	if meStatus != http.StatusUnauthorized {
 		t.Fatalf("me after logout status = %d, want 401, body=%s", meStatus, meBody)
 	}
+}
+
+// addHeaderRT adds one request header to every request it carries.
+type addHeaderRT struct{ key, value string }
+
+func (a addHeaderRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(a.key, a.value)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// newAuditedHarness serves the full API with trusted as server.trusted_proxies
+// and a passkey service whose audit sink persists to the store (the default
+// test harness discards audit entries).
+func newAuditedHarness(t *testing.T, trusted []netip.Prefix) fullHarness {
+	t.Helper()
+	st, deps := buildServerDeps(t)
+	deps.TrustedProxies = trusted
+	wa := deps.Cfg.WebAuthn
+	passkey, err := service.NewPasskeyService(st, deps.Sessions, deps.HMACKey, wa, wa.RPID, wa.RPOrigin, service.NewAuditWriter(st), deps.Log)
+	if err != nil {
+		t.Fatalf("NewPasskeyService: %v", err)
+	}
+	deps.Passkey = passkey
+
+	mux := http.NewServeMux()
+	api.Build(mux, deps)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return fullHarness{srv: srv, st: st}
+}
+
+// loginAuditIP registers a passkey, then logs in with it through a client that
+// sends X-Forwarded-For: 1.1.1.1, and returns the ip on the login's audit row.
+func loginAuditIP(t *testing.T, trusted []netip.Prefix) string {
+	t.Helper()
+	h := newAuditedHarness(t, trusted)
+	seedUser(t, h.st, "audit@example.com", "user")
+
+	reg := jarClient(t)
+	csrf := jarSeedSession(t, reg, h, "audit@example.com")
+	authr, cred, _ := registerPasskeyHTTP(t, reg, h, csrf, "Laptop")
+
+	login := jarClient(t)
+	login.Transport = addHeaderRT{key: "X-Forwarded-For", value: "1.1.1.1"}
+	if status, _, body := loginPasskeyHTTP(t, login, h, authr, cred); status != http.StatusOK {
+		t.Fatalf("login finish: status = %d, body=%s", status, body)
+	}
+
+	page, err := h.st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "user.login.passkey"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("user.login.passkey audit rows = %d, want 1", len(page.Rows))
+	}
+	return page.Rows[0].IP
+}
+
+func TestLoginAuditIPUsesResolver(t *testing.T) {
+	t.Run("trusted proxy records the XFF origin", func(t *testing.T) {
+		if got := loginAuditIP(t, loopback); got != "1.1.1.1" {
+			t.Errorf("audit ip = %q, want 1.1.1.1", got)
+		}
+	})
+	t.Run("no trusted proxies records RemoteAddr verbatim", func(t *testing.T) {
+		got := loginAuditIP(t, nil)
+		ap, err := netip.ParseAddrPort(got)
+		if err != nil || ap.Addr() != netip.MustParseAddr("127.0.0.1") {
+			t.Errorf("audit ip = %q, want the loopback RemoteAddr (host:port) unchanged", got)
+		}
+	})
 }

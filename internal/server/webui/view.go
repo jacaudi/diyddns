@@ -159,9 +159,9 @@ func absTime(unix int64) string {
 // baseURL resolves the public base URL to embed in copy-paste artifacts: the
 // enroll command, the credentials.json snippet, and grant links.
 //
-// X-Forwarded-Proto is deliberately NOT consulted. This project has no
-// trusted-proxy configuration, so honouring it would let any client dictate the
-// scheme in a value the user is told to paste into a config file. When
+// X-Forwarded-Proto is deliberately NOT consulted. server.trusted_proxies does
+// not extend to X-Forwarded-Proto, so honouring it would let any client dictate
+// the scheme in a value the user is told to paste into a config file. When
 // server.base_url is unset and the server sits behind a TLS-terminating proxy
 // the result may say http://; every page that renders it also tells the operator
 // to set server.base_url.
