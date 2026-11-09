@@ -433,8 +433,8 @@ func TestPinnedDialerTimeout(t *testing.T) {
 	if PinnedDialTimeout != 5*time.Second {
 		t.Errorf("PinnedDialTimeout = %v, want 5s", PinnedDialTimeout)
 	}
-	if got := newPinnedDialer("tcp6").Timeout; got != PinnedDialTimeout {
-		t.Errorf("newPinnedDialer(tcp6).Timeout = %v, want %v", got, PinnedDialTimeout)
+	if got := newPinnedDialer().Timeout; got != PinnedDialTimeout {
+		t.Errorf("newPinnedDialer().Timeout = %v, want %v", got, PinnedDialTimeout)
 	}
 }
 

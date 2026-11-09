@@ -125,7 +125,7 @@ func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, erro
 	switch opts.Network {
 	case "":
 	case "tcp4", "tcp6":
-		dialer := newPinnedDialer(opts.Network)
+		dialer := newPinnedDialer()
 		// net/http asks for "tcp"; dial the pinned family instead.
 		transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, opts.Network, addr)
@@ -292,10 +292,10 @@ func randNonce() (string, error) {
 // host has no route for fails the dial here instead of hanging the cycle.
 const PinnedDialTimeout = 5 * time.Second
 
-// newPinnedDialer returns the dialer for a client pinned to network ("tcp4" or
-// "tcp6"). The family itself is chosen by the DialContext that calls it, which
-// dials network in place of the "tcp" net/http asks for.
-func newPinnedDialer(network string) *net.Dialer { //nolint:unparam // network is the spec'd seam signature; both families share one bound today, a per-family bound would branch on it
+// newPinnedDialer returns the dialer every family-pinned client connects with:
+// it only bounds the connect by PinnedDialTimeout. It does not pin a family;
+// NewClient's DialContext does that by dialing opts.Network.
+func newPinnedDialer() *net.Dialer {
 	return &net.Dialer{Timeout: PinnedDialTimeout}
 }
 
