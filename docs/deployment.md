@@ -327,6 +327,12 @@ The server refuses to start when `database.path` is in-memory, when
 the key files disagree. The CA state lives in `agent.tls.dir` (the `/data`
 volume in the image), so keep it on the persistent volume.
 
+The serving certificate is valid for as long as the active CA, so nothing
+renews it while the server runs. The server checks it only at startup and
+re-issues it there when it is missing or unreadable, when the `public_url`
+host has changed, or when the active CA has changed (`ca promote-backup`,
+`ca reset`).
+
 On first start the server generates two CAs (an active one and a backup) and
 logs a `WARN` that names `ca-backup.key`; see
 [Agent CA backups](#agent-ca-backups) for what to do with it.

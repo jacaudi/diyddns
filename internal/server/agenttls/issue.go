@@ -19,10 +19,9 @@ const (
 	// DeviceURIPrefix starts the single URI SAN of every device certificate;
 	// the device ID follows it.
 	DeviceURIPrefix = "urn:diyddns:device:"
-	// LeafLifetimeYears is the validity of device and serving certificates.
+	// LeafLifetimeYears is the validity of device certificates. The serving
+	// certificate instead expires with the active CA.
 	LeafLifetimeYears = 1
-	// RenewBefore is how little validity may remain before a leaf is renewed.
-	RenewBefore = 60 * 24 * time.Hour
 )
 
 // ErrBadCSR means the certificate request could not be used: it is not a PEM

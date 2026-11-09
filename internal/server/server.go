@@ -124,8 +124,7 @@ type Server struct {
 	notifier    *notify.Worker // nil when notifications are disabled
 	hub         *feed.Hub      // always non-nil; closes live streams on shutdown
 	retention   config.RetentionSection
-	sweeper     *sweeper       // nil unless the #127 policy is on (buildSweeper's gate); nil-guarded by runPruner
-	pruner      sync.WaitGroup // the pruner goroutine; shutdown waits on it before dropping the agent.tls.dir lock
+	sweeper     *sweeper // nil unless the #127 policy is on (buildSweeper's gate); nil-guarded by runPruner
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -586,9 +585,7 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 // than serving none, so one failure takes the whole process down.
 func (s *Server) Run(ctx context.Context) error {
 	// Cancelled on return, so the background workers below stop with the
-	// listeners. Only the pruner is waited on (in shutdown): it is the one
-	// worker that writes into agent.tls.dir, so it must be done before Run
-	// releases that lock.
+	// listeners.
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 
@@ -597,15 +594,13 @@ func (s *Server) Run(ctx context.Context) error {
 		s.log.LogAttrs(ctx, slog.LevelInfo, "server listening", slog.String("addr", s.httpServer.Addr))
 		reportListen(errCh, s.httpServer.ListenAndServe())
 	}()
-	var serving *agenttls.ServingCert
 	if s.agentServer != nil {
-		serving = s.agent.serving
 		go func() {
 			s.log.LogAttrs(ctx, slog.LevelInfo, "agent listener", slog.String("addr", s.agentServer.Addr))
 			reportListen(errCh, s.agentServer.ListenAndServeTLS("", ""))
 		}()
 	}
-	s.pruner.Go(func() { runPruner(ctx, s.st, s.retention, s.sweeper, serving, s.log) })
+	go runPruner(ctx, s.st, s.retention, s.sweeper, s.log)
 	go s.oidcMgr.RetryLoop(ctx)
 	if s.notifier != nil {
 		go s.notifier.Run(ctx)
@@ -635,11 +630,8 @@ func reportListen(errCh chan<- error, err error) {
 }
 
 // shutdown drains the main listener, the agent listener and the stream hub
-// concurrently under one shutdownTimeout, waits for all of them and for the
-// pruner (which Run has already told to stop by cancelling its context), and
-// only then releases the agent.tls.dir lock, so neither a listener nor a pruner
-// tick that is mid-refresh can still be using the directory when another
-// process takes it.
+// concurrently under one shutdownTimeout, waits for all of them, and only then
+// releases the agent.tls.dir lock.
 //
 // http.Server.Shutdown ignores hijacked connections, so the hub's shutdown is
 // the only thing that closes live streams. An error from any of the three is
@@ -657,7 +649,6 @@ func (s *Server) shutdown(ctx context.Context) error {
 		wg.Go(func() { agentErr = s.agentServer.Shutdown(shutdownCtx) })
 	}
 	wg.Wait()
-	s.pruner.Wait()
 	s.agent.release()
 
 	if hubErr != nil {

@@ -74,7 +74,7 @@ func resolvePath(p string) (string, error) {
 type agentStack struct {
 	lock    *agenttls.Lock
 	ca      *agenttls.CA
-	serving *agenttls.ServingCert
+	serving tls.Certificate
 }
 
 // setupAgent takes the agent.tls.dir lock, loads or creates the CA and loads or
@@ -101,7 +101,7 @@ func setupAgent(ctx context.Context, cfg config.Server, st *store.Store, log *sl
 		a.release()
 		return nil, fmt.Errorf("server: %w", err)
 	}
-	if a.serving, err = agenttls.NewServingCert(dir, cfg.Agent.PublicHost(), a.ca, now, log); err != nil {
+	if a.serving, err = agenttls.LoadOrIssueServingCert(dir, cfg.Agent.PublicHost(), a.ca, now, log); err != nil {
 		a.release()
 		return nil, fmt.Errorf("server: %w", err)
 	}
@@ -113,18 +113,6 @@ func setupAgent(ctx context.Context, cfg config.Server, st *store.Store, log *sl
 func (a *agentStack) release() {
 	if a != nil {
 		_ = a.lock.Release()
-	}
-}
-
-// refreshServing re-issues the agent serving certificate when it is inside its
-// renewal window. It is the only caller of ServingCert.Refresh after startup,
-// run from the pruner tick. A nil serving (listener disabled) is a no-op.
-func refreshServing(ctx context.Context, serving *agenttls.ServingCert, now time.Time, log *slog.Logger) {
-	if serving == nil {
-		return
-	}
-	if _, err := serving.Refresh(now); err != nil {
-		log.LogAttrs(ctx, slog.LevelWarn, "agent serving certificate refresh failed", slog.Any("error", err))
 	}
 }
 
@@ -148,9 +136,9 @@ func buildAgentServer(cfg config.Server, h http.Handler, stack *agentStack, log 
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelInfo),
 		TLSConfig: &tls.Config{
-			MinVersion:     tls.VersionTLS13,
-			ClientAuth:     tls.RequireAnyClientCert,
-			GetCertificate: stack.serving.GetCertificate,
+			MinVersion:   tls.VersionTLS13,
+			ClientAuth:   tls.RequireAnyClientCert,
+			Certificates: []tls.Certificate{stack.serving},
 		},
 	}
 }

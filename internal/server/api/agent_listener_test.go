@@ -52,18 +52,18 @@ func newAgentListener(t *testing.T) agentListener {
 	mainSrv := httptest.NewServer(mainMux)
 	t.Cleanup(mainSrv.Close)
 
-	serving, err := agenttls.NewServingCert(t.TempDir(), "localhost", ca, time.Now(), deps.Log)
+	serving, err := agenttls.LoadOrIssueServingCert(t.TempDir(), "localhost", ca, time.Now(), deps.Log)
 	if err != nil {
-		t.Fatalf("NewServingCert: %v", err)
+		t.Fatalf("LoadOrIssueServingCert: %v", err)
 	}
 	agentMux := http.NewServeMux()
 	api.BuildAgent(agentMux, deps)
 	srv := httptest.NewUnstartedServer(api.ClientCertMiddleware(ca, st.Devices(), deps.Log)(agentMux))
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // handshake rejections are expected
 	srv.TLS = &tls.Config{
-		MinVersion:     tls.VersionTLS13,
-		ClientAuth:     tls.RequireAnyClientCert,
-		GetCertificate: serving.GetCertificate,
+		MinVersion:   tls.VersionTLS13,
+		ClientAuth:   tls.RequireAnyClientCert,
+		Certificates: []tls.Certificate{serving},
 	}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
