@@ -24,6 +24,9 @@ type Capabilities struct {
 	ServerVersion     string `json:"server_version"`
 	OIDCEnabled       bool   `json:"oidc_enabled"`
 	OIDCDeviceEnabled bool   `json:"oidc_device_enabled"`
+	// ObservedIP is true when the server answers check-ins with ip_source and can
+	// record the address it observed; an older server omits it.
+	ObservedIP bool `json:"observed_ip"`
 	// AgentMTLS is non-nil only when the server runs the mTLS agent listener.
 	AgentMTLS *AgentMTLS `json:"agent_mtls,omitempty"`
 }

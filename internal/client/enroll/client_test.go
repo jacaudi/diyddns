@@ -235,3 +235,28 @@ func TestCapabilities_AgentMTLS(t *testing.T) {
 		})
 	}
 }
+
+func TestCapabilitiesObservedIP(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"advertised", `{"server_version":"v","observed_ip":true}`, true},
+		{"absent (old server)", `{"server_version":"v"}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			})
+			caps, err := c.Capabilities(t.Context())
+			if err != nil {
+				t.Fatalf("Capabilities: %v", err)
+			}
+			if caps.ObservedIP != tt.want {
+				t.Errorf("ObservedIP = %v, want %v", caps.ObservedIP, tt.want)
+			}
+		})
+	}
+}

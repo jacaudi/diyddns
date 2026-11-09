@@ -75,3 +75,27 @@ func TestDiscoverer_DisabledFamilySkipped(t *testing.T) {
 		t.Errorf("disabled families should both be !OK, got v4=%v v6=%v", v4.OK, v6.OK)
 	}
 }
+
+func TestDiscoverFamily(t *testing.T) {
+	one := mustAddr("1.1.1.1")
+	d, err := NewDiscoverer(
+		[]Provider{fakeProvider{addr: one}, fakeProvider{addr: one}}, nil, 2, time.Second)
+	if err != nil {
+		t.Fatalf("NewDiscoverer: %v", err)
+	}
+	tests := []struct {
+		name string
+		f    Family
+		want Result
+	}{
+		{"v4 reaches quorum", FamilyV4, Result{Addr: one, OK: true}},
+		{"v6 disabled", FamilyV6, Result{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := d.DiscoverFamily(t.Context(), tt.f); got != tt.want {
+				t.Errorf("DiscoverFamily(%v) = %+v, want %+v", tt.f, got, tt.want)
+			}
+		})
+	}
+}
