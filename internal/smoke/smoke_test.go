@@ -208,8 +208,15 @@ func fetchCSRF(t *testing.T, c *http.Client, baseURL string) string {
 
 func mintCode(t *testing.T, c *http.Client, baseURL, csrf string) string {
 	t.Helper()
+	return mintLabeledCode(t, c, baseURL, csrf, deviceLabel)
+}
+
+// mintLabeledCode is mintCode for a test that enrolls several devices: labels
+// are unique per owner, so a second device under deviceLabel is a 409.
+func mintLabeledCode(t *testing.T, c *http.Client, baseURL, csrf, label string) string {
+	t.Helper()
 	// The field is "label", not "name" — "name" returns 422.
-	status, body := postJSON(t, c, baseURL+"/api/v1/devices", map[string]string{"label": deviceLabel}, csrf)
+	status, body := postJSON(t, c, baseURL+"/api/v1/devices", map[string]string{"label": label}, csrf)
 	if status != http.StatusOK {
 		t.Fatalf("POST /devices: status = %d, body = %s", status, body)
 	}
