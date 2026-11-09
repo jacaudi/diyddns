@@ -23,10 +23,7 @@ func observeMW(resolve func(*http.Request, []netip.Prefix) (netip.Addr, bool), t
 	return func(ctx huma.Context, next func(huma.Context)) {
 		r, _ := humago.Unwrap(ctx)
 		addr, ok := resolve(r, trusted)
-		var peer netip.Addr
-		if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
-			peer = ap.Addr().Unmap()
-		}
+		peer, _ := clientip.Peer(r)
 		next(huma.WithContext(ctx, clientip.WithObservation(ctx.Context(), clientip.Observation{Peer: peer, Addr: addr, OK: ok})))
 	}
 }

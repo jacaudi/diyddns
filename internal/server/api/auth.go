@@ -4,11 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/netip"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/clientip"
 )
 
 // loginMetaKey is the unexported context key type login's pre-handler
@@ -27,16 +29,18 @@ type loginRequestMeta struct {
 	tls bool
 }
 
-// loginMetaMiddleware captures the caller's remote address, user agent, and
+// loginMetaMiddleware captures the caller's audit IP, user agent, and
 // TLS-active bit and forwards them via context so login's handler can pass
-// ip/ua to AuthService.Login and compute the cookie's Secure attribute. It
-// never rejects a request — login carries no session/CSRF guard (it is
+// ip/ua to AuthService.Login and compute the cookie's Secure attribute. The
+// IP is clientip.AuditIP: r.RemoteAddr verbatim unless the peer is in trusted
+// (server.trusted_proxies) and X-Forwarded-For names an origin. It never
+// rejects a request — login carries no session/CSRF guard (it is
 // pre-session, per design §5.2), this only relays request metadata.
-func loginMetaMiddleware() func(huma.Context, func(huma.Context)) {
+func loginMetaMiddleware(trusted []netip.Prefix) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		r, _ := humago.Unwrap(ctx)
 		next(huma.WithValue(ctx, loginMetaKey{}, loginRequestMeta{
-			ip:  r.RemoteAddr,
+			ip:  clientip.AuditIP(r, trusted),
 			ua:  r.UserAgent(),
 			tls: r.TLS != nil,
 		}))
@@ -54,9 +58,9 @@ func loginMetaFrom(ctx context.Context) loginRequestMeta {
 // the session id ("" to clear it); maxAge follows net/http.Cookie semantics
 // (0 = browser-session cookie, deleted on close; <0 = delete immediately).
 // Secure is forced whenever the connection is over TLS or the operator has
-// set cookie_secure. The X-Forwarded-Proto + trusted-proxy refinement from
-// design §5.2 is deferred to a later plan — no server.trusted_proxies
-// config key exists yet.
+// set cookie_secure. server.trusted_proxies covers the check-in IP and the
+// audit IP only; X-Forwarded-Proto is deliberately not trusted; behind a
+// TLS-terminating proxy, set cookie_secure.
 func sessionCookie(cfg config.SessionCfg, value string, maxAge int, tlsActive bool) http.Cookie {
 	return http.Cookie{ //nolint:gosec // G124: Secure is computed at runtime (tlsActive || cfg.CookieSecure) per design §5.2, not a literal gosec's SSA constant-check can verify; HttpOnly and SameSite=Lax are always set below.
 		Name:     cfg.CookieName,
