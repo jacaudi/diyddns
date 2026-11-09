@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -43,18 +44,30 @@ var (
 // the server preserves the stored value (merge-on-empty).
 type Report struct{ IPv4, IPv6, Hostname, OS, ClientVersion string }
 
+// IPSource says, per family the check-in carried, where the recorded address
+// came from: "reported", "observed" or "none". A family the check-in did not
+// carry is empty, as is both on a server that predates ip_source.
+type IPSource struct {
+	IPv4 string `json:"ipv4,omitempty"`
+	IPv6 string `json:"ipv6,omitempty"`
+}
+
 // Result mirrors the server's check-in response.
 type Result struct {
 	DeviceID    string
 	CurrentIPv4 string
 	CurrentIPv6 string
 	Stored      bool
+	IPSource    IPSource
 }
 
 // Options configures the client. CACertPath trusts a self-signed homelab CA.
 // TLSConfig, when non-nil, is used verbatim (it carries the pinned roots, the
 // client certificate and MinVersion) and CACertPath is ignored.
 type Options struct {
+	// Network pins every dial to one family: "tcp4" or "tcp6". Empty leaves the
+	// transport unpinned.
+	Network    string
 	CACertPath string
 	TLSConfig  *tls.Config
 	Timeout    time.Duration
@@ -72,10 +85,11 @@ type checkinRequest struct {
 }
 
 type checkinResponse struct {
-	DeviceID    string `json:"device_id"`
-	CurrentIPv4 string `json:"current_ipv4"`
-	CurrentIPv6 string `json:"current_ipv6"`
-	Stored      bool   `json:"stored"`
+	DeviceID    string   `json:"device_id"`
+	CurrentIPv4 string   `json:"current_ipv4"`
+	CurrentIPv6 string   `json:"current_ipv6"`
+	Stored      bool     `json:"stored"`
+	IPSource    IPSource `json:"ip_source"`
 }
 
 // Client signs and sends check-ins for one device.
@@ -102,9 +116,22 @@ func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, erro
 	var transport *http.Transport
 	if opts.TLSConfig != nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
-		transport.TLSClientConfig = opts.TLSConfig
+		// A copy per transport: net/http mutates its TLS config when it enables h2,
+		// so one config must never back the transports of several families.
+		transport.TLSClientConfig = opts.TLSConfig.Clone()
 	} else if transport, err = agenthttp.NewTransport(opts.CACertPath); err != nil {
 		return nil, fmt.Errorf("checkin: %w", err)
+	}
+	switch opts.Network {
+	case "":
+	case "tcp4", "tcp6":
+		dialer := newPinnedDialer(opts.Network)
+		// net/http asks for "tcp"; dial the pinned family instead.
+		transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, opts.Network, addr)
+		}
+	default:
+		return nil, fmt.Errorf("checkin: network must be \"\", \"tcp4\" or \"tcp6\", got %q", opts.Network)
 	}
 	timeout := opts.Timeout
 	if timeout == 0 {
@@ -259,4 +286,23 @@ func randNonce() (string, error) {
 		return "", fmt.Errorf("checkin: nonce: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+// PinnedDialTimeout bounds the connect of a family-pinned client. A family the
+// host has no route for fails the dial here instead of hanging the cycle.
+const PinnedDialTimeout = 5 * time.Second
+
+// newPinnedDialer returns the dialer for a client pinned to network ("tcp4" or
+// "tcp6"). The family itself is chosen by the DialContext that calls it, which
+// dials network in place of the "tcp" net/http asks for.
+func newPinnedDialer(network string) *net.Dialer { //nolint:unparam // network is the spec'd seam signature; both families share one bound today, a per-family bound would branch on it
+	return &net.Dialer{Timeout: PinnedDialTimeout}
+}
+
+// IsDialSkip reports whether err is a connect-stage failure: the address
+// family is unreachable from this host, so the caller skips it. Any other
+// error (a TLS or HTTP failure, a rejected signature) is a real error.
+func IsDialSkip(err error) bool {
+	opErr, ok := errors.AsType[*net.OpError](err)
+	return ok && opErr.Op == "dial"
 }

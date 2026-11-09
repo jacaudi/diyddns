@@ -70,10 +70,19 @@ func NewDiscoverer(v4, v6 []Provider, quorum int, perReq time.Duration) (*Discov
 // Discover runs both families concurrently and returns their quorum results.
 func (d *Discoverer) Discover(ctx context.Context) (v4, v6 Result) {
 	var wg sync.WaitGroup
-	wg.Go(func() { v4 = d.discoverFamily(ctx, d.v4) })
-	wg.Go(func() { v6 = d.discoverFamily(ctx, d.v6) })
+	wg.Go(func() { v4 = d.DiscoverFamily(ctx, FamilyV4) })
+	wg.Go(func() { v6 = d.DiscoverFamily(ctx, FamilyV6) })
 	wg.Wait()
 	return v4, v6
+}
+
+// DiscoverFamily runs one family's lookup and returns its quorum result. A
+// disabled family (no providers) is not OK.
+func (d *Discoverer) DiscoverFamily(ctx context.Context, f Family) Result {
+	if f == FamilyV6 {
+		return d.discoverFamily(ctx, d.v6)
+	}
+	return d.discoverFamily(ctx, d.v4)
 }
 
 // discoverFamily queries one family's providers concurrently (each bounded by

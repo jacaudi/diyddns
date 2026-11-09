@@ -6,11 +6,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -321,5 +326,159 @@ func TestClient_BaseURL(t *testing.T) {
 	}
 	if got, want := c.BaseURL(), "https://ddns.example.com:8443"; got != want {
 		t.Errorf("BaseURL = %q, want %q", got, want)
+	}
+}
+
+// ipSourceClient serves status 200 with body and records the posted body.
+func ipSourceClient(t *testing.T, body string, posted *string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if posted != nil {
+			*posted = string(b)
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c
+}
+
+func TestCheckinDecodesIPSource(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want IPSource
+	}{
+		{"observed v4", `{"device_id":"d","ip_source":{"ipv4":"observed"}}`, IPSource{IPv4: "observed"}},
+		{"both families", `{"ip_source":{"ipv4":"reported","ipv6":"none"}}`, IPSource{IPv4: "reported", IPv6: "none"}},
+		{"old server, no ip_source", `{"device_id":"d","stored":true}`, IPSource{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := ipSourceClient(t, tt.body, nil).Checkin(t.Context(), Report{})
+			if err != nil {
+				t.Fatalf("Checkin: %v", err)
+			}
+			if res.IPSource != tt.want {
+				t.Errorf("IPSource = %+v, want %+v", res.IPSource, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckinEmptyReportSendsEmptyObject(t *testing.T) {
+	var posted string
+	if _, err := ipSourceClient(t, `{}`, &posted).Checkin(t.Context(), Report{}); err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if posted != `{}` {
+		t.Errorf("posted body = %q, want %q", posted, `{}`)
+	}
+}
+
+// localhostServer serves a check-in 200 on 127.0.0.1 only and returns its URL
+// with the host spelled "localhost", which resolves to both families.
+func localhostServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"device_id":"d"}`)
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	return "http://localhost:" + port
+}
+
+func TestNetworkPinsDial(t *testing.T) {
+	base := localhostServer(t)
+	secret := base64.StdEncoding.EncodeToString([]byte(testSecret))
+
+	c6, err := NewClient(base, testDeviceID, secret, Options{Network: "tcp6"})
+	if err != nil {
+		t.Fatalf("NewClient tcp6: %v", err)
+	}
+	if _, err := c6.Checkin(t.Context(), Report{}); !IsDialSkip(err) {
+		t.Errorf("tcp6 against an IPv4-only listener: IsDialSkip(%v) = false, want true", err)
+	}
+
+	c4, err := NewClient(base, testDeviceID, secret, Options{Network: "tcp4"})
+	if err != nil {
+		t.Fatalf("NewClient tcp4: %v", err)
+	}
+	if _, err := c4.Checkin(t.Context(), Report{}); err != nil {
+		t.Errorf("tcp4 against an IPv4 listener: %v", err)
+	}
+}
+
+func TestNewClientRejectsUnknownNetwork(t *testing.T) {
+	_, err := NewClient("http://x", testDeviceID, base64.StdEncoding.EncodeToString([]byte(testSecret)), Options{Network: "udp"})
+	if err == nil {
+		t.Fatal("want error for Network \"udp\"")
+	}
+}
+
+func TestPinnedDialerTimeout(t *testing.T) {
+	if PinnedDialTimeout != 5*time.Second {
+		t.Errorf("PinnedDialTimeout = %v, want 5s", PinnedDialTimeout)
+	}
+	if got := newPinnedDialer("tcp6").Timeout; got != PinnedDialTimeout {
+		t.Errorf("newPinnedDialer(tcp6).Timeout = %v, want %v", got, PinnedDialTimeout)
+	}
+}
+
+func TestNewClientTransportNotShared(t *testing.T) {
+	pool := x509.NewCertPool()
+	tc := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
+	secret := base64.StdEncoding.EncodeToString([]byte(testSecret))
+	a, err := NewClient("https://x", testDeviceID, secret, Options{TLSConfig: tc, Network: "tcp4"})
+	if err != nil {
+		t.Fatalf("NewClient a: %v", err)
+	}
+	b, err := NewClient("https://x", testDeviceID, secret, Options{TLSConfig: tc, Network: "tcp6"})
+	if err != nil {
+		t.Fatalf("NewClient b: %v", err)
+	}
+	ta, tb := a.http.Transport.(*http.Transport), b.http.Transport.(*http.Transport)
+	if ta == tb {
+		t.Error("two clients share one *http.Transport")
+	}
+	if ta.TLSClientConfig == tb.TLSClientConfig || ta.TLSClientConfig == tc {
+		t.Error("a *tls.Config is shared across transports; net/http mutates it when it enables h2")
+	}
+	if ta.TLSClientConfig.RootCAs != pool || ta.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Error("the transport's TLS config is not a copy of Options.TLSConfig")
+	}
+}
+
+func TestIsDialSkip(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"dial deadline exceeded", &url.Error{Err: &net.OpError{Op: "dial", Err: os.ErrDeadlineExceeded}}, true},
+		{"wrapped dial refusal", fmt.Errorf("checkin: POST: %w", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
+		{"read error", &url.Error{Err: &net.OpError{Op: "read"}}, false},
+		{"unauthorized", ErrUnauthorized, false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsDialSkip(tt.err); got != tt.want {
+				t.Errorf("IsDialSkip(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
