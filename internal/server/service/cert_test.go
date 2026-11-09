@@ -79,7 +79,7 @@ func parseCertPEM(t *testing.T, certPEM string) *x509.Certificate {
 func TestCertService_MainIssuesWhenNone(t *testing.T) {
 	st, svc, ca, dev := newCertSvc(t)
 
-	got, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerMain)
+	got, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -118,12 +118,12 @@ func TestCertService_MainIssuesWhenNone(t *testing.T) {
 
 func TestCertService_MainLiveIs409(t *testing.T) {
 	st, svc, _, dev := newCertSvc(t)
-	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerMain); err != nil {
+	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false); err != nil {
 		t.Fatalf("first Issue: %v", err)
 	}
 	before := getDevice(t, st, dev.ID)
 
-	_, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerMain)
+	_, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false)
 	if !errors.Is(err, ErrCertAlreadyIssued) {
 		t.Fatalf("err = %v, want ErrCertAlreadyIssued", err)
 	}
@@ -137,13 +137,13 @@ func TestCertService_MainLiveIs409(t *testing.T) {
 
 func TestCertService_MainAfterExpiryIssues(t *testing.T) {
 	st, svc, _, dev := newCertSvc(t)
-	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerMain); err != nil {
+	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false); err != nil {
 		t.Fatalf("first Issue: %v", err)
 	}
 	old := getDevice(t, st, dev.ID)
 	svc.now = func() time.Time { return time.Unix(old.CertNotAfter, 0).Add(time.Second) }
 
-	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerMain); err != nil {
+	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false); err != nil {
 		t.Fatalf("Issue after expiry: %v", err)
 	}
 	if now := getDevice(t, st, dev.ID); now.CertSerial == old.CertSerial {
@@ -153,12 +153,12 @@ func TestCertService_MainAfterExpiryIssues(t *testing.T) {
 
 func TestCertService_AgentAlwaysIssues(t *testing.T) {
 	st, svc, _, dev := newCertSvc(t)
-	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerMain); err != nil {
+	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false); err != nil {
 		t.Fatalf("main Issue: %v", err)
 	}
 	old := getDevice(t, st, dev.ID)
 
-	got, err := svc.Issue(t.Context(), dev.ID, testCSR(t), CertListenerAgent)
+	got, err := svc.Issue(t.Context(), dev.ID, testCSR(t), true)
 	if err != nil {
 		t.Fatalf("agent Issue: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestCertService_MainRaceSecondIs409(t *testing.T) {
 	errs := make([]error, len(csrs))
 	for i := range csrs {
 		wg.Go(func() {
-			_, errs[i] = svc.Issue(t.Context(), dev.ID, csrs[i], CertListenerMain)
+			_, errs[i] = svc.Issue(t.Context(), dev.ID, csrs[i], false)
 		})
 	}
 	wg.Wait()
@@ -214,7 +214,7 @@ func TestCertService_MainRaceSecondIs409(t *testing.T) {
 func TestCertService_BadCSR(t *testing.T) {
 	st, svc, _, dev := newCertSvc(t)
 
-	_, err := svc.Issue(t.Context(), dev.ID, []byte("not a csr"), CertListenerMain)
+	_, err := svc.Issue(t.Context(), dev.ID, []byte("not a csr"), false)
 	if !errors.Is(err, agenttls.ErrBadCSR) {
 		t.Fatalf("err = %v, want ErrBadCSR", err)
 	}
@@ -229,11 +229,14 @@ func TestCertService_BadCSR(t *testing.T) {
 // The store's compare-and-set no longer tells a missing device from a live
 // certificate (#8), so the not-found answer must come from Issue's own read.
 func TestCertService_UnknownDeviceNotFound(t *testing.T) {
-	for _, l := range []CertListener{CertListenerMain, CertListenerAgent} {
-		t.Run(string(l), func(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		renewal bool
+	}{{"main", false}, {"agent", true}} {
+		t.Run(tt.name, func(t *testing.T) {
 			st, svc, _, _ := newCertSvc(t)
 
-			_, err := svc.Issue(t.Context(), "no-such-device", testCSR(t), l)
+			_, err := svc.Issue(t.Context(), "no-such-device", testCSR(t), tt.renewal)
 			if !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("err = %v, want store.ErrNotFound", err)
 			}

@@ -32,16 +32,17 @@ type certOutput struct {
 	}
 }
 
-// registerCertOps registers POST /agent/v1/cert onto a, issuing on listener l.
-// mws carry the authentication for that listener (HMAC on the main port).
-func registerCertOps(a huma.API, deps ServerDeps, l service.CertListener, mws huma.Middlewares) {
+// registerCertOps registers POST /agent/v1/cert onto a; renewal is true on the
+// agent listener (see CertService.Issue). mws carry the authentication for
+// that listener (HMAC on the main port).
+func registerCertOps(a huma.API, deps ServerDeps, renewal bool, mws huma.Middlewares) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodPost,
 		Path:        "/agent/v1/cert",
 		Middlewares: mws,
 	}, func(ctx context.Context, in *certInput) (*certOutput, error) {
 		deviceID := DeviceIDFrom(ctx)
-		issued, err := deps.Cert.Issue(ctx, deviceID, []byte(in.Body.CSR), l)
+		issued, err := deps.Cert.Issue(ctx, deviceID, []byte(in.Body.CSR), renewal)
 		if err != nil {
 			return nil, certErr(ctx, deps, deviceID, err)
 		}

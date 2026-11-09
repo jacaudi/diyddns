@@ -320,7 +320,7 @@ func newDeviceCert(t *testing.T, cfg config.Server, st *store.Store, ca *agenttl
 		t.Fatalf("CreateCertificateRequest: %v", err)
 	}
 	issued, err := service.NewCertService(st, ca, cfg.Agent.PublicURL, audit).Issue(ctx, res.DeviceID,
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr}), service.CertListenerMain)
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr}), false)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
