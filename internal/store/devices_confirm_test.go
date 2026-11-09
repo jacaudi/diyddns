@@ -148,20 +148,18 @@ func TestTouch_ResetsWarnLevelPerAssertedFamily(t *testing.T) {
 func TestRecordIPChange_AdvancesInstantsAndResetsLevels(t *testing.T) {
 	s, ctx := newTestStore(t)
 	d := seedDevice(t, s, seedUser(t, s).ID)
+	if err := s.Devices().UpdateIP(ctx, d.ID, "1.1.1.1", "2606:4700::1", "", "", "", NowUnix()); err != nil {
+		t.Fatal(err)
+	}
 	setConfirmed(t, s, d.ID, 100, 100)
 	setWarnLevels(t, s, d.ID, 3, 3)
 
-	// IPv6 here is the MERGED effective value production actually sends —
-	// non-empty even though the family is unasserted (the merge preserves
-	// the stored value rather than clearing it; see service.Checkin). If
-	// RecordIPChange were ever "simplified" to derive assertion from
-	// c.IPv6 != "" instead of taking V6Asserted from the caller, this would
-	// wrongly treat IPv6 as asserted, advance V6ConfirmedAt, and reset
-	// V6WarnLevel — exactly what the two assertions below catch.
-	if _, err := s.RecordIPChange(ctx, IPChange{
-		DeviceID: d.ID, IPv4: "5.6.7.8", IPv6: "2001:db8::1",
-		V4Asserted: true, V6Asserted: false,
-	}); err != nil {
+	// Assertion is a non-empty raw field; the merge happens inside
+	// RecordIPChange. IPv6 is omitted here, so it is unasserted: its stored
+	// value is carried forward, but V6ConfirmedAt must stay at 100 and
+	// V6WarnLevel at 3. If RecordIPChange asserted a family from the MERGED
+	// value instead of the raw field, the two assertions below would catch it.
+	if _, err := s.RecordIPChange(ctx, IPChange{DeviceID: d.ID, IPv4: "8.8.4.4"}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.Devices().GetByID(ctx, d.ID)
