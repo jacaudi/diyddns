@@ -12,6 +12,8 @@ import (
 	"github.com/jacaudi/diyddns/internal/client/checkin"
 	"github.com/jacaudi/diyddns/internal/client/credentials"
 	"github.com/jacaudi/diyddns/internal/client/enroll"
+	"github.com/jacaudi/diyddns/internal/client/ipdiscovery"
+	"github.com/jacaudi/diyddns/internal/config"
 )
 
 const (
@@ -43,13 +45,24 @@ type Config struct {
 	InsecureProvision bool
 	Log               *slog.Logger
 	Now               func() time.Time
+
+	// Discovery is run.ip_discovery: config.IPDiscoveryAuto, IPDiscoveryAlways or
+	// IPDiscoveryNever. The zero value is always: one unpinned request carrying
+	// the report as given, with no family logic.
+	Discovery string
+	// Families are the families auto and never check in over, IPv4 before IPv6.
+	Families []ipdiscovery.Family
+	// Lookup resolves one family's public address. It is required in auto and
+	// unused otherwise.
+	Lookup func(context.Context, ipdiscovery.Family) ipdiscovery.Result
 }
 
-// active is the loaded state plus what is derived from it. The agent client is
+// active is the loaded state plus what is derived from it. The agent clients are
 // rebuilt whenever the state changes (new TLSConfig, new AgentURL).
 type active struct {
 	state    State
 	agent    *checkin.Client
+	pinned   map[ipdiscovery.Family]*checkin.Client // agent, one per enabled family
 	notAfter time.Time
 }
 
@@ -58,18 +71,22 @@ type active struct {
 // committed and renewed. It satisfies poller.Checkiner. It is not safe for
 // concurrent use: the poller calls it from one goroutine.
 type Manager struct {
-	cfg       Config
-	main      *checkin.Client
-	enroll    *enroll.Client
-	mainHTTPS bool
+	cfg        Config
+	main       *checkin.Client
+	pinnedMain map[ipdiscovery.Family]*checkin.Client // main, one per enabled family
+	enroll     *enroll.Client
+	mainHTTPS  bool
 
 	cur *active // nil when the device holds no usable mTLS state
 
 	caps   enroll.Capabilities
 	capsAt time.Time // zero until the first successful fetch
 
-	lastInsecureWarn  time.Time
-	lastProbationWarn time.Time
+	fam map[ipdiscovery.Family]*familyState // one per enabled family
+
+	lastInsecureWarn     time.Time
+	lastProbationWarn    time.Time
+	lastNeverUnsupported time.Time
 }
 
 // NewManager builds the main-port clients from cfg.Creds.ServerURL and
@@ -82,6 +99,20 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
+	}
+	switch cfg.Discovery {
+	case "":
+		cfg.Discovery = config.IPDiscoveryAlways
+	case config.IPDiscoveryAlways, config.IPDiscoveryNever:
+	case config.IPDiscoveryAuto:
+		if cfg.Lookup == nil {
+			return nil, errors.New("mtls: ip_discovery auto needs a Lookup")
+		}
+	default:
+		return nil, fmt.Errorf("mtls: unknown ip_discovery %q", cfg.Discovery)
+	}
+	if cfg.Discovery == config.IPDiscoveryAlways {
+		cfg.Families = nil // always sends one unpinned request; no family state, no pinned clients
 	}
 	mainClient, err := checkin.NewClient(cfg.Creds.ServerURL, cfg.Creds.DeviceID, cfg.Creds.Secret, checkin.Options{CACertPath: cfg.CACertPath})
 	if err != nil {
@@ -96,6 +127,13 @@ func NewManager(cfg Config) (*Manager, error) {
 		main:      mainClient,
 		enroll:    enrollClient,
 		mainHTTPS: strings.HasPrefix(mainClient.BaseURL(), "https://"),
+		fam:       make(map[ipdiscovery.Family]*familyState, len(cfg.Families)),
+	}
+	for _, f := range cfg.Families {
+		m.fam[f] = &familyState{lastWarn: map[string]time.Time{}}
+	}
+	if m.pinnedMain, err = m.pinnedClients(cfg.Creds.ServerURL, checkin.Options{CACertPath: cfg.CACertPath}); err != nil {
+		return nil, fmt.Errorf("mtls: main client: %w", err)
 	}
 
 	s, err := Load(cfg.StatePath, cfg.Creds.DeviceID, cfg.Log)
@@ -131,7 +169,8 @@ func (m *Manager) Provision(ctx context.Context) error {
 // certificate, provision, probe (probation), renew, then check in on the agent
 // port. At most one provisioning attempt is made per cycle. Once committed the
 // agent port is the only path; the main port is used only before commit, when
-// provisioning failed, or when the device has no state.
+// provisioning failed, or when the device has no state. Only the final check-in
+// is per address family (see checkinFamilies); everything before it runs once.
 func (m *Manager) Checkin(ctx context.Context, r checkin.Report) (checkin.Result, error) {
 	if err := m.refreshCaps(ctx); err != nil {
 		m.cfg.Log.Warn("capabilities fetch failed; keeping previous", "error", err)
@@ -147,17 +186,17 @@ func (m *Manager) Checkin(ctx context.Context, r checkin.Report) (checkin.Result
 			m.tryProvision(ctx)
 		}
 		if m.cur == nil {
-			return m.main.Checkin(ctx, r)
+			return m.checkinFamilies(ctx, m.main, m.pinnedMain, r)
 		}
 		m.refreshAgentURL()
 		if !m.cur.state.Committed && !m.probe(ctx) {
 			if m.cur == nil {
 				continue // rejected during probation: provision again, or fall to main
 			}
-			return m.main.Checkin(ctx, r)
+			return m.checkinFamilies(ctx, m.main, m.pinnedMain, r)
 		}
 		m.renew(ctx)
-		res, err := m.cur.agent.Checkin(ctx, r)
+		res, err := m.checkinFamilies(ctx, m.cur.agent, m.cur.pinned, r)
 		if errors.Is(err, checkin.ErrClientCertRejected) {
 			m.drop("agent port rejected our client certificate; will provision again", nil)
 			continue
@@ -293,11 +332,31 @@ func (m *Manager) activate(s State) (*active, error) {
 	if err != nil {
 		return nil, err
 	}
-	agent, err := checkin.NewClient(s.AgentURL, m.cfg.Creds.DeviceID, m.cfg.Creds.Secret, checkin.Options{TLSConfig: tc})
+	opts := checkin.Options{TLSConfig: tc}
+	agent, err := checkin.NewClient(s.AgentURL, m.cfg.Creds.DeviceID, m.cfg.Creds.Secret, opts)
 	if err != nil {
 		return nil, err
 	}
-	return &active{state: s, agent: agent, notAfter: leaf.NotAfter}, nil
+	pinned, err := m.pinnedClients(s.AgentURL, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &active{state: s, agent: agent, pinned: pinned, notAfter: leaf.NotAfter}, nil
+}
+
+// pinnedClients builds one client per enabled family for baseURL, each pinned to
+// its family's network. opts carries the trust settings.
+func (m *Manager) pinnedClients(baseURL string, opts checkin.Options) (map[ipdiscovery.Family]*checkin.Client, error) {
+	out := make(map[ipdiscovery.Family]*checkin.Client, len(m.cfg.Families))
+	for _, f := range m.cfg.Families {
+		opts.Network = networkOf(f)
+		c, err := checkin.NewClient(baseURL, m.cfg.Creds.DeviceID, m.cfg.Creds.Secret, opts)
+		if err != nil {
+			return nil, err
+		}
+		out[f] = c
+	}
+	return out, nil
 }
 
 // persist activates s, saves it and only then makes it current, so an unusable
@@ -328,14 +387,22 @@ func (m *Manager) drop(msg string, cause error) {
 	m.cfg.Log.Warn(msg, attrs...)
 }
 
-// warnThrottled logs a WARN at most once per warnEvery, tracked in last.
-func (m *Manager) warnThrottled(last *time.Time, msg string, args ...any) {
+// due reports whether a message throttled by last is due, and if so starts a
+// new warnEvery window.
+func (m *Manager) due(last *time.Time) bool {
 	now := m.cfg.Now()
 	if !last.IsZero() && now.Sub(*last) < warnEvery {
-		return
+		return false
 	}
 	*last = now
-	m.cfg.Log.Warn(msg, args...)
+	return true
+}
+
+// warnThrottled logs a WARN at most once per warnEvery, tracked in last.
+func (m *Manager) warnThrottled(last *time.Time, msg string, args ...any) {
+	if m.due(last) {
+		m.cfg.Log.Warn(msg, args...)
+	}
 }
 
 // agentError turns an agent-port round-trip failure into ErrAgentUnavailable

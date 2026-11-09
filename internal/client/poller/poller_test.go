@@ -1,7 +1,9 @@
 package poller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -161,5 +163,44 @@ func TestRun_UnauthorizedStreakResetsOnSuccess(t *testing.T) {
 	}
 	if c.n != 5 {
 		t.Errorf("check-ins = %d, want 5", c.n)
+	}
+}
+
+func TestRunOnceLogsIPSource(t *testing.T) {
+	d := fakeDisc{v4: ipdiscovery.Result{Addr: netip.MustParseAddr("203.0.113.7"), OK: true}}
+	c := &fakeChk{res: checkin.Result{IPSource: checkin.IPSource{IPv4: "observed"}}}
+	var buf bytes.Buffer
+	p := New(d, c, Options{Logger: slog.New(slog.NewJSONHandler(&buf, nil))})
+
+	if err := p.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode log line %q: %v", buf.String(), err)
+	}
+	if rec["msg"] != "check-in" {
+		t.Fatalf("msg = %v, want check-in", rec["msg"])
+	}
+	if got, ok := rec["ipv4_source"]; !ok || got != "observed" {
+		t.Errorf("ipv4_source = %v, want observed", got)
+	}
+	if got, ok := rec["ipv6_source"]; !ok || got != "" {
+		t.Errorf("ipv6_source = %v (present %v), want an empty string", got, ok)
+	}
+}
+
+func TestRunOnceNilDiscovererPostsEmptyReport(t *testing.T) {
+	c := &fakeChk{}
+	p := New(nil, c, Options{Logger: testLogger(), Hostname: "host", OS: "linux", ClientVersion: "1.2.3"})
+
+	if err := p.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	want := checkin.Report{Hostname: "host", OS: "linux", ClientVersion: "1.2.3"}
+	if c.last != want {
+		t.Errorf("report = %+v, want %+v (no addresses)", c.last, want)
 	}
 }

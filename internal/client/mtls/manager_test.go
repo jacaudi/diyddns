@@ -2,6 +2,7 @@ package mtls
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -28,6 +29,8 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/client/checkin"
 	"github.com/jacaudi/diyddns/internal/client/credentials"
+	"github.com/jacaudi/diyddns/internal/client/ipdiscovery"
+	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
 
@@ -118,6 +121,23 @@ func (l *recLog) all() string {
 
 type call struct{ port, route string }
 
+// seenReq is one request as the fake saw it: where it landed, which loopback
+// family it arrived on (the local address of the connection) and, for a
+// check-in, its decoded JSON body.
+type seenReq struct {
+	port, route string
+	fam         ipdiscovery.Family
+	body        map[string]string
+}
+
+// requestFamily returns the family of the local address r arrived on.
+func requestFamily(r *http.Request) ipdiscovery.Family {
+	if a, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr); ok && a.IP.To4() == nil {
+		return ipdiscovery.FamilyV6
+	}
+	return ipdiscovery.FamilyV4
+}
+
 // scripted overrides the fake's answer for one (port, route). times < 0 means
 // forever; otherwise it is consumed that many times. after runs before the
 // response is written.
@@ -143,10 +163,16 @@ type fakeServer struct {
 
 	mu           sync.Mutex
 	calls        []call
+	seen         []seenReq
+	taken        map[string]int // check-ins already handed out by newCheckins, per port
 	scripts      map[call][]scripted
 	issued       int
 	advertise    bool
+	observedIP   bool
 	capsAgentURL string
+	// checkinFn, when set, answers every check-in the scripts do not claim.
+	// Status 0 means 200.
+	checkinFn func(seenReq) (int, map[string]any)
 	// certAgentURL and certBundle are what POST /cert answers with.
 	certAgentURL string
 	certBundle   string
@@ -158,6 +184,7 @@ func newFakeServer(t *testing.T, clk *testClock, tlsMain bool) *fakeServer {
 		ca:        newTestCA(t, "fake agent CA"),
 		clock:     clk,
 		scripts:   map[call][]scripted{},
+		taken:     map[string]int{},
 		advertise: true,
 	}
 	if tlsMain {
@@ -199,6 +226,33 @@ func (f *fakeServer) setCaps(advertise bool, agentURL string) {
 	f.capsAgentURL = agentURL
 }
 
+func (f *fakeServer) setObservedIP(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.observedIP = v
+}
+
+func (f *fakeServer) setCheckin(fn func(seenReq) (int, map[string]any)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkinFn = fn
+}
+
+// newCheckins returns the check-ins port received since the previous call.
+func (f *fakeServer) newCheckins(port string) []seenReq {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var all []seenReq
+	for _, s := range f.seen {
+		if s.port == port && s.route == routeCheckin {
+			all = append(all, s)
+		}
+	}
+	out := all[f.taken[port]:]
+	f.taken[port] = len(all)
+	return out
+}
+
 func (f *fakeServer) script(port, route string, s scripted) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -230,11 +284,19 @@ func (f *fakeServer) handler(port string) http.Handler {
 			panic(http.ErrAbortHandler)
 		}
 		c := call{port, r.Method + " " + r.URL.Path}
+		sr := seenReq{port: port, route: c.route, fam: requestFamily(r)}
+		if c.route == routeCheckin {
+			if err := json.NewDecoder(r.Body).Decode(&sr.body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		f.mu.Lock()
 		f.calls = append(f.calls, c)
+		f.seen = append(f.seen, sr)
 		sc, scripted := f.next(c)
-		advertise, capsURL := f.advertise, f.capsAgentURL
-		certURL, bundle := f.certAgentURL, f.certBundle
+		advertise, observed, capsURL := f.advertise, f.observedIP, f.capsAgentURL
+		certURL, bundle, checkinFn := f.certAgentURL, f.certBundle, f.checkinFn
 		f.mu.Unlock()
 
 		if scripted {
@@ -252,6 +314,9 @@ func (f *fakeServer) handler(port string) http.Handler {
 			if advertise {
 				body["agent_mtls"] = map[string]string{"agent_url": capsURL}
 			}
+			if observed {
+				body["observed_ip"] = true
+			}
 			_ = json.NewEncoder(w).Encode(body)
 		case routeSelf:
 			if f.onSelf != nil {
@@ -259,9 +324,16 @@ func (f *fakeServer) handler(port string) http.Handler {
 			}
 			_, _ = w.Write([]byte(`{}`))
 		case routeCheckin:
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			status, body := http.StatusOK, map[string]any{
 				"device_id": testDeviceID, "current_ipv4": testIPv4, "stored": true,
-			})
+			}
+			if checkinFn != nil {
+				if status, body = checkinFn(sr); status == 0 {
+					status = http.StatusOK
+				}
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(body)
 		case routeCert:
 			var req struct {
 				CSR string `json:"csr"`
@@ -361,6 +433,13 @@ type env struct {
 	statePath string
 	caPath    string
 	insecure  bool
+
+	// mainURL overrides the fake's main URL (the dual-stack tests point it at
+	// localhost). discovery and families are the Manager's per-family mode.
+	mainURL   string
+	discovery string
+	families  []ipdiscovery.Family
+	lk        *fakeLookup
 }
 
 func newEnv(t *testing.T, tlsMain bool) *env {
@@ -373,6 +452,9 @@ func newEnv(t *testing.T, tlsMain bool) *env {
 		logs:      &recLog{},
 		statePath: filepath.Join(t.TempDir(), FileName),
 		insecure:  !tlsMain,
+		discovery: config.IPDiscoveryNever,
+		families:  []ipdiscovery.Family{ipdiscovery.FamilyV4},
+		lk:        newFakeLookup(),
 	}
 	if tlsMain {
 		e.caPath = filepath.Join(t.TempDir(), "main-ca.pem")
@@ -385,10 +467,10 @@ func newEnv(t *testing.T, tlsMain bool) *env {
 }
 
 func (e *env) config() Config {
-	return Config{
+	cfg := Config{
 		StatePath: e.statePath,
 		Creds: credentials.Credentials{
-			ServerURL: e.fs.main.URL,
+			ServerURL: cmp.Or(e.mainURL, e.fs.main.URL),
 			DeviceID:  testDeviceID,
 			Secret:    base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")),
 		},
@@ -396,7 +478,13 @@ func (e *env) config() Config {
 		InsecureProvision: e.insecure,
 		Log:               slog.New(e.logs),
 		Now:               e.clk.Now,
+		Discovery:         e.discovery,
+		Families:          e.families,
 	}
+	if e.discovery == config.IPDiscoveryAuto {
+		cfg.Lookup = e.lk.lookup
+	}
+	return cfg
 }
 
 func (e *env) manager() *Manager {
