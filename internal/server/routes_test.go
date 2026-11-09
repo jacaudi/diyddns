@@ -5,12 +5,15 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/server/webui"
 )
 
@@ -51,7 +54,7 @@ func TestWebUIPatternsAreReachable(t *testing.T) {
 		t.Fatal("webui.New returned no patterns")
 	}
 
-	mux, _, _, _, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog(), nil)
+	mux, _, _, _, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -90,12 +93,69 @@ func concretePath(p string) string {
 // A reachability test that cannot detect an unforwarded route is decoration.
 func TestReachabilityDetectsAnUnforwardedRoute(t *testing.T) {
 	// Deliberately not t.Parallel() — see TestWebUIPatternsAreReachable.
-	mux, _, _, _, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog(), nil)
+	mux, _, _, _, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/never-registered", nil)
 	if _, matched := mux.Handler(req); matched != "" {
 		t.Errorf("an unregistered path resolved to pattern %q; the guard cannot detect drift", matched)
+	}
+}
+
+// buildMux hands the parsed trusted_proxies to the API dependencies, where the
+// check-in handler reads them.
+func TestBuildMuxThreadsTrustedProxies(t *testing.T) {
+	// Deliberately not t.Parallel() — see TestWebUIPatternsAreReachable.
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+
+	_, _, apiDeps, _, _, _, _, err := buildMux(routesTestConfig(t), openTestStore(t), discardLog(), nil, trusted)
+	if err != nil {
+		t.Fatalf("buildMux: %v", err)
+	}
+
+	if !slices.Equal(apiDeps.TrustedProxies, trusted) {
+		t.Errorf("apiDeps.TrustedProxies = %v, want %v", apiDeps.TrustedProxies, trusted)
+	}
+}
+
+func TestLogStartupWarnings(t *testing.T) {
+	tests := []struct {
+		name string
+		mut  func(*config.Server)
+		want string // substring of the WARN message
+	}{
+		{
+			name: "cookie_secure over plain HTTP",
+			mut: func(c *config.Server) {
+				c.Auth.Session.CookieSecure = true
+				c.Server.BaseURL = "http://ddns.example.com"
+			},
+			want: "auth.session.cookie_secure",
+		},
+		{
+			name: "trusted_proxies zero-length prefix",
+			mut:  func(c *config.Server) { c.Server.TrustedProxies = []string{"0.0.0.0/0"} },
+			want: "server.trusted_proxies",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := routesTestConfig(t)
+			tt.mut(&cfg)
+			log, buf := jsonLog()
+
+			logStartupWarnings(cfg, log)
+
+			var found bool
+			for _, rec := range logtest.Records(t, buf.String()) {
+				if msg, _ := rec["msg"].(string); rec["level"] == "WARN" && strings.Contains(msg, tt.want) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no WARN containing %q in:\n%s", tt.want, buf.String())
+			}
+		})
 	}
 }

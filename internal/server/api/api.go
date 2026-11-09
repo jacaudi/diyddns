@@ -7,6 +7,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"net/netip"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -65,6 +66,9 @@ type ServerDeps struct {
 	// RequireMTLS mirrors agent.require_mtls: the main port refuses check-in
 	// and self with 403 mtls_required.
 	RequireMTLS bool
+	// TrustedProxies is the parsed server.trusted_proxies: the peers whose
+	// X-Forwarded-For names the real origin. Empty trusts none.
+	TrustedProxies []netip.Prefix
 }
 
 // Build registers both huma APIs, their operations, and the health handlers

@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +31,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
+	"github.com/pires/go-proxyproto"
 )
 
 // syncBuffer is a bytes.Buffer safe to write from server goroutines while the
@@ -461,4 +464,156 @@ func TestRun_AgentListenFailureStopsBoth(t *testing.T) {
 	}
 	assertRefused(t, cfg.Server.Listen)
 	assertLockFree(t, dir)
+}
+
+// loopbackServingCert is a self-signed certificate for 127.0.0.1 and the pool
+// that trusts it.
+func loopbackServingCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, pool
+}
+
+// servedRequest is what the handler behind agentListener saw.
+type servedRequest struct {
+	host   string
+	hasTLS bool
+}
+
+// serveAgentListener serves a TLS http.Server over agentListener on a free
+// loopback port, in the order Run uses (listener, then ServeTLS), and returns
+// its address, the pool that trusts its certificate, and the requests its
+// handler sees.
+func serveAgentListener(t *testing.T, proxyProtocol bool, trusted []netip.Prefix) (string, *x509.CertPool, <-chan servedRequest) {
+	t.Helper()
+	cert, pool := loopbackServingCert(t)
+	ln, err := agentListener("127.0.0.1:0", proxyProtocol, trusted)
+	if err != nil {
+		t.Fatalf("agentListener: %v", err)
+	}
+	seen := make(chan servedRequest, 1)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			seen <- servedRequest{host: host, hasTLS: r.TLS != nil}
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          slog.NewLogLogger(slog.DiscardHandler, slog.LevelInfo),
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
+	}
+	go func() { _ = srv.ServeTLS(ln, "", "") }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String(), pool, seen
+}
+
+// dialAgentTLS connects to addr, optionally sends a PROXY v2 header claiming
+// to come from claimed, and starts a TLS handshake.
+func dialAgentTLS(t *testing.T, addr string, pool *x509.CertPool, claimed string) (*tls.Conn, error) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	if claimed != "" {
+		src := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(claimed))
+		if _, err := proxyproto.HeaderProxyFromAddrs(2, src, conn.RemoteAddr()).WriteTo(conn); err != nil {
+			t.Fatalf("write PROXY header: %v", err)
+		}
+	}
+	c := tls.Client(conn, &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, ServerName: "127.0.0.1"})
+	return c, c.HandshakeContext(t.Context())
+}
+
+// getThroughTLS sends one request over an established TLS conn and returns
+// what the handler saw.
+func getThroughTLS(t *testing.T, c *tls.Conn, seen <-chan servedRequest) servedRequest {
+	t.Helper()
+	if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: agent\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	select {
+	case got := <-seen:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never saw the request")
+		return servedRequest{}
+	}
+}
+
+var loopbackOnly = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+
+func TestAgentListenerProxyV2FromTrustedPeer(t *testing.T) {
+	addr, pool, seen := serveAgentListener(t, true, loopbackOnly)
+
+	c, err := dialAgentTLS(t, addr, pool, "9.9.9.9:1234")
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	got := getThroughTLS(t, c, seen)
+
+	if got.host != "9.9.9.9" {
+		t.Errorf("handler host = %q, want the PROXY header source 9.9.9.9", got.host)
+	}
+	if !got.hasTLS {
+		t.Error("r.TLS = nil, want TLS terminated over the PROXY-wrapped listener")
+	}
+}
+
+// A direct client cannot claim another address by sending its own header.
+func TestAgentListenerIgnoresUntrustedProxyHeader(t *testing.T) {
+	addr, pool, seen := serveAgentListener(t, true, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+
+	c, err := dialAgentTLS(t, addr, pool, "9.9.9.9:1234")
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	got := getThroughTLS(t, c, seen)
+
+	if got.host != "127.0.0.1" {
+		t.Errorf("handler host = %q, want the real peer 127.0.0.1", got.host)
+	}
+	if !got.hasTLS {
+		t.Error("r.TLS = nil, want the handshake to complete")
+	}
+}
+
+func TestAgentListenerTrustedPeerWithoutHeaderFails(t *testing.T) {
+	addr, pool, _ := serveAgentListener(t, true, loopbackOnly)
+
+	if _, err := dialAgentTLS(t, addr, pool, ""); err == nil {
+		t.Fatal("handshake succeeded, want an error: a trusted peer must send a PROXY header")
+	}
+}
+
+func TestAgentListenerUnwrappedWhenDisabled(t *testing.T) {
+	addr, pool, _ := serveAgentListener(t, false, loopbackOnly)
+
+	if _, err := dialAgentTLS(t, addr, pool, "9.9.9.9:1234"); err == nil {
+		t.Fatal("handshake succeeded, want an error: with proxy_protocol off the header is not TLS")
+	}
 }

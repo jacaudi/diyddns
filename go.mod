@@ -10,6 +10,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-logr/logr v1.4.4
 	github.com/go-webauthn/webauthn v0.18.2
+	github.com/pires/go-proxyproto v0.16.0
 	github.com/pressly/goose/v3 v3.29.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
