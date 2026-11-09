@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,15 +20,9 @@ import (
 // one; CA generation and the store write finish in well under a second.
 const agentSetupTimeout = 30 * time.Second
 
-// agentTempDirAllowed is a test seam: every t.TempDir lives under os.TempDir,
-// which checkAgentDirs refuses in production. Only agent_test.go sets it.
-var agentTempDirAllowed = false
-
-// checkAgentDirs refuses the two layouts that would lose the agent CA on
-// restart: an in-memory database (the recorded CA vanishes with the process
-// while ca.key stays on disk, which startup rule 4 then refuses) and a CA
-// directory under the OS temp dir (the key vanishes while the database
-// survives, rule 2). It creates dir 0700 so the check sees where it really is.
+// checkAgentDirs refuses an in-memory database, which would lose the agent CA
+// on restart: the recorded CA vanishes with the process while ca.key stays on
+// disk, which startup rule 4 then refuses. It creates dir 0700.
 func checkAgentDirs(dbPath, dir string) error {
 	if dbPath == ":memory:" || strings.HasPrefix(dbPath, "file::memory:") {
 		return fmt.Errorf("server: the agent listener needs a file-backed database.path, got %q", dbPath)
@@ -37,37 +30,7 @@ func checkAgentDirs(dbPath, dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("server: create agent.tls.dir: %w", err)
 	}
-	if agentTempDirAllowed {
-		return nil
-	}
-	resolved, err := resolvePath(dir)
-	if err != nil {
-		return err
-	}
-	tmp, err := resolvePath(os.TempDir())
-	if err != nil {
-		return err
-	}
-	// Both are absolute and cleaned, so Rel is "." or "a/b" when dir is the
-	// temp dir or inside it, and "../x" otherwise.
-	if rel, err := filepath.Rel(tmp, resolved); err == nil && filepath.IsLocal(rel) {
-		return fmt.Errorf("server: agent.tls.dir %s is inside the OS temp dir %s; the CA key would not survive a restart", resolved, tmp)
-	}
 	return nil
-}
-
-// resolvePath returns p absolute with every symlink followed, so macOS's
-// /tmp -> /private/tmp compares equal on both sides.
-func resolvePath(p string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return "", fmt.Errorf("server: resolve %s: %w", p, err)
-	}
-	abs, err := filepath.Abs(resolved)
-	if err != nil {
-		return "", fmt.Errorf("server: resolve %s: %w", p, err)
-	}
-	return abs, nil
 }
 
 // agentStack is everything the agent listener owns for the process lifetime.

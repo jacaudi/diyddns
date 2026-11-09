@@ -322,10 +322,9 @@ host, but a Gateway API `TLSRoute` needs a DNS name (TLSRoute hostnames cannot
 be IPs, and Go sends no SNI for an IP literal), so use a DNS name whenever the
 agent port sits behind one.
 
-The server refuses to start when `database.path` is in-memory, when
-`agent.tls.dir` is under the OS temp directory, or when the recorded CA and
-the key files disagree. The CA state lives in `agent.tls.dir` (the `/data`
-volume in the image), so keep it on the persistent volume.
+The server refuses to start when `database.path` is in-memory or when the
+recorded CA and the key files disagree. The CA state lives in `agent.tls.dir`
+(the `/data` volume in the image), so keep it on the persistent volume.
 
 The serving certificate is valid for as long as the active CA, so nothing
 renews it while the server runs. The server checks it only at startup and
