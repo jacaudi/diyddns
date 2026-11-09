@@ -3,6 +3,7 @@ package notify
 import (
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -72,17 +73,18 @@ func TestPermit(t *testing.T) {
 // step 4 (global-unicast) — removing %w from the step-5 table-match return
 // left this test green. 192.0.2.1 (TEST-NET-1) is global unicast AND denied
 // by the table, so it is the probe that actually reaches step 5. The last
-// two probes cover the scheme-composition returns (steps 6 and 8).
+// two probes cover the scheme-composition returns (steps 6 and 8). wantMsg
+// pins each step's wording, which operators see in delivery failures.
 func TestPermit_ErrorsWrapErrDenied(t *testing.T) {
 	tests := []struct {
-		name, addr, scheme string
+		name, addr, scheme, wantMsg string
 	}{
-		{"zone check, step 1", "fec0::1%eth0", "https"},
-		{"global-unicast check, step 4", "127.0.0.1", "https"},
-		{"global-unicast check, step 4 (link-local)", "169.254.169.254", "https"},
-		{"denied-table match, step 5", "192.0.2.1", "https"},
-		{"unsupported scheme, step 6", "8.8.8.8", "ftp"},
-		{"http to non-loopback, step 8", "8.8.8.8", "http"},
+		{"zone check, step 1", "fec0::1%eth0", "https", "zoned address fec0::1%eth0"},
+		{"global-unicast check, step 4", "127.0.0.1", "https", "127.0.0.1 is not global unicast"},
+		{"global-unicast check, step 4 (link-local)", "169.254.169.254", "https", "169.254.169.254 is not global unicast"},
+		{"denied-table match, step 5", "192.0.2.1", "https", "192.0.2.1 denied by 192.0.2.0/24"},
+		{"unsupported scheme, step 6", "8.8.8.8", "ftp", `unsupported scheme "ftp"`},
+		{"http to non-loopback, step 8", "8.8.8.8", "http", "http permitted only to loopback, got 8.8.8.8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +95,9 @@ func TestPermit_ErrorsWrapErrDenied(t *testing.T) {
 			}
 			if !errors.Is(err, ErrDenied) {
 				t.Errorf("Permit(%s, %s) error does not wrap ErrDenied: %v", tc.scheme, tc.addr, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("Permit(%s, %s) error = %q, want it to contain %q", tc.scheme, tc.addr, err, tc.wantMsg)
 			}
 		})
 	}
