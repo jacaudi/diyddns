@@ -32,7 +32,8 @@ var ErrCredentialRejected = fmt.Errorf("poller: credential rejected by the serve
 // one may be transient; three in a row across two backoff sleeps is not.
 const unauthorizedLimit = 3
 
-// Discoverer runs public-IP discovery for both families.
+// Discoverer runs public-IP discovery for both families. New accepts nil: the
+// poller then reports no addresses.
 type Discoverer interface {
 	Discover(ctx context.Context) (v4, v6 ipdiscovery.Result)
 }
@@ -90,18 +91,22 @@ func New(d Discoverer, c Checkiner, opts Options) *Poller {
 }
 
 // RunOnce performs one discover→check-in cycle. It reports every family that
-// reached quorum (omitting the rest) and always posts if at least one did.
+// reached quorum (omitting the rest) and always posts if at least one did. A
+// nil Discoverer posts no addresses at all: the Checkiner decides, per family,
+// whether the server observes the address or the client looks it up.
 func (p *Poller) RunOnce(ctx context.Context) error {
-	v4, v6 := p.disc.Discover(ctx)
-	if !v4.OK && !v6.OK {
-		return ErrNoQuorum
-	}
 	rep := checkin.Report{Hostname: p.hostname, OS: p.os, ClientVersion: p.clientVer}
-	if v4.OK {
-		rep.IPv4 = v4.Addr.String()
-	}
-	if v6.OK {
-		rep.IPv6 = v6.Addr.String()
+	if p.disc != nil {
+		v4, v6 := p.disc.Discover(ctx)
+		if !v4.OK && !v6.OK {
+			return ErrNoQuorum
+		}
+		if v4.OK {
+			rep.IPv4 = v4.Addr.String()
+		}
+		if v6.OK {
+			rep.IPv6 = v6.Addr.String()
+		}
 	}
 	res, err := p.chk.Checkin(ctx, rep)
 	if err != nil {
@@ -110,7 +115,9 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	p.log.LogAttrs(ctx, slog.LevelInfo, "check-in",
 		slog.Bool("stored", res.Stored),
 		slog.String("ipv4", res.CurrentIPv4),
-		slog.String("ipv6", res.CurrentIPv6))
+		slog.String("ipv6", res.CurrentIPv6),
+		slog.String("ipv4_source", res.IPSource.IPv4),
+		slog.String("ipv6_source", res.IPSource.IPv6))
 	return nil
 }
 
