@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -731,5 +732,44 @@ func TestWarnLimiterParallel(t *testing.T) {
 	wg.Wait()
 	if got := allowed.Load(); got != 1 {
 		t.Errorf("allow returned true %d times, want exactly 1", got)
+	}
+}
+
+// Each dropped family is rate-limited on its own: dropping v4 must not
+// consume the slot that would log the v6 drop.
+func TestCheckinReportedDroppedWarnIsPerFamily(t *testing.T) {
+	svc, _, dev, buf, clk := newSourceFixture(t)
+	report := CheckinReport{IPv4: "10.0.0.1", IPv6: "fe80::1"}
+	const msg = "check-in reported a non-public address; dropped"
+
+	families := func() []any {
+		var out []any
+		for _, w := range warnsNamed(t, buf, msg) {
+			out = append(out, w["family"])
+		}
+		return out
+	}
+
+	if _, err := svc.Checkin(t.Context(), dev.ID, report); err != nil {
+		t.Fatalf("Checkin t0: %v", err)
+	}
+	if got := families(); len(got) != 2 || !slices.Contains(got, any("ipv4")) || !slices.Contains(got, any("ipv6")) {
+		t.Fatalf("dropped WARN families at t0 = %v, want one each of ipv4 and ipv6", got)
+	}
+
+	clk.t = clk.t.Add(59 * time.Minute)
+	if _, err := svc.Checkin(t.Context(), dev.ID, report); err != nil {
+		t.Fatalf("Checkin +59m: %v", err)
+	}
+	if n := len(families()); n != 2 {
+		t.Errorf("dropped WARNs at +59m = %d, want still 2", n)
+	}
+
+	clk.t = clk.t.Add(2 * time.Minute)
+	if _, err := svc.Checkin(t.Context(), dev.ID, report); err != nil {
+		t.Fatalf("Checkin +61m: %v", err)
+	}
+	if n := len(families()); n != 4 {
+		t.Errorf("dropped WARNs at +61m = %d, want 4", n)
 	}
 }
