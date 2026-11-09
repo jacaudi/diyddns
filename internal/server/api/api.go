@@ -16,6 +16,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/email"
 	"github.com/jacaudi/diyddns/internal/oidc"
+	"github.com/jacaudi/diyddns/internal/server/clientip"
 	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -126,14 +127,16 @@ func registerAgentOps(a huma.API, deps ServerDeps) {
 }
 
 // mainAgentMWs is the middleware chain for the main port's check-in and self:
-// HMAC, preceded by the mtls_required refusal when agent.require_mtls is set.
-// Capabilities, enroll and cert stay outside it so a client can still learn the
-// requirement and obtain a certificate.
+// the observation of the request's origin (X-Forwarded-For behind a trusted
+// proxy), then HMAC, preceded by the mtls_required refusal when
+// agent.require_mtls is set. Capabilities, enroll and cert stay outside it so a
+// client can still learn the requirement and obtain a certificate.
 func mainAgentMWs(a huma.API, deps ServerDeps) huma.Middlewares {
+	observe := observeMW(clientip.ObservedFromXFF, deps.TrustedProxies)
 	if deps.RequireMTLS {
-		return huma.Middlewares{mtlsRequiredMW, hmacMW(a, deps)}
+		return huma.Middlewares{observe, mtlsRequiredMW, hmacMW(a, deps)}
 	}
-	return huma.Middlewares{hmacMW(a, deps)}
+	return huma.Middlewares{observe, hmacMW(a, deps)}
 }
 
 // groupConfig returns a huma.Config whose OpenAPI, Docs, and Schemas paths are

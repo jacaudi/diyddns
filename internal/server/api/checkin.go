@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/netip"
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/jacaudi/diyddns/internal/server/clientip"
 	"github.com/jacaudi/diyddns/internal/server/service"
 )
 
@@ -35,6 +37,17 @@ type checkinResponse struct {
 	CurrentIPv4 string `json:"current_ipv4"`
 	CurrentIPv6 string `json:"current_ipv6"`
 	Stored      bool   `json:"stored"`
+	// IPSource says, per family this check-in carried, where the recorded
+	// address came from. It is {} when the check-in carried no family.
+	IPSource ipSourceBody `json:"ip_source"`
+}
+
+// ipSourceBody is the per-family source of a check-in's recorded address:
+// "reported", "observed" or "none". A family the check-in did not carry is
+// absent.
+type ipSourceBody struct {
+	IPv4 string `json:"ipv4,omitempty"`
+	IPv6 string `json:"ipv6,omitempty"`
 }
 
 type checkinOutput struct {
@@ -62,6 +75,14 @@ type selfOutput struct {
 	Body selfResponse
 }
 
+// addrOrEmpty is a.String(), or "" for the zero Addr (whose String is "invalid IP").
+func addrOrEmpty(a netip.Addr) string {
+	if !a.IsValid() {
+		return ""
+	}
+	return a.String()
+}
+
 // registerCheckinOps registers the two HMAC-authenticated agent operations
 // onto a: POST /agent/v1/checkin and GET /agent/v1/self. Both attach mws (which
 // must include HMAC verification) and read the authenticated device id via
@@ -73,23 +94,38 @@ func registerCheckinOps(a huma.API, deps ServerDeps, mws huma.Middlewares) {
 		Middlewares: mws,
 	}, func(ctx context.Context, in *checkinInput) (*checkinOutput, error) {
 		deviceID := DeviceIDFrom(ctx)
+		obs := clientip.ObservationFrom(ctx)
+		var observed netip.Addr
+		if obs.OK {
+			observed = obs.Addr
+		}
 		res, err := deps.Checkin.Checkin(ctx, deviceID, service.CheckinReport{
 			IPv4:          in.Body.IPv4,
 			IPv6:          in.Body.IPv6,
 			Hostname:      in.Body.Hostname,
 			OS:            in.Body.OS,
 			ClientVersion: in.Body.ClientVersion,
+			Observed:      observed,
+			Peer:          obs.Peer,
 		})
 		if err != nil {
 			deps.Log.LogAttrs(ctx, slog.LevelError, "checkin failed",
 				slog.String("device_id", deviceID), slog.Any("error", err))
 			return nil, huma.Error500InternalServerError("check-in failed")
 		}
+		// Empty strings, not "invalid IP", when there is no peer or observation.
+		deps.Log.LogAttrs(ctx, slog.LevelInfo, "check-in",
+			slog.String("device_id", deviceID),
+			slog.String("peer", addrOrEmpty(obs.Peer)),
+			slog.String("observed", addrOrEmpty(observed)),
+			slog.String("ipv4_source", string(res.SourceV4)),
+			slog.String("ipv6_source", string(res.SourceV6)))
 		return &checkinOutput{Body: checkinResponse{
 			DeviceID:    res.DeviceID,
 			CurrentIPv4: res.CurrentIPv4,
 			CurrentIPv6: res.CurrentIPv6,
 			Stored:      res.Stored,
+			IPSource:    ipSourceBody{IPv4: string(res.SourceV4), IPv6: string(res.SourceV6)},
 		}}, nil
 	})
 

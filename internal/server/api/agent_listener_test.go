@@ -39,13 +39,18 @@ type agentListener struct {
 	logs *logCapture
 }
 
-func newAgentListener(t *testing.T) agentListener {
+// mutate edits the assembled ServerDeps before the listener is built, so a test
+// can set a single optional dependency (such as TrustedProxies).
+func newAgentListener(t *testing.T, mutate ...func(*api.ServerDeps)) agentListener {
 	t.Helper()
 	st, deps := buildServerDeps(t)
 	logs := &logCapture{}
 	deps.Log = logs.logger()
 	var ca *agenttls.CA
 	withAgentMTLS(t, false, &ca)(&deps)
+	for _, m := range mutate {
+		m(&deps)
+	}
 
 	mainMux := http.NewServeMux()
 	api.Build(mainMux, deps)

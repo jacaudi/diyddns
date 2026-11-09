@@ -13,6 +13,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/jacaudi/diyddns/internal/server/agenttls"
+	"github.com/jacaudi/diyddns/internal/server/clientip"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -28,7 +29,10 @@ func BuildAgent(mux *http.ServeMux, deps ServerDeps) {
 	cfg.OpenAPIPath, cfg.DocsPath, cfg.SchemasPath = "", "", ""
 	a := humago.New(mux, cfg)
 
-	mws := huma.Middlewares{hmacMW(a, deps), certBindingMW(a, deps)}
+	// The peer is the origin here: the listener sits behind a PROXY protocol
+	// wrap (or none), never behind X-Forwarded-For, so a header a client sends is
+	// not read.
+	mws := huma.Middlewares{observeMW(clientip.ObservedFromPeer, deps.TrustedProxies), hmacMW(a, deps), certBindingMW(a, deps)}
 	registerCheckinOps(a, deps, mws)
 	registerCertOps(a, deps, true, mws)
 }
