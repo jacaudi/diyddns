@@ -36,7 +36,7 @@ const staleOffset = 10 * time.Minute
 // checkinBody is the payload every request in this file signs. A documentation
 // address (RFC 5737 TEST-NET-3) so it is never confused with a real discovery
 // result in the history the earlier steps asserted against.
-var checkinBody = []byte(`{"ipv4":"203.0.113.10"}`)
+var checkinBody = []byte(`{"ipv4":"1.0.0.1"}`)
 
 // assertHMACRejections proves a real signed check-in is accepted and that each
 // of the four tampered variants is rejected, against the running server.

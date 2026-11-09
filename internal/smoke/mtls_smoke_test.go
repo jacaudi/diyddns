@@ -80,7 +80,7 @@ func TestAgentMTLSSmoke(t *testing.T) {
 	code := mintCode(t, client, baseURL, csrf)
 
 	step(t, "start two local IP providers and write the client config")
-	const reportedIP = "203.0.113.7"
+	const reportedIP = "8.8.4.4"
 	provider := func() *httptest.Server {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(reportedIP))
@@ -90,7 +90,7 @@ func TestAgentMTLSSmoke(t *testing.T) {
 	}
 	p1, p2 := provider(), provider()
 	// Quoted: an unquoted http://host:port breaks YAML flow parsing.
-	clientYAML := fmt.Sprintf("run:\n  address_families: [ipv4]\n  quorum: 2\n  providers_v4: [%q, %q]\n", p1.URL, p2.URL)
+	clientYAML := fmt.Sprintf("run:\n  ip_discovery: always\n  address_families: [ipv4]\n  quorum: 2\n  providers_v4: [%q, %q]\n", p1.URL, p2.URL)
 	clientDir := t.TempDir()
 	configPath := filepath.Join(clientDir, "client.yaml")
 	if err := os.WriteFile(configPath, []byte(clientYAML), 0o600); err != nil {
