@@ -270,16 +270,14 @@ func TestLoadOrInit_IgnoresResetLeftovers(t *testing.T) {
 
 func TestLoadOrInit_RollsForwardPendingAfterCrash(t *testing.T) {
 	st, dir := newTestStore(t), t.TempDir()
-	afterInsertHook = func() error { return errors.New("simulated crash after insert") }
-	t.Cleanup(func() { afterInsertHook = nil })
+	crash := func() error { return errors.New("simulated crash after insert") }
 
-	if _, _, err := load(t, st, dir); err == nil {
-		t.Fatal("LoadOrInit succeeded despite the crash hook")
+	if _, err := initFresh(t.Context(), st, dir, time.Now(), slog.New(slog.DiscardHandler), crash); err == nil {
+		t.Fatal("initFresh succeeded despite the crash hook")
 	}
 	if _, err := os.Stat(filepath.Join(dir, CAKeyFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ca.key exists after the simulated crash (err = %v); the hook must fire before the renames", err)
 	}
-	afterInsertHook = nil
 
 	ca, _ := mustLoad(t, st, dir)
 

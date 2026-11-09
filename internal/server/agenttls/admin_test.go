@@ -301,13 +301,11 @@ func TestPromoteBackup_RerunIsIdempotent(t *testing.T) {
 func TestPromoteBackup_CompletesAfterCrash(t *testing.T) {
 	f := newAdminFixture(t, true)
 	errCrash := errors.New("simulated crash")
-	afterPromoteTxHook = func() error { return errCrash }
-	t.Cleanup(func() { afterPromoteTxHook = nil })
+	crash := func() error { return errCrash }
 
-	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog); !errors.Is(err, errCrash) {
-		t.Fatalf("first PromoteBackup err = %v, want the simulated crash", err)
+	if _, err := promoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog, crash); !errors.Is(err, errCrash) {
+		t.Fatalf("first promoteBackup err = %v, want the simulated crash", err)
 	}
-	afterPromoteTxHook = nil
 	after, err := f.st.AgentCA().Get(t.Context())
 	if err != nil {
 		t.Fatalf("Get: %v", err)
