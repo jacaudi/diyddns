@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,5 +127,71 @@ func TestLoadClient_InsecureProvisionDefaultAndEnv(t *testing.T) {
 	}
 	if !cfg.Run.InsecureProvision {
 		t.Error("InsecureProvision with env = false, want true")
+	}
+}
+
+func TestIPDiscoveryDefaultAuto(t *testing.T) {
+	cfg, err := LoadClient(viper.New(), "")
+	if err != nil {
+		t.Fatalf("LoadClient: %v", err)
+	}
+	if cfg.Run.IPDiscovery != IPDiscoveryAuto {
+		t.Errorf("IPDiscovery = %q, want %q", cfg.Run.IPDiscovery, IPDiscoveryAuto)
+	}
+}
+
+func TestIPDiscoveryEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_RUN_IP_DISCOVERY", "always")
+	cfg, err := LoadClient(viper.New(), "")
+	if err != nil {
+		t.Fatalf("LoadClient: %v", err)
+	}
+	if cfg.Run.IPDiscovery != IPDiscoveryAlways {
+		t.Errorf("IPDiscovery = %q, want %q", cfg.Run.IPDiscovery, IPDiscoveryAlways)
+	}
+}
+
+func TestIPDiscoveryUnknownRefuses(t *testing.T) {
+	for _, bad := range []string{"on", "off", "Always"} {
+		t.Run(bad, func(t *testing.T) {
+			t.Setenv("DIYDDNS_RUN_IP_DISCOVERY", bad)
+			_, err := LoadClient(viper.New(), "")
+			if err == nil {
+				t.Fatalf("LoadClient accepted ip_discovery %q", bad)
+			}
+			for _, want := range []string{"run.ip_discovery", "auto, always, never"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestProvidersWarning(t *testing.T) {
+	tests := []struct {
+		name string
+		rc   ClientRunSection
+		want string // substring; "" means no warning
+	}{
+		{"auto with v4 providers", ClientRunSection{IPDiscovery: IPDiscoveryAuto, ProvidersV4: []string{"https://x"}}, "fallback"},
+		{"auto with v6 providers", ClientRunSection{IPDiscovery: IPDiscoveryAuto, ProvidersV6: []string{"https://x"}}, "fallback"},
+		{"never with providers", ClientRunSection{IPDiscovery: IPDiscoveryNever, ProvidersV4: []string{"https://x"}}, "ignored"},
+		{"always with providers", ClientRunSection{IPDiscovery: IPDiscoveryAlways, ProvidersV4: []string{"https://x"}}, ""},
+		{"auto without providers", ClientRunSection{IPDiscovery: IPDiscoveryAuto}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ProvidersWarning(tt.rc)
+			if tt.want == "" {
+				if got != "" {
+					t.Errorf("got %q, want no warning", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("got %q, want it to contain %q", got, tt.want)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package config_test
 import (
 	"cmp"
 	"encoding/base64"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1392,5 +1393,99 @@ func TestLoad_AgentValidation(t *testing.T) {
 func TestLoad_AgentDisabledIgnoresPublicURL(t *testing.T) {
 	if _, err := loadAgent(t, map[string]any{"agent.listen": "", "agent.public_url": "garbage"}); err != nil {
 		t.Fatalf("Load with agent disabled rejected public_url: %v", err)
+	}
+}
+
+func TestParseTrustedProxies(t *testing.T) {
+	got, err := config.ParseTrustedProxies([]string{" 10.0.0.0/8 ", "192.168.1.7", "2001:db8::1", "10.1.2.3/8"})
+	if err != nil {
+		t.Fatalf("ParseTrustedProxies: %v", err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("192.168.1.7/32"),
+		netip.MustParsePrefix("2001:db8::1/128"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	_, err = config.ParseTrustedProxies([]string{"10.0.0.0/8", "nope", "10.0.0.0/33"})
+	if err == nil {
+		t.Fatal("expected an error for unparseable entries")
+	}
+	for _, entry := range []string{`"nope"`, `"10.0.0.0/33"`} {
+		if !strings.Contains(err.Error(), entry) {
+			t.Errorf("error %q does not name %s", err, entry)
+		}
+	}
+}
+
+func TestTrustedProxiesDefaultEmpty(t *testing.T) {
+	cfg := mustLoadWithDB(t)
+	if len(cfg.Server.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies = %v, want empty", cfg.Server.TrustedProxies)
+	}
+}
+
+func TestTrustedProxiesFromEnv(t *testing.T) {
+	t.Setenv("DIYDDNS_SERVER_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.7")
+	cfg := mustLoadWithDB(t)
+	got, err := config.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		t.Fatalf("ParseTrustedProxies: %v", err)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.1.7/32")}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v (DIYDDNS_SERVER_TRUSTED_PROXIES was dropped or mis-split)", got, want)
+	}
+}
+
+func TestTrustedProxiesInvalidFailsLoad(t *testing.T) {
+	t.Setenv("DIYDDNS_SERVER_TRUSTED_PROXIES", "10.0.0.0/33")
+	_, err := loadWithDB(t)
+	if err == nil || !strings.Contains(err.Error(), "server.trusted_proxies") {
+		t.Fatalf("Load error = %v, want one naming server.trusted_proxies", err)
+	}
+}
+
+func TestTrustedProxiesWarning(t *testing.T) {
+	tests := []struct {
+		name    string
+		proxies []string
+		want    string // substring; "" means no warning
+	}{
+		{"zero prefix v4", []string{"0.0.0.0/0"}, "0.0.0.0/0"},
+		{"zero prefix v6", []string{"::/0"}, "::/0"},
+		{"4-in-6 prefix", []string{"::ffff:10.0.0.0/104"}, "::ffff:10.0.0.0/104"},
+		{"ordinary prefix", []string{"10.0.0.0/8"}, ""},
+		{"none", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg config.Server
+			cfg.Server.TrustedProxies = tt.proxies
+			got := config.TrustedProxiesWarning(cfg)
+			if tt.want == "" {
+				if got != "" {
+					t.Errorf("got %q, want no warning", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("got %q, want it to contain %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentProxyProtocol(t *testing.T) {
+	if cfg := mustLoadWithDB(t); cfg.Agent.ProxyProtocol {
+		t.Error("Agent.ProxyProtocol default = true, want false")
+	}
+	t.Setenv("DIYDDNS_AGENT_PROXY_PROTOCOL", "true")
+	if cfg := mustLoadWithDB(t); !cfg.Agent.ProxyProtocol {
+		t.Error("Agent.ProxyProtocol with env = false, want true")
 	}
 }
