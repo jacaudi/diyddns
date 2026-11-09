@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,37 +21,28 @@ import (
 // makes an expected NotBefore/NotAfter differ from the certificate's.
 var servingNow = time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 
-// newServing builds a ServingCert and returns it with the log it wrote.
-func newServing(t *testing.T, dir, host string, ca *CA, now time.Time) (*ServingCert, string) {
+// newServing runs LoadOrIssueServingCert and returns the served leaf with the
+// log it wrote.
+func newServing(t *testing.T, dir, host string, ca *CA, now time.Time) (*x509.Certificate, string) {
 	t.Helper()
 	var buf bytes.Buffer
-	s, err := NewServingCert(dir, host, ca, now, slog.New(slog.NewJSONHandler(&buf, nil)))
+	cert, err := LoadOrIssueServingCert(dir, host, ca, now, slog.New(slog.NewJSONHandler(&buf, nil)))
 	if err != nil {
-		t.Fatalf("NewServingCert: %v", err)
+		t.Fatalf("LoadOrIssueServingCert: %v", err)
 	}
-	return s, buf.String()
+	if cert.Leaf == nil {
+		t.Fatal("LoadOrIssueServingCert returned a certificate without Leaf set")
+	}
+	return cert.Leaf, buf.String()
 }
 
-func servedLeaf(t *testing.T, s *ServingCert) *x509.Certificate {
-	t.Helper()
-	cert, err := s.GetCertificate(nil)
-	if err != nil {
-		t.Fatalf("GetCertificate: %v", err)
-	}
-	if cert == nil || cert.Leaf == nil {
-		t.Fatalf("GetCertificate returned %v, want a certificate with Leaf set", cert)
-	}
-	return cert.Leaf
-}
-
-func TestNewServingCert_IssuesWhenMissing(t *testing.T) {
+func TestLoadOrIssueServingCert_IssuesWhenMissing(t *testing.T) {
 	dir, ca := t.TempDir(), testCA(t, servingNow)
 
-	s, log := newServing(t, dir, "ddns.example.com", ca, servingNow)
+	leaf, log := newServing(t, dir, "ddns.example.com", ca, servingNow)
 
 	assertMode0600(t, filepath.Join(dir, AgentCertFile))
 	assertMode0600(t, filepath.Join(dir, AgentKeyFile))
-	leaf := servedLeaf(t, s)
 	if !slices.Equal(leaf.DNSNames, []string{"ddns.example.com"}) {
 		t.Errorf("DNSNames = %v, want [ddns.example.com]", leaf.DNSNames)
 	}
@@ -65,8 +55,9 @@ func TestNewServingCert_IssuesWhenMissing(t *testing.T) {
 	if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || pub.Curve != elliptic.P256() {
 		t.Errorf("public key = %T, want ECDSA P-256", leaf.PublicKey)
 	}
-	if want := servingNow.AddDate(1, 0, 0); !leaf.NotAfter.Equal(want) {
-		t.Errorf("NotAfter = %v, want %v", leaf.NotAfter, want)
+	// Valid for the CA's lifetime: nothing renews it at runtime (#2).
+	if want := ca.Active.NotAfter; !leaf.NotAfter.Equal(want) {
+		t.Errorf("NotAfter = %v, want the active CA's %v", leaf.NotAfter, want)
 	}
 	if want := servingNow.Add(-time.Hour); !leaf.NotBefore.Equal(want) {
 		t.Errorf("NotBefore = %v, want %v", leaf.NotBefore, want)
@@ -96,10 +87,9 @@ func TestNewServingCert_IssuesWhenMissing(t *testing.T) {
 	}
 }
 
-func TestNewServingCert_IPHostUsesIPSAN(t *testing.T) {
-	s, _ := newServing(t, t.TempDir(), "192.0.2.1", testCA(t, servingNow), servingNow)
+func TestLoadOrIssueServingCert_IPHostUsesIPSAN(t *testing.T) {
+	leaf, _ := newServing(t, t.TempDir(), "192.0.2.1", testCA(t, servingNow), servingNow)
 
-	leaf := servedLeaf(t, s)
 	if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.ParseIP("192.0.2.1")) {
 		t.Errorf("IPAddresses = %v, want [192.0.2.1]", leaf.IPAddresses)
 	}
@@ -108,14 +98,14 @@ func TestNewServingCert_IPHostUsesIPSAN(t *testing.T) {
 	}
 }
 
-func TestNewServingCert_EmptyHostRejected(t *testing.T) {
-	_, err := NewServingCert(t.TempDir(), "", testCA(t, servingNow), servingNow, slog.New(slog.DiscardHandler))
+func TestLoadOrIssueServingCert_EmptyHostRejected(t *testing.T) {
+	_, err := LoadOrIssueServingCert(t.TempDir(), "", testCA(t, servingNow), servingNow, slog.New(slog.DiscardHandler))
 	if err == nil {
-		t.Fatal("NewServingCert with empty host: nil error, want one (a certificate with no SAN verifies for nobody)")
+		t.Fatal("LoadOrIssueServingCert with empty host: nil error, want one (a certificate with no SAN verifies for nobody)")
 	}
 }
 
-func TestNewServingCert_ReusesValid(t *testing.T) {
+func TestLoadOrIssueServingCert_ReusesValid(t *testing.T) {
 	dir, ca := t.TempDir(), testCA(t, servingNow)
 	first, _ := newServing(t, dir, "ddns.example.com", ca, servingNow)
 	crt := mustRead(t, filepath.Join(dir, AgentCertFile))
@@ -123,7 +113,7 @@ func TestNewServingCert_ReusesValid(t *testing.T) {
 
 	second, log := newServing(t, dir, "ddns.example.com", ca, servingNow.Add(24*time.Hour))
 
-	if got, want := servedLeaf(t, second).SerialNumber, servedLeaf(t, first).SerialNumber; got.Cmp(want) != 0 {
+	if got, want := second.SerialNumber, first.SerialNumber; got.Cmp(want) != 0 {
 		t.Errorf("serial = %v, want the unchanged %v", got, want)
 	}
 	if !bytes.Equal(mustRead(t, filepath.Join(dir, AgentCertFile)), crt) {
@@ -137,7 +127,7 @@ func TestNewServingCert_ReusesValid(t *testing.T) {
 	}
 }
 
-func TestNewServingCert_CorruptPairIsReissued(t *testing.T) {
+func TestLoadOrIssueServingCert_CorruptPairIsReissued(t *testing.T) {
 	dir, ca := t.TempDir(), testCA(t, servingNow)
 	for _, name := range []string{AgentCertFile, AgentKeyFile} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("not pem"), 0o600); err != nil {
@@ -145,9 +135,9 @@ func TestNewServingCert_CorruptPairIsReissued(t *testing.T) {
 		}
 	}
 
-	s, log := newServing(t, dir, "ddns.example.com", ca, servingNow)
+	leaf, log := newServing(t, dir, "ddns.example.com", ca, servingNow)
 
-	if got := servedLeaf(t, s).DNSNames; !slices.Equal(got, []string{"ddns.example.com"}) {
+	if got := leaf.DNSNames; !slices.Equal(got, []string{"ddns.example.com"}) {
 		t.Errorf("DNSNames = %v, want a fresh cert for ddns.example.com", got)
 	}
 	var warned bool
@@ -165,11 +155,11 @@ func TestNewServingCert_CorruptPairIsReissued(t *testing.T) {
 func TestNeedsReissue(t *testing.T) {
 	ca := testCA(t, servingNow)
 	other := testCA(t, servingNow)
-	leaf := func(signer *CA, san string, remaining time.Duration) *x509.Certificate {
+	leaf := func(signer *CA, san string, notAfter time.Time) *x509.Certificate {
 		return signLeaf(t, signer.Active, signer.ActiveKey, &x509.Certificate{
 			DNSNames:    []string{san},
 			NotBefore:   servingNow.Add(-time.Hour),
-			NotAfter:    servingNow.Add(remaining),
+			NotAfter:    notAfter,
 			KeyUsage:    x509.KeyUsageDigitalSignature,
 			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		})
@@ -180,13 +170,12 @@ func TestNeedsReissue(t *testing.T) {
 		leaf *x509.Certificate
 		want bool
 	}{
-		{"59 days left", leaf(ca, host, 59*24*time.Hour), true},
-		{"one second under 60 days", leaf(ca, host, RenewBefore-time.Second), true},
-		{"exactly 60 days", leaf(ca, host, RenewBefore), false},
-		{"61 days left", leaf(ca, host, 61*24*time.Hour), false},
-		{"SAN differs", leaf(ca, "old.example.com", 200*24*time.Hour), true},
-		{"signed by another CA", leaf(other, host, 200*24*time.Hour), true},
-		{"matching SAN, chained, ample validity", leaf(ca, host, 200*24*time.Hour), false},
+		{"one-year leaf from before #2", leaf(ca, host, servingNow.AddDate(1, 0, 0)), true},
+		{"one second short of the CA", leaf(ca, host, ca.Active.NotAfter.Add(-time.Second)), true},
+		{"expired", leaf(ca, host, servingNow.Add(-time.Minute)), true},
+		{"SAN differs", leaf(ca, "old.example.com", ca.Active.NotAfter), true},
+		{"signed by another CA", leaf(other, host, other.Active.NotAfter), true},
+		{"matching SAN, chained, expires with the CA", leaf(ca, host, ca.Active.NotAfter), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,8 +189,8 @@ func TestNeedsReissue(t *testing.T) {
 func TestNeedsReissue_HostKindChanges(t *testing.T) {
 	ca := testCA(t, servingNow)
 	issue := func(host string) *x509.Certificate {
-		s, _ := newServing(t, t.TempDir(), host, ca, servingNow)
-		return servedLeaf(t, s)
+		leaf, _ := newServing(t, t.TempDir(), host, ca, servingNow)
+		return leaf
 	}
 	if !needsReissue(issue("192.0.2.1"), "ddns.example.com", ca.Active, servingNow) {
 		t.Error("IP-SAN cert kept for a DNS host")
@@ -214,98 +203,39 @@ func TestNeedsReissue_HostKindChanges(t *testing.T) {
 	}
 }
 
-func TestNewServingCert_ReissuesWhenHostChanges(t *testing.T) {
+func TestLoadOrIssueServingCert_ReissuesWhenHostChanges(t *testing.T) {
 	dir, ca := t.TempDir(), testCA(t, servingNow)
 	first, _ := newServing(t, dir, "old.example.com", ca, servingNow)
 
 	second, _ := newServing(t, dir, "new.example.com", ca, servingNow)
 
-	if servedLeaf(t, second).SerialNumber.Cmp(servedLeaf(t, first).SerialNumber) == 0 {
+	if second.SerialNumber.Cmp(first.SerialNumber) == 0 {
 		t.Error("serial unchanged after the host changed")
 	}
-	if !slices.Equal(servedLeaf(t, second).DNSNames, []string{"new.example.com"}) {
-		t.Errorf("DNSNames = %v, want [new.example.com]", servedLeaf(t, second).DNSNames)
+	if !slices.Equal(second.DNSNames, []string{"new.example.com"}) {
+		t.Errorf("DNSNames = %v, want [new.example.com]", second.DNSNames)
 	}
 }
 
-func TestRefresh_SwapsWithoutRestart(t *testing.T) {
-	dir, ca := t.TempDir(), testCA(t, servingNow)
-	s, _ := newServing(t, dir, "ddns.example.com", ca, servingNow)
-	before, err := s.GetCertificate(nil)
-	if err != nil {
-		t.Fatalf("GetCertificate: %v", err)
-	}
-	keyBefore := mustRead(t, filepath.Join(dir, AgentKeyFile))
+// A promote-backup or reset changes the active CA while the server is stopped;
+// the next start must replace a leaf the new CA did not sign.
+func TestLoadOrIssueServingCert_ReissuesWhenCAChanges(t *testing.T) {
+	dir := t.TempDir()
+	first, _ := newServing(t, dir, "ddns.example.com", testCA(t, servingNow), servingNow)
+	next := testCA(t, servingNow)
 
-	reissued, err := s.Refresh(servingNow.AddDate(0, 11, 0))
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if !reissued {
-		t.Fatal("Refresh = false, want true with ~1 month of validity left")
-	}
+	second, _ := newServing(t, dir, "ddns.example.com", next, servingNow.Add(24*time.Hour))
 
-	after, err := s.GetCertificate(nil)
-	if err != nil {
-		t.Fatalf("GetCertificate after Refresh: %v", err)
+	if second.SerialNumber.Cmp(first.SerialNumber) == 0 {
+		t.Error("serial unchanged after the active CA changed")
 	}
-	if after.Leaf.SerialNumber.Cmp(before.Leaf.SerialNumber) == 0 {
-		t.Error("served serial unchanged after re-issue")
+	roots := x509.NewCertPool()
+	roots.AddCert(next.Active)
+	if _, err := second.Verify(x509.VerifyOptions{
+		Roots:       roots,
+		CurrentTime: servingNow.Add(24 * time.Hour),
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Errorf("re-issued leaf does not verify against the new active CA: %v", err)
 	}
-	oldKey, _ := before.PrivateKey.(*ecdsa.PrivateKey)
-	newKey, _ := after.PrivateKey.(*ecdsa.PrivateKey)
-	if oldKey == nil || newKey == nil || oldKey.Equal(newKey) {
-		t.Error("private key was not freshly generated on re-issue")
-	}
-	if bytes.Equal(mustRead(t, filepath.Join(dir, AgentKeyFile)), keyBefore) {
-		t.Error("agent.key bytes unchanged after re-issue")
-	}
-	assertMode0600(t, filepath.Join(dir, AgentKeyFile))
-	assertMode0600(t, filepath.Join(dir, AgentCertFile))
-}
-
-func TestRefresh_NoopWhenValid(t *testing.T) {
-	s, _ := newServing(t, t.TempDir(), "ddns.example.com", testCA(t, servingNow), servingNow)
-
-	reissued, err := s.Refresh(servingNow.AddDate(0, 1, 0))
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if reissued {
-		t.Error("Refresh = true, want false with 11 months of validity left")
-	}
-}
-
-func TestRefresh_ConcurrentGetCertificate(t *testing.T) {
-	s, _ := newServing(t, t.TempDir(), "ddns.example.com", testCA(t, servingNow), servingNow)
-
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Go(func() {
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				cert, err := s.GetCertificate(nil)
-				if err != nil || cert == nil {
-					t.Errorf("GetCertificate = (%v, %v), want a certificate", cert, err)
-					return
-				}
-			}
-		})
-	}
-	// Each step is a further 11 months out, so every Refresh finds <60 days
-	// left on what the previous one issued and re-issues.
-	at := servingNow
-	for range 3 {
-		at = at.AddDate(0, 11, 0)
-		if reissued, err := s.Refresh(at); err != nil || !reissued {
-			t.Errorf("Refresh(%v) = (%v, %v), want (true, nil)", at, reissued, err)
-		}
-	}
-	close(stop)
-	wg.Wait()
 }
