@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,21 +36,20 @@ const (
 	eventReset          = "agent_ca.reset"
 )
 
+// noLocalBackupKeyMsg is logged when a rerun restored ca.key and no
+// ca-backup.key is in the dir: without the offline copy, a new backup CA
+// needs "ca reset".
+const noLocalBackupKeyMsg = "no " + CABackupKeyFile + " in agent.tls.dir: the recorded backup CA's key must exist offline; " +
+	`without it a new backup CA requires "diyddns-server ca reset"`
+
 // PromoteResult reports what PromoteBackup did.
 type PromoteResult struct {
-	// AlreadyPromoted is true when the supplied key already is the active CA's:
-	// an earlier run committed, so this one only finished its leftovers.
-	AlreadyPromoted bool
+	// Notes say, one operator-facing line each, what a rerun found and did;
+	// empty on the run that promotes.
+	Notes []string
 	// NewBackupKeyPath is where a new ca-backup.key was installed by this call
 	// and must be moved offline; empty when none was.
 	NewBackupKeyPath string
-	// ActiveKeyRestored is true when a rerun found ca.key missing or not the
-	// active CA's and wrote the supplied key there.
-	ActiveKeyRestored bool
-	// NoLocalBackupKey is true when ActiveKeyRestored and no ca-backup.key is in
-	// the dir: the recorded backup CA's key must exist offline, since without
-	// it a new backup CA needs "ca reset".
-	NoLocalBackupKey bool
 }
 
 // PromoteBackup makes the backup CA the active one. backupKeyPath is the
@@ -64,7 +64,7 @@ type PromoteResult struct {
 // the next start issues them from the new active CA, then write the audit
 // entry. Re-running with the same key after any interruption finishes the
 // leftovers and exits cleanly.
-func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath string, now time.Time) (res PromoteResult, err error) {
+func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath string, now time.Time, log *slog.Logger) (res PromoteResult, err error) {
 	lock, err := AcquireLock(dir)
 	if err != nil {
 		return PromoteResult{}, err
@@ -86,7 +86,7 @@ func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath stri
 
 	switch {
 	case key.PublicKey.Equal(active.PublicKey):
-		return finishPromotion(ctx, st, dir, active, backup, key)
+		return finishPromotion(ctx, st, dir, active, backup, key, log)
 	case !key.PublicKey.Equal(backup.PublicKey):
 		return PromoteResult{}, fmt.Errorf("%w: %s", ErrBackupKeyMismatch, backupKeyPath)
 	}
@@ -138,7 +138,7 @@ func installAndAudit(ctx context.Context, st *store.Store, dir string, active, b
 // restores ca.key from the supplied key (which is the active CA's) when the
 // volume lost or replaced it after the transaction committed; startup would
 // otherwise refuse under rule 2 and point back at this command.
-func finishPromotion(ctx context.Context, st *store.Store, dir string, active, backup *x509.Certificate, key *ecdsa.PrivateKey) (PromoteResult, error) {
+func finishPromotion(ctx context.Context, st *store.Store, dir string, active, backup *x509.Certificate, key *ecdsa.PrivateKey, log *slog.Logger) (PromoteResult, error) {
 	rolledActive, rolledBackup, err := rollBoth(dir, active, backup)
 	if err != nil {
 		return PromoteResult{}, err
@@ -146,13 +146,21 @@ func finishPromotion(ctx context.Context, st *store.Store, dir string, active, b
 	if err := removeAgentFiles(dir); err != nil {
 		return PromoteResult{}, err
 	}
-	res := PromoteResult{AlreadyPromoted: true}
-	if res.ActiveKeyRestored, err = restoreActiveKey(dir, key); err != nil {
+	restored, err := restoreActiveKey(dir, key)
+	if err != nil {
 		return PromoteResult{}, err
 	}
-	if res.ActiveKeyRestored {
-		_, statErr := os.Stat(filepath.Join(dir, CABackupKeyFile))
-		res.NoLocalBackupKey = errors.Is(statErr, fs.ErrNotExist)
+	var res PromoteResult
+	switch {
+	case restored:
+		res.Notes = []string{"Backup CA already promoted.", fmt.Sprintf("Restored %s from --backup-key.", filepath.Join(dir, CAKeyFile))}
+		if _, statErr := os.Stat(filepath.Join(dir, CABackupKeyFile)); errors.Is(statErr, fs.ErrNotExist) {
+			log.Warn(noLocalBackupKeyMsg, "dir", dir)
+		}
+	case rolledBackup:
+		res.Notes = []string{"Backup CA already promoted."}
+	default:
+		res.Notes = []string{"Backup CA already promoted; nothing to do."}
 	}
 	if rolledBackup {
 		res.NewBackupKeyPath = filepath.Join(dir, CABackupKeyFile)
