@@ -6,13 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/pires/go-proxyproto"
+
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/server/agenttls"
+	"github.com/jacaudi/diyddns/internal/server/clientip"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -104,4 +109,25 @@ func buildAgentServer(cfg config.Server, h http.Handler, stack *agentStack, log 
 			Certificates: []tls.Certificate{stack.serving},
 		},
 	}
+}
+
+// agentListener binds addr and, when proxyProtocol is on, wraps it so a peer in
+// trusted must open each connection with a PROXY protocol header, which sets
+// that connection's RemoteAddr to the origin it names. Any other peer's header
+// is read and discarded (clientip.ProxyPolicy).
+//
+// The order is load-bearing: the wrapped listener goes to ServeTLS, which puts
+// TLS on top of it, so the header is read in the clear before the handshake.
+// Wrapping a TLS listener instead hands net/http a connection that is not a
+// *tls.Conn and leaves r.TLS nil. With proxyProtocol off the listener is
+// exactly what ListenAndServeTLS would have bound.
+func agentListener(addr string, proxyProtocol bool, trusted []netip.Prefix) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if !proxyProtocol {
+		return ln, nil
+	}
+	return &proxyproto.Listener{Listener: ln, ConnPolicy: clientip.ProxyPolicy(trusted)}, nil
 }

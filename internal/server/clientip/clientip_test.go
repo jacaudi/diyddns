@@ -2,10 +2,13 @@ package clientip_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
+
+	"github.com/pires/go-proxyproto"
 
 	"github.com/jacaudi/diyddns/internal/server/clientip"
 )
@@ -150,5 +153,40 @@ func TestObservationRoundTrip(t *testing.T) {
 	ctx := clientip.WithObservation(t.Context(), want)
 	if got := clientip.ObservationFrom(ctx); got != want {
 		t.Errorf("ObservationFrom = %+v, want %+v", got, want)
+	}
+}
+
+// stringAddr is a net.Addr whose String is exactly the text given, so a
+// bracketed 4-in-6 upstream reaches ProxyPolicy as a dual-stack listener would
+// report it.
+type stringAddr string
+
+func (stringAddr) Network() string  { return "tcp" }
+func (a stringAddr) String() string { return string(a) }
+
+func TestProxyPolicy(t *testing.T) {
+	loopback := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	tests := []struct {
+		name     string
+		upstream net.Addr
+		trusted  []netip.Prefix
+		want     proxyproto.Policy
+	}{
+		{"trusted upstream must send a header", stringAddr("127.0.0.1:1"), loopback, proxyproto.REQUIRE},
+		{"untrusted upstream has its header ignored", stringAddr("127.0.0.1:1"), trusted10, proxyproto.IGNORE},
+		{"4-in-6 upstream is unmapped before the trust check", stringAddr("[::ffff:127.0.0.1]:1"), loopback, proxyproto.REQUIRE},
+		{"empty list ignores every header", stringAddr("127.0.0.1:1"), nil, proxyproto.IGNORE},
+		{"unparseable upstream is untrusted", stringAddr("not-an-address"), loopback, proxyproto.IGNORE},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := clientip.ProxyPolicy(tt.trusted)(proxyproto.ConnPolicyOptions{Upstream: tt.upstream})
+			if err != nil {
+				t.Fatalf("ProxyPolicy: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ProxyPolicy(%s) = %v, want %v", tt.upstream, got, tt.want)
+			}
+		})
 	}
 }

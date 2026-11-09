@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+
+	"github.com/pires/go-proxyproto"
 )
 
 // Trusted reports whether a is inside any prefix of list. a is normalized
@@ -106,4 +108,23 @@ func WithObservation(ctx context.Context, o Observation) context.Context {
 func ObservationFrom(ctx context.Context) Observation {
 	o, _ := ctx.Value(ctxKey{}).(Observation)
 	return o
+}
+
+// ProxyPolicy decides, per accepted connection, how a PROXY protocol listener
+// treats the header. A trusted upstream is a proxy and must send one
+// (REQUIRE: a missing header drops the connection); every other peer has any
+// header it sends consumed and discarded (IGNORE), so a direct client cannot
+// claim another address. It is deliberately not
+// proxyproto.TrustProxyHeaderFromRanges, which drops every peer outside the
+// trusted set and so would lock out agents that connect directly. An upstream
+// that is not an IP:port (a unix socket) is untrusted.
+func ProxyPolicy(trusted []netip.Prefix) proxyproto.ConnPolicyFunc {
+	return func(o proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+		if o.Upstream != nil {
+			if ap, err := netip.ParseAddrPort(o.Upstream.String()); err == nil && Trusted(ap.Addr(), trusted) {
+				return proxyproto.REQUIRE, nil
+			}
+		}
+		return proxyproto.IGNORE, nil
+	}
 }

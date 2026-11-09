@@ -125,6 +125,10 @@ type Server struct {
 	hub         *feed.Hub      // always non-nil; closes live streams on shutdown
 	retention   config.RetentionSection
 	sweeper     *sweeper // nil unless the #127 policy is on (buildSweeper's gate); nil-guarded by runPruner
+
+	// trusted and proxyProtocol configure the agent listener's PROXY v2 wrap in Run.
+	trusted       []netip.Prefix
+	proxyProtocol bool
 }
 
 // buildMux assembles the outer ServeMux — the JSON API, the agent routes, the
@@ -146,6 +150,8 @@ type Server struct {
 // buildMux wires the device-certificate service and advertises the agent URL;
 // RequireMTLS follows cfg either way.
 //
+// trusted is the parsed server.trusted_proxies, handed to the API dependencies.
+//
 // It also returns the #127 staleness sweeper, nil unless cfg.Feed.ExpiryEnabled()
 // (see buildSweeper's gate); handler threads it through to New, which hands it
 // to runPruner.
@@ -155,26 +161,13 @@ type Server struct {
 // devices but can never verify their signed requests is worse than one that
 // refuses to start. Likewise, if OIDC is enabled AND required, a failed
 // discovery attempt at startup also fails closed.
-func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls.CA) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, *sweeper, error) {
+func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls.CA, trusted []netip.Prefix) (*http.ServeMux, *oidc.Manager, api.ServerDeps, webui.Deps, []netip.Prefix, *feed.Hub, *sweeper, error) {
 	key, err := config.DecodeSecretKey(cfg.Auth.HMAC.SecretKey)
 	if err != nil {
 		return nil, nil, api.ServerDeps{}, webui.Deps{}, nil, nil, nil, fmt.Errorf("server: %w", err)
 	}
 
-	// A warning, not a fail-closed: the operator may be terminating TLS in
-	// front of a base_url that does not say so. But if they are not, every
-	// login silently loses its cookie and the UI blames the account (#39), so
-	// say it at boot where it can still be acted on.
-	if w := config.InsecureCookieWarning(cfg); w != "" {
-		log.LogAttrs(context.Background(), slog.LevelWarn, w)
-	}
-	// Same rationale as InsecureCookieWarning immediately above: a broad
-	// allowed_private_cidrs entry is a valid operator choice, not a startup
-	// failure, but it re-opens a whole address family and deserves saying so
-	// where it can still be acted on.
-	if w := config.NotificationsEgressWarning(cfg); w != "" {
-		log.LogAttrs(context.Background(), slog.LevelWarn, w)
-	}
+	logStartupWarnings(cfg, log)
 
 	// config.validateNotifications already rejected malformed entries at
 	// startup; this is belt-and-braces on the same values, and fails closed
@@ -298,10 +291,11 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 		Cfg:         cfg.Auth,
 		Info:        version.Current(),
 
-		Feed:        feedSvc,
-		FeedEnabled: cfg.Feed.Enabled,
-		APIKeys:     apiKeySvc,
-		RequireMTLS: cfg.Agent.RequireMTLS,
+		Feed:           feedSvc,
+		FeedEnabled:    cfg.Feed.Enabled,
+		APIKeys:        apiKeySvc,
+		RequireMTLS:    cfg.Agent.RequireMTLS,
+		TrustedProxies: trusted,
 	}
 	if ca != nil {
 		apiDeps.Cert = service.NewCertService(st, ca, cfg.Agent.PublicURL, audit)
@@ -341,6 +335,31 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 	registerFeed(mux, cfg, st, feedSvc, hub, log)
 
 	return mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, sw, nil
+}
+
+// logStartupWarnings logs the config postures that are valid choices but
+// almost certainly mistakes, at boot where they can still be acted on. They are
+// warnings, not startup failures. Extracted out of buildMux to keep its
+// cyclomatic complexity under the gocyclo ceiling.
+func logStartupWarnings(cfg config.Server, log *slog.Logger) {
+	// The operator may be terminating TLS in front of a base_url that does not
+	// say so. But if they are not, every login silently loses its cookie and the
+	// UI blames the account (#39).
+	if w := config.InsecureCookieWarning(cfg); w != "" {
+		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+	// Same rationale as InsecureCookieWarning immediately above: a broad
+	// allowed_private_cidrs entry is a valid operator choice, not a startup
+	// failure, but it re-opens a whole address family and deserves saying so
+	// where it can still be acted on.
+	if w := config.NotificationsEgressWarning(cfg); w != "" {
+		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
+	// Same rationale again: a zero-length trusted_proxies prefix lets any client
+	// forge its observed address.
+	if w := config.TrustedProxiesWarning(cfg); w != "" {
+		log.LogAttrs(context.Background(), slog.LevelWarn, w)
+	}
 }
 
 // buildFanout constructs the stream hub and the notifier seams buildMux hands
@@ -444,9 +463,9 @@ func registerFeed(mux *http.ServeMux, cfg config.Server, st *store.Store, feedAu
 //
 // The second return is the agent listener's handler: the agent mux behind
 // api.ClientCertMiddleware inside the same middleware chain. It is nil when ca
-// is nil (agent listener disabled).
-func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments, ca *agenttls.CA) (http.Handler, http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, *sweeper, error) {
-	mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log, ca)
+// is nil (agent listener disabled). trusted is the parsed server.trusted_proxies.
+func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments, ca *agenttls.CA, trusted []netip.Prefix) (http.Handler, http.Handler, *oidc.Manager, []netip.Prefix, *feed.Hub, *sweeper, error) {
+	mux, oidcMgr, apiDeps, webDeps, allowedPrivateCIDRs, hub, sw, err := buildMux(cfg, st, log, ca, trusted)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, err
 	}
@@ -504,9 +523,14 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 // stream hub beside it. Exported for black-box testing via httptest: the hub
 // lets a test revoke a token's streams or drive Shutdown, which no HTTP
 // route can. The OIDC manager and sweeper are only needed by New/Run, so this
-// discards them.
+// discards them. It returns the error ParseTrustedProxies reports for
+// server.trusted_proxies.
 func Handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments) (http.Handler, *feed.Hub, error) {
-	h, _, _, _, hub, _, err := handler(cfg, st, log, inst, nil)
+	trusted, err := config.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		return nil, nil, fmt.Errorf("server: parse trusted_proxies: %w", err)
+	}
+	h, _, _, _, hub, _, err := handler(cfg, st, log, inst, nil, trusted)
 	return h, hub, err
 }
 
@@ -536,11 +560,16 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 		ca = stack.ca
 	}
 
+	trusted, err := config.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("server: parse trusted_proxies: %w", err)
+	}
+
 	// allowedPrivateCIDRs is parsed once inside handler->buildMux and returned
 	// here rather than re-parsed: commit 74930fa claimed this reuse without
 	// actually doing it (New called notify.ParseAllowed a second time on the
 	// same config value), so this is now the genuine single call.
-	h, agentHandler, mgr, allowedPrivateCIDRs, hub, sw, err := handler(cfg, st, log, inst, ca)
+	h, agentHandler, mgr, allowedPrivateCIDRs, hub, sw, err := handler(cfg, st, log, inst, ca, trusted)
 	if err != nil {
 		return nil, err
 	}
@@ -566,15 +595,17 @@ func New(cfg config.Server, st *store.Store, log *slog.Logger, inst Instruments)
 			Handler:           h,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		agentServer: buildAgentServer(cfg, agentHandler, stack, log),
-		agent:       stack,
-		log:         log,
-		st:          st,
-		oidcMgr:     mgr,
-		notifier:    notifier,
-		hub:         hub,
-		retention:   cfg.Retention,
-		sweeper:     sw,
+		agentServer:   buildAgentServer(cfg, agentHandler, stack, log),
+		agent:         stack,
+		log:           log,
+		st:            st,
+		oidcMgr:       mgr,
+		notifier:      notifier,
+		hub:           hub,
+		retention:     cfg.Retention,
+		sweeper:       sw,
+		trusted:       trusted,
+		proxyProtocol: cfg.Agent.ProxyProtocol,
 	}, nil
 }
 
@@ -597,7 +628,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.agentServer != nil {
 		go func() {
 			s.log.LogAttrs(ctx, slog.LevelInfo, "agent listener", slog.String("addr", s.agentServer.Addr))
-			reportListen(errCh, s.agentServer.ListenAndServeTLS("", ""))
+			ln, err := agentListener(s.agentServer.Addr, s.proxyProtocol, s.trusted)
+			if err != nil {
+				reportListen(errCh, err)
+				return
+			}
+			reportListen(errCh, s.agentServer.ServeTLS(ln, "", ""))
 		}()
 	}
 	go runPruner(ctx, s.st, s.retention, s.sweeper, s.log)
