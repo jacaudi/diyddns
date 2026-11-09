@@ -343,7 +343,13 @@ func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersio
 // common case.
 // Returns ErrNotFound if no row matched.
 func (r *DeviceRepo) Touch(ctx context.Context, id string, v4Asserted, v6Asserted bool, lastSeenAt int64) error {
-	res, err := r.db.ExecContext(ctx,
+	return touchDevice(ctx, r.db, id, v4Asserted, v6Asserted, lastSeenAt)
+}
+
+// touchDevice carries the Touch UPDATE itself. Runs on the pool for Touch and
+// on the transaction for RecordIPChange.
+func touchDevice(ctx context.Context, ex execer, id string, v4Asserted, v6Asserted bool, lastSeenAt int64) error {
+	res, err := ex.ExecContext(ctx,
 		`UPDATE devices
 		 SET last_seen_at = ?, updated_at = ?,
 		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
