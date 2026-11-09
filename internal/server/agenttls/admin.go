@@ -23,11 +23,6 @@ import (
 // recorded backup CA's key nor, for a rerun, the recorded active CA's key.
 var ErrBackupKeyMismatch = errors.New("agenttls: backup key does not match the recorded backup CA")
 
-// afterPromoteTxHook is a test seam: it runs after the promotion transaction
-// commits and before the key files are renamed into place, to simulate a
-// crash there.
-var afterPromoteTxHook func() error
-
 // Audit identity of the one agent_ca row; both operator commands write it.
 const (
 	auditTargetType     = "agent_ca"
@@ -64,7 +59,14 @@ type PromoteResult struct {
 // the next start issues them from the new active CA, then write the audit
 // entry. Re-running with the same key after any interruption finishes the
 // leftovers and exits cleanly.
-func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath string, now time.Time, log *slog.Logger) (res PromoteResult, err error) {
+func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath string, now time.Time, log *slog.Logger) (PromoteResult, error) {
+	return promoteBackup(ctx, st, dir, backupKeyPath, now, log, nil)
+}
+
+// promoteBackup is PromoteBackup with afterTx, nil in production, which runs
+// after the promotion transaction commits and before the key files are renamed
+// into place, so a test can simulate a crash there.
+func promoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath string, now time.Time, log *slog.Logger, afterTx func() error) (res PromoteResult, err error) {
 	lock, err := AcquireLock(dir)
 	if err != nil {
 		return PromoteResult{}, err
@@ -104,8 +106,8 @@ func PromoteBackup(ctx context.Context, st *store.Store, dir, backupKeyPath stri
 	if err := st.AgentCA().Promote(ctx, store.AgentCA{ActiveDER: rec.BackupDER, BackupDER: newBackup.Raw}); err != nil {
 		return PromoteResult{}, fmt.Errorf("agenttls: record promoted agent CA: %w", err)
 	}
-	if afterPromoteTxHook != nil {
-		if err := afterPromoteTxHook(); err != nil {
+	if afterTx != nil {
+		if err := afterTx(); err != nil {
 			return PromoteResult{}, err
 		}
 	}

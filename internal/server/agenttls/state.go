@@ -25,10 +25,6 @@ var (
 	ErrUnrecordedFiles = errors.New("agenttls: CA files present but no CA recorded in the database")
 )
 
-// afterInsertHook is a test seam: it runs after the CA row is committed and
-// before the key files are renamed into place, to simulate a crash there.
-var afterInsertHook func() error
-
 // LoadOrInit applies the startup rules for the agent CA in dir:
 //
 //  1. a CA is recorded and ca.key matches it: use it;
@@ -47,7 +43,7 @@ func LoadOrInit(ctx context.Context, st *store.Store, dir string, now time.Time,
 	case err == nil:
 		return loadRecorded(dir, rec, log)
 	case errors.Is(err, store.ErrNotFound):
-		return initFresh(ctx, st, dir, now, log)
+		return initFresh(ctx, st, dir, now, log, nil)
 	default:
 		return nil, fmt.Errorf("agenttls: read recorded agent CA: %w", err)
 	}
@@ -108,8 +104,10 @@ func errCAMissing(dir, keyPath string, cause error) error {
 
 // initFresh is startup rules 4 and 3: refuse on stray files, otherwise
 // generate both CAs. All crypto runs before the single Insert, so no
-// transaction is open while keys are generated.
-func initFresh(ctx context.Context, st *store.Store, dir string, now time.Time, log *slog.Logger) (*CA, error) {
+// transaction is open while keys are generated. afterInsert, nil in
+// production, runs after the CA row is committed and before the key files are
+// renamed into place, so a test can simulate a crash there.
+func initFresh(ctx context.Context, st *store.Store, dir string, now time.Time, log *slog.Logger, afterInsert func() error) (*CA, error) {
 	stray, err := unrecordedFiles(dir)
 	if err != nil {
 		return nil, err
@@ -138,8 +136,8 @@ func initFresh(ctx context.Context, st *store.Store, dir string, now time.Time, 
 	if err := st.AgentCA().Insert(ctx, store.AgentCA{ActiveDER: active.Raw, BackupDER: backup.Raw}); err != nil {
 		return nil, fmt.Errorf("agenttls: record generated agent CA: %w", err)
 	}
-	if afterInsertHook != nil {
-		if err := afterInsertHook(); err != nil {
+	if afterInsert != nil {
+		if err := afterInsert(); err != nil {
 			return nil, err
 		}
 	}
