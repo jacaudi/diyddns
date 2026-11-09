@@ -68,7 +68,7 @@ func newAgentHarnessWith(t *testing.T, mutate func(*api.ServerDeps)) agentHarnes
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
-	checkinSvc := service.NewCheckinService(st, nopNotifier{})
+	checkinSvc := service.NewCheckinService(st, nopNotifier{}, slog.New(slog.DiscardHandler), time.Now)
 
 	deps := api.ServerDeps{
 		Log:      log,
@@ -243,7 +243,7 @@ func TestCheckinAndSelf_SignedRoundTripAndIPv6MergeOnEmpty(t *testing.T) {
 	deviceID, secret := enrollViaHTTP(t, h, "checkin-user@example.com", "laptop")
 
 	// First signed checkin: sets both IPv4 and IPv6.
-	body1, err := json.Marshal(map[string]string{"ipv4": "1.2.3.4", "ipv6": "2001:db8::1"})
+	body1, err := json.Marshal(map[string]string{"ipv4": "1.2.3.4", "ipv6": "2606:4700::1"})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestCheckinAndSelf_SignedRoundTripAndIPv6MergeOnEmpty(t *testing.T) {
 	if !checkin1.Stored {
 		t.Fatal("checkin 1: expected Stored=true (first report)")
 	}
-	if checkin1.CurrentIPv4 != "1.2.3.4" || checkin1.CurrentIPv6 != "2001:db8::1" {
+	if checkin1.CurrentIPv4 != "1.2.3.4" || checkin1.CurrentIPv6 != "2606:4700::1" {
 		t.Fatalf("checkin 1 response = %+v", checkin1)
 	}
 
@@ -283,7 +283,7 @@ func TestCheckinAndSelf_SignedRoundTripAndIPv6MergeOnEmpty(t *testing.T) {
 	if err := json.NewDecoder(respSelf1.Body).Decode(&self1); err != nil {
 		t.Fatalf("decode self 1 response: %v", err)
 	}
-	if self1.DeviceID != deviceID || self1.CurrentIPv4 != "1.2.3.4" || self1.CurrentIPv6 != "2001:db8::1" {
+	if self1.DeviceID != deviceID || self1.CurrentIPv4 != "1.2.3.4" || self1.CurrentIPv6 != "2606:4700::1" {
 		t.Fatalf("self 1 = %+v", self1)
 	}
 
@@ -314,8 +314,8 @@ func TestCheckinAndSelf_SignedRoundTripAndIPv6MergeOnEmpty(t *testing.T) {
 	if checkin2.CurrentIPv4 != "5.6.7.8" {
 		t.Fatalf("checkin 2 CurrentIPv4 = %q, want 5.6.7.8", checkin2.CurrentIPv4)
 	}
-	if checkin2.CurrentIPv6 != "2001:db8::1" {
-		t.Fatalf("checkin 2 CurrentIPv6 = %q, want unchanged 2001:db8::1 (merge-on-empty must preserve it)", checkin2.CurrentIPv6)
+	if checkin2.CurrentIPv6 != "2606:4700::1" {
+		t.Fatalf("checkin 2 CurrentIPv6 = %q, want unchanged 2606:4700::1 (merge-on-empty must preserve it)", checkin2.CurrentIPv6)
 	}
 
 	// Final signed self: confirms IPv6 truly persisted in storage, not just
@@ -330,8 +330,8 @@ func TestCheckinAndSelf_SignedRoundTripAndIPv6MergeOnEmpty(t *testing.T) {
 	if err := json.NewDecoder(respSelf2.Body).Decode(&self2); err != nil {
 		t.Fatalf("decode self 2 response: %v", err)
 	}
-	if self2.CurrentIPv4 != "5.6.7.8" || self2.CurrentIPv6 != "2001:db8::1" {
-		t.Fatalf("self 2 = %+v, want IPv4=5.6.7.8 IPv6=2001:db8::1 (unchanged)", self2)
+	if self2.CurrentIPv4 != "5.6.7.8" || self2.CurrentIPv6 != "2606:4700::1" {
+		t.Fatalf("self 2 = %+v, want IPv4=5.6.7.8 IPv6=2606:4700::1 (unchanged)", self2)
 	}
 }
 

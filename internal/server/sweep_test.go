@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func newSweepFixture(t *testing.T) *sweepFixture {
 	return &sweepFixture{
 		t:       t,
 		st:      st,
-		checkin: service.NewCheckinService(st, fo),
+		checkin: service.NewCheckinService(st, fo, slog.New(slog.DiscardHandler), time.Now),
 		sweeper: newSweeper(st, fo, cfg, disp, discardLog()),
 		ch:      ch,
 		now:     100_000_000, // an arbitrary large instant; Run takes "now" as a parameter, so it need not track wall-clock time

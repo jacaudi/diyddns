@@ -83,7 +83,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
-	checkinSvc := service.NewCheckinService(st, nopNotifier{})
+	checkinSvc := service.NewCheckinService(st, nopNotifier{}, slog.New(slog.DiscardHandler), time.Now)
 	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{}, nopDeviceNotifier{})
 
 	cfg := config.Auth{

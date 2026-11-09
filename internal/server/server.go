@@ -276,7 +276,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 		Sessions:    sessions,
 		Enroll:      enrollSvc,
 		Devices:     devicesSvc,
-		Checkin:     service.NewCheckinService(st, notifier),
+		Checkin:     service.NewCheckinService(st, notifier, log, time.Now),
 		Auth:        authSvc,
 		Bootstrap:   service.NewBootstrapService(st, log, audit, nil, passkeySvc, key),
 		OIDC:        oidcSvc,

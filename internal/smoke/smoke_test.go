@@ -24,6 +24,7 @@ package smoke
 import (
 	"flag"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -107,7 +108,13 @@ func TestSmoke(t *testing.T) {
 		t.Log("-skip-discovery: skipping the client check-in and its outbound calls")
 	} else {
 		step(t, "diyddns-client run --once (discovery + check-in)")
-		out := runClient(t, clientBin, "run", "--once", "--credentials-file", credsPath)
+		// always keeps this a lookup-and-report run: the smoke server sees only a
+		// loopback origin, which is not public, so an observed check-in records nothing.
+		configPath := filepath.Join(t.TempDir(), "client.yaml")
+		if err := os.WriteFile(configPath, []byte("run:\n  ip_discovery: always\n"), 0o600); err != nil {
+			t.Fatalf("write client config: %v", err)
+		}
+		out := runClient(t, clientBin, "run", "--once", "--credentials-file", credsPath, "--config", configPath)
 		reportedIP := field(t, out, `ipv4=([0-9.]+)`)
 		t.Logf("    client reported ipv4=%s", reportedIP)
 

@@ -44,7 +44,7 @@ func TestBuildMux_NotificationsDisabledEnqueuesNothing(t *testing.T) {
 		t.Fatalf("buildMux: %v", err)
 	}
 
-	if _, err := apiDeps.Checkin.Checkin(ctx, dev.ID, service.CheckinReport{IPv4: "203.0.113.9"}); err != nil {
+	if _, err := apiDeps.Checkin.Checkin(ctx, dev.ID, service.CheckinReport{IPv4: "8.8.4.4"}); err != nil {
 		t.Fatalf("Checkin: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestBuildMux_WebhookOffFeedOnStillFansOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
-	if _, err := apiDeps.Checkin.Checkin(ctx, dev.ID, service.CheckinReport{IPv4: "203.0.113.9"}); err != nil {
+	if _, err := apiDeps.Checkin.Checkin(ctx, dev.ID, service.CheckinReport{IPv4: "8.8.4.4"}); err != nil {
 		t.Fatalf("Checkin: %v", err)
 	}
 	rows, err := st.NotificationDeliveries().DueForAttempt(ctx, store.NowUnix()+1, 10)

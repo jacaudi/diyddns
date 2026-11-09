@@ -128,13 +128,13 @@ func TestFeedSmoke(t *testing.T) {
 	if dev["id"] != deviceID || len(dev) != 2 {
 		t.Errorf("device object = %v, want exactly {id, label} for %s (D22)", dev, deviceID)
 	}
-	if cur, _ := f["current"].(map[string]any); cur["ipv4"] != "203.0.113.10" {
-		t.Errorf("current = %v, want ipv4 203.0.113.10", cur)
+	if cur, _ := f["current"].(map[string]any); cur["ipv4"] != "1.0.0.1" {
+		t.Errorf("current = %v, want ipv4 1.0.0.1", cur)
 	}
 
 	step(t, "the REST feed now lists the address, with ETag/Last-Modified, and 304 on If-None-Match")
 	status, txt = feedGet(t, gateway, baseURL+"/feed/v1/devices.txt", feedToken)
-	if status != http.StatusOK || string(txt) != "# diyddns feed v1\n203.0.113.10/32\n" {
+	if status != http.StatusOK || string(txt) != "# diyddns feed v1\n1.0.0.1/32\n" {
 		t.Fatalf("text feed: status %d body %q", status, txt)
 	}
 	req2, _ := http.NewRequest(http.MethodGet, baseURL+"/feed/v1/devices.txt", nil)
@@ -169,7 +169,7 @@ func TestFeedSmoke(t *testing.T) {
 	if f["type"] != "device.removed" {
 		t.Fatalf("frame after disable = %v, want device.removed", f)
 	}
-	if prev, _ := f["previous"].(map[string]any); prev["ipv4"] != "203.0.113.10" {
+	if prev, _ := f["previous"].(map[string]any); prev["ipv4"] != "1.0.0.1" {
 		t.Errorf("removed previous = %v, want the withdrawn address", prev)
 	}
 	if cur, _ := f["current"].(map[string]any); cur["ipv4"] != nil || cur["ipv6"] != nil {
