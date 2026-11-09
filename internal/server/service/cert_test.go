@@ -225,3 +225,21 @@ func TestCertService_BadCSR(t *testing.T) {
 		t.Fatalf("device.cert_issued rows = %d, want 0", n)
 	}
 }
+
+// The store's compare-and-set no longer tells a missing device from a live
+// certificate (#8), so the not-found answer must come from Issue's own read.
+func TestCertService_UnknownDeviceNotFound(t *testing.T) {
+	for _, l := range []CertListener{CertListenerMain, CertListenerAgent} {
+		t.Run(string(l), func(t *testing.T) {
+			st, svc, _, _ := newCertSvc(t)
+
+			_, err := svc.Issue(t.Context(), "no-such-device", testCSR(t), l)
+			if !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("err = %v, want store.ErrNotFound", err)
+			}
+			if n := len(adminAuditRows(t, st, "device.cert_issued")); n != 0 {
+				t.Fatalf("device.cert_issued rows = %d, want 0", n)
+			}
+		})
+	}
+}

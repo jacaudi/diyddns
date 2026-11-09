@@ -642,7 +642,8 @@ func (r *DeviceRepo) SetCert(ctx context.Context, id, serial string, notAfter in
 // SetCertIfNoLive records the device's agent certificate only if none is
 // recorded or the recorded one has expired (cert_not_after <= now). It is one
 // statement, so of two racing issuances exactly one wins. Returns ErrConflict
-// when a live certificate is recorded, ErrNotFound when the device is absent.
+// when it matched no row: a live certificate is recorded, or the device is
+// absent (callers load the device first, so that is the only not-found check).
 func (r *DeviceRepo) SetCertIfNoLive(ctx context.Context, id, serial string, notAfter, now int64) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE devices SET cert_serial = ?, cert_not_after = ?, updated_at = ?
@@ -656,17 +657,15 @@ func (r *DeviceRepo) SetCertIfNoLive(ctx context.Context, id, serial string, not
 	if err != nil {
 		return fmt.Errorf("devices.SetCertIfNoLive: RowsAffected: %w", err)
 	}
-	if n == 1 {
-		return nil
+	if n == 0 {
+		return fmt.Errorf("devices.SetCertIfNoLive: %w", ErrConflict)
 	}
-	if err := r.mustExist(ctx, id); err != nil {
-		return fmt.Errorf("devices.SetCertIfNoLive: %w", err)
-	}
-	return fmt.Errorf("devices.SetCertIfNoLive: %w", ErrConflict)
+	return nil
 }
 
 // ClearCert forgets the device's recorded agent certificate. cleared is false
-// when none was recorded. Returns ErrNotFound if the device is absent.
+// when none was recorded or the device is absent (callers load the device
+// first, so that is the only not-found check).
 func (r *DeviceRepo) ClearCert(ctx context.Context, id string) (cleared bool, err error) {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE devices SET cert_serial = NULL, cert_not_after = NULL, updated_at = ?
@@ -680,23 +679,5 @@ func (r *DeviceRepo) ClearCert(ctx context.Context, id string) (cleared bool, er
 	if err != nil {
 		return false, fmt.Errorf("devices.ClearCert: RowsAffected: %w", err)
 	}
-	if n == 1 {
-		return true, nil
-	}
-	if err := r.mustExist(ctx, id); err != nil {
-		return false, fmt.Errorf("devices.ClearCert: %w", err)
-	}
-	return false, nil
-}
-
-// mustExist returns ErrNotFound if no device has this id. It tells an
-// UPDATE that matched 0 rows because of its guard apart from one that matched
-// 0 rows because the device is gone.
-func (r *DeviceRepo) mustExist(ctx context.Context, id string) error {
-	var one int
-	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM devices WHERE id = ?`, id).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	return err
+	return n == 1, nil
 }

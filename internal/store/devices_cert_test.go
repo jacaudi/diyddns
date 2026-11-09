@@ -92,10 +92,12 @@ func TestSetCertIfNoLive_SecondCallConflicts(t *testing.T) {
 	}
 }
 
-func TestSetCertIfNoLive_UnknownDeviceNotFound(t *testing.T) {
+// A missing device matches no row, exactly like a live certificate: the
+// caller has already loaded the device, so the store does not look again.
+func TestSetCertIfNoLive_UnknownDeviceConflicts(t *testing.T) {
 	s, ctx := newTestStore(t)
-	if err := s.Devices().SetCertIfNoLive(ctx, "nope", "01", 5000, 1000); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+	if err := s.Devices().SetCertIfNoLive(ctx, "nope", "01", 5000, 1000); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
 	}
 }
 
@@ -127,7 +129,7 @@ func TestClearCert(t *testing.T) {
 		t.Fatalf("second ClearCert = (%v, %v), want (false, nil)", cleared, err)
 	}
 
-	if _, err := repo.ClearCert(ctx, "nope"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("ClearCert unknown: err = %v, want ErrNotFound", err)
+	if cleared, err := repo.ClearCert(ctx, "nope"); err != nil || cleared {
+		t.Fatalf("ClearCert unknown = (%v, %v), want (false, nil)", cleared, err)
 	}
 }
