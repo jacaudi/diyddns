@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.4.0](https://github.com/jacaudi/diyddns/compare/v1.3.1...v1.4.0) (2026-11-09)
+
+
+### Features
+
+* **agenttls:** CA state, startup rules and flock lock ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([84ef018](https://github.com/jacaudi/diyddns/commit/84ef018703269ae9bc0a0f05eea1fc7d91261880))
+* **agenttls:** device cert issuance and client verification ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([874b4c3](https://github.com/jacaudi/diyddns/commit/874b4c3e6fd2b15192b30a0e9499fb811af83f09))
+* **agenttls:** hot-swappable serving cert with re-issue policy ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([efb08ca](https://github.com/jacaudi/diyddns/commit/efb08caea4d90be7da92674c682d1c2c060c3279))
+* **api:** agent listener handler with HTTP-layer client-cert checks ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([33a9ddf](https://github.com/jacaudi/diyddns/commit/33a9ddf979b7f3c23051f547862eca91ea099c53))
+* **api:** device cert endpoint, agent_mtls capability, require_mtls gate ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([d3f09f5](https://github.com/jacaudi/diyddns/commit/d3f09f50019d199a8f307894f71f94c699ca399b))
+* **api:** observe the origin address per listener ([fd021a7](https://github.com/jacaudi/diyddns/commit/fd021a754c707492b20a798651279e9b3c347e13))
+* **audit:** record the resolved client IP ([a1979e3](https://github.com/jacaudi/diyddns/commit/a1979e34ceb190a8294c571855b0904d0eb6e5ed))
+* **checkin:** reported/observed/none per family ([18ce8b9](https://github.com/jacaudi/diyddns/commit/18ce8b9390fc28e5a84a729b30b6c0f69c095228))
+* **client:** ip_source, observed_ip and family-pinned transport ([82c7e3c](https://github.com/jacaudi/diyddns/commit/82c7e3ced0481cbb4142765f76ed1ec90ee3225b))
+* **clientip:** trusted-proxy origin resolution ([c93e2b2](https://github.com/jacaudi/diyddns/commit/c93e2b2415274bde3a6dc527ededbb15f6ce8f00))
+* **client:** mTLS manager with probation, commit, renewal and recovery ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([8010b3b](https://github.com/jacaudi/diyddns/commit/8010b3b1816ec1fcdc7a14953c984266648b2c82))
+* **client:** mtls reset command, enroll provisioning, run via mTLS manager ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([db9dd1b](https://github.com/jacaudi/diyddns/commit/db9dd1b21345d0e3944fbfa2030dda6616b61eb5))
+* **client:** mtls.json state file and key/CSR generation ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([9808e2a](https://github.com/jacaudi/diyddns/commit/9808e2ae1eeec21cba523d50f88daab75fe9e44b))
+* **client:** per-family check-ins with auto lookup fallback ([fd1c868](https://github.com/jacaudi/diyddns/commit/fd1c868529b0bf0172ce30254c0b427e0c1e3ab6))
+* **client:** run.ip_discovery wiring ([18a0627](https://github.com/jacaudi/diyddns/commit/18a0627405d63fa0b2cb01eceea0ce32fa933635))
+* **client:** TLS options, self/cert calls and coded error parsing ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([aaafa6d](https://github.com/jacaudi/diyddns/commit/aaafa6d1ba0084f0e1356d915fedeec139edd094))
+* **config:** agent.* listener keys and run.insecure_provision ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([aefe846](https://github.com/jacaudi/diyddns/commit/aefe8462019381d709f00ced2213152a695ecc0b))
+* **config:** trusted_proxies, agent.proxy_protocol, run.ip_discovery ([aee1c7c](https://github.com/jacaudi/diyddns/commit/aee1c7ca1daa569939e423bfcb5e03df0a912d34))
+* **server:** agent mTLS listener, CA startup, lock and cert refresh ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([28746f2](https://github.com/jacaudi/diyddns/commit/28746f2e97e143216335cf3cb29579db37f948f5))
+* **server:** ca promote-backup and ca reset operator commands ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([be35a68](https://github.com/jacaudi/diyddns/commit/be35a6878f77d5482d076be1567aa6735a759aa2))
+* **server:** optional PROXY v2 on the agent listener ([87b45b5](https://github.com/jacaudi/diyddns/commit/87b45b5c87e81183e383e144ee5b09dee4520ea7))
+* **service:** device cert issuance policy and admin clear ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([365836c](https://github.com/jacaudi/diyddns/commit/365836c69f44a9ee7267c95d925e2608ad25dfdf))
+* **store:** agent_ca table and device cert columns ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([855d846](https://github.com/jacaudi/diyddns/commit/855d8465120e0daf13decc8234c2e451cb6a9102))
+* **store:** time statements through a connector wrapper ([#103](https://github.com/jacaudi/diyddns/issues/103)) ([efa8d94](https://github.com/jacaudi/diyddns/commit/efa8d94af42111832bedb064256dab5e548b6103))
+* **store:** warn when a statement holds the connection 500ms or longer ([#103](https://github.com/jacaudi/diyddns/issues/103)) ([8d7bf73](https://github.com/jacaudi/diyddns/commit/8d7bf7390f02ef24bc5ee69d7b09cf6e75b4da58))
+* **webui:** Reset certificate on the admin device page ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([827514c](https://github.com/jacaudi/diyddns/commit/827514c62278364a50dafc9f4ccc81975aaf437b))
+
+
+### Bug Fixes
+
+* **agenttls:** fsync the key directory after create and rename ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([1b6257c](https://github.com/jacaudi/diyddns/commit/1b6257c52bf101478931ab5da5bc084fcd37a730))
+* **api:** capabilities reports the configured HMAC skew window (ponytail [#11](https://github.com/jacaudi/diyddns/issues/11)) ([20da025](https://github.com/jacaudi/diyddns/commit/20da0251e12597df42d44ac1fe9ba2fb55212551))
+* **api:** challenge on agent-port 401s ([#191](https://github.com/jacaudi/diyddns/issues/191)) ([1a93383](https://github.com/jacaudi/diyddns/commit/1a93383b8b5b2f7c72e66eb19e16ce501a81cfb4))
+* **checkin:** rate-limit the dropped-family WARN per family ([d26aa86](https://github.com/jacaudi/diyddns/commit/d26aa86ce8d3156288be787a5222610361a175b6))
+* **client:** drop the unusable network parameter from newPinnedDialer ([59f8ee8](https://github.com/jacaudi/diyddns/commit/59f8ee8a28c222df9cda526c9260354439dcf749))
+* **deps:** bump Go to 1.27.3 and golang.org/x/net to v0.62.0 ([850d178](https://github.com/jacaudi/diyddns/commit/850d1786f6adcfec15b4961b74d9ee58e386a21f))
+* send a WWW-Authenticate challenge with every 401 ([ec24a59](https://github.com/jacaudi/diyddns/commit/ec24a59f3cd3718a081d0edf0002752162eb790a)), closes [#191](https://github.com/jacaudi/diyddns/issues/191)
+* **server:** promote-backup rerun restores a lost or wrong ca.key ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([facf5a1](https://github.com/jacaudi/diyddns/commit/facf5a1a3eb702729057ac2d716afc38dc966507))
+* **server:** wait for the pruner before releasing the agent.tls.dir lock ([#173](https://github.com/jacaudi/diyddns/issues/173)) ([4a67abe](https://github.com/jacaudi/diyddns/commit/4a67abe5c0de9dffea3f84b4a4aaf0ce03b01689))
+* **store:** time COMMIT and ROLLBACK, which modernc runs outside ExecContext ([#103](https://github.com/jacaudi/diyddns/issues/103)) ([0df99dd](https://github.com/jacaudi/diyddns/commit/0df99ddfa4151dc520dfe345feeeb68821f9a39e))
+* **taskfile:** make db:backup actually back up (ponytail [#21](https://github.com/jacaudi/diyddns/issues/21)) ([0fcace2](https://github.com/jacaudi/diyddns/commit/0fcace2000e0c40176aba37998c137082372fad0))
+* **webui:** name HTTPS when passkeys cannot run, instead of a raw TypeError ([cc9f2e1](https://github.com/jacaudi/diyddns/commit/cc9f2e10b4f77d4ac235f23dc7ee257dddb9d773)), closes [#74](https://github.com/jacaudi/diyddns/issues/74)
+
 ## [1.3.1](https://github.com/jacaudi/diyddns/compare/v1.3.0...v1.3.1) (2026-10-04)
 
 
