@@ -7,14 +7,19 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/logtest"
 	"github.com/jacaudi/diyddns/internal/store"
 )
+
+var discardLog = slog.New(slog.DiscardHandler)
 
 var adminNow = time.Date(2026, 11, 7, 12, 30, 45, 0, time.UTC)
 
@@ -196,13 +201,13 @@ func assertNoPending(t *testing.T, dir string) {
 func TestPromoteBackup_SwapsAndClears(t *testing.T) {
 	f := newAdminFixture(t, true)
 
-	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog)
 	if err != nil {
 		t.Fatalf("PromoteBackup: %v", err)
 	}
 
-	if res.AlreadyPromoted {
-		t.Error("AlreadyPromoted = true on the first run")
+	if len(res.Notes) != 0 {
+		t.Errorf("Notes = %q on the first run, want none", res.Notes)
 	}
 	if want := filepath.Join(f.dir, CABackupKeyFile); res.NewBackupKeyPath != want {
 		t.Errorf("NewBackupKeyPath = %q, want %q", res.NewBackupKeyPath, want)
@@ -242,7 +247,7 @@ func TestPromoteBackup_WrongKey(t *testing.T) {
 	wrong := filepath.Join(f.dir, pendingName("wrong.key"))
 	files := snapshot(t, f.dir)
 
-	_, err = PromoteBackup(t.Context(), f.st, f.dir, wrong, adminNow)
+	_, err = PromoteBackup(t.Context(), f.st, f.dir, wrong, adminNow, discardLog)
 
 	if !errors.Is(err, ErrBackupKeyMismatch) {
 		t.Fatalf("err = %v, want ErrBackupKeyMismatch", err)
@@ -263,7 +268,7 @@ func TestPromoteBackup_WrongKey(t *testing.T) {
 
 func TestPromoteBackup_RerunIsIdempotent(t *testing.T) {
 	f := newAdminFixture(t, true)
-	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow); err != nil {
+	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog); err != nil {
 		t.Fatalf("first PromoteBackup: %v", err)
 	}
 	afterFirst, err := f.st.AgentCA().Get(t.Context())
@@ -272,13 +277,13 @@ func TestPromoteBackup_RerunIsIdempotent(t *testing.T) {
 	}
 	files := snapshot(t, f.dir)
 
-	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog)
 	if err != nil {
 		t.Fatalf("second PromoteBackup: %v", err)
 	}
 
-	if !res.AlreadyPromoted {
-		t.Error("AlreadyPromoted = false on the rerun")
+	if want := []string{"Backup CA already promoted; nothing to do."}; !slices.Equal(res.Notes, want) {
+		t.Errorf("Notes = %q, want %q", res.Notes, want)
 	}
 	afterSecond, err := f.st.AgentCA().Get(t.Context())
 	if err != nil {
@@ -299,7 +304,7 @@ func TestPromoteBackup_CompletesAfterCrash(t *testing.T) {
 	afterPromoteTxHook = func() error { return errCrash }
 	t.Cleanup(func() { afterPromoteTxHook = nil })
 
-	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow); !errors.Is(err, errCrash) {
+	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog); !errors.Is(err, errCrash) {
 		t.Fatalf("first PromoteBackup err = %v, want the simulated crash", err)
 	}
 	afterPromoteTxHook = nil
@@ -311,13 +316,13 @@ func TestPromoteBackup_CompletesAfterCrash(t *testing.T) {
 		t.Fatal("the transaction did not commit before the crash")
 	}
 
-	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog)
 	if err != nil {
 		t.Fatalf("rerun PromoteBackup: %v", err)
 	}
 
-	if !res.AlreadyPromoted {
-		t.Error("AlreadyPromoted = false on the completing rerun")
+	if want := []string{"Backup CA already promoted."}; !slices.Equal(res.Notes, want) {
+		t.Errorf("Notes = %q, want %q", res.Notes, want)
 	}
 	assertKeyFile(t, f.dir, CAKeyFile, certPub(t, after.ActiveDER))
 	assertKeyFile(t, f.dir, CABackupKeyFile, certPub(t, after.BackupDER))
@@ -335,7 +340,7 @@ func TestPromoteBackup_CompletesAfterCrash(t *testing.T) {
 func promoteThenDamage(t *testing.T, damage func(f adminFixture)) adminFixture {
 	t.Helper()
 	f := newAdminFixture(t, true)
-	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow); err != nil {
+	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog); err != nil {
 		t.Fatalf("PromoteBackup: %v", err)
 	}
 	damage(f)
@@ -344,8 +349,9 @@ func promoteThenDamage(t *testing.T, damage func(f adminFixture)) adminFixture {
 
 func (f adminFixture) assertActiveKeyRestored(t *testing.T, res PromoteResult) {
 	t.Helper()
-	if !res.AlreadyPromoted || !res.ActiveKeyRestored {
-		t.Errorf("result = %+v, want AlreadyPromoted and ActiveKeyRestored", res)
+	want := []string{"Backup CA already promoted.", "Restored " + filepath.Join(f.dir, CAKeyFile) + " from --backup-key."}
+	if !slices.Equal(res.Notes, want) {
+		t.Errorf("Notes = %q, want %q", res.Notes, want)
 	}
 	after, err := f.st.AgentCA().Get(t.Context())
 	if err != nil {
@@ -363,14 +369,15 @@ func TestPromoteBackup_RerunRestoresMissingActiveKey(t *testing.T) {
 		}
 	})
 
-	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	var buf bytes.Buffer
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, slog.New(slog.NewJSONHandler(&buf, nil)))
 	if err != nil {
 		t.Fatalf("rerun PromoteBackup: %v", err)
 	}
 
 	f.assertActiveKeyRestored(t, res)
-	if res.NoLocalBackupKey {
-		t.Error("NoLocalBackupKey = true although ca-backup.key is present")
+	if recs := logtest.Records(t, buf.String()); len(recs) != 0 {
+		t.Errorf("logged %v although ca-backup.key is present, want nothing", recs)
 	}
 }
 
@@ -388,7 +395,7 @@ func TestPromoteBackup_RerunRestoresMismatchedActiveKey(t *testing.T) {
 		}
 	})
 
-	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog)
 	if err != nil {
 		t.Fatalf("rerun PromoteBackup: %v", err)
 	}
@@ -405,14 +412,16 @@ func TestPromoteBackup_RerunRestoreWithoutBackupKeyFlagsIt(t *testing.T) {
 		}
 	})
 
-	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	var buf bytes.Buffer
+	res, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, slog.New(slog.NewJSONHandler(&buf, nil)))
 	if err != nil {
 		t.Fatalf("rerun PromoteBackup: %v", err)
 	}
 
 	f.assertActiveKeyRestored(t, res)
-	if !res.NoLocalBackupKey {
-		t.Error("NoLocalBackupKey = false although no ca-backup.key is present")
+	rec := logtest.Find(t, buf.String(), noLocalBackupKeyMsg)
+	if rec["level"] != "WARN" || rec["dir"] != f.dir {
+		t.Errorf("record = %v, want WARN naming dir %s", rec, f.dir)
 	}
 	assertGone(t, f.dir, CABackupKeyFile) // a new backup is never generated here
 }
@@ -429,7 +438,7 @@ func TestPromoteBackup_WorksWithEmptyDir(t *testing.T) {
 		}
 	}
 
-	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow); err != nil {
+	if _, err := PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog); err != nil {
 		t.Fatalf("PromoteBackup on an empty dir: %v", err)
 	}
 
@@ -450,7 +459,7 @@ func TestPromoteBackup_RefusesWhenLocked(t *testing.T) {
 	}
 	defer func() { _ = lock.Release() }()
 
-	_, err = PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow)
+	_, err = PromoteBackup(t.Context(), f.st, f.dir, f.offline, adminNow, discardLog)
 
 	if !errors.Is(err, ErrLocked) {
 		t.Fatalf("err = %v, want ErrLocked", err)

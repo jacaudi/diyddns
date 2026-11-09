@@ -3,9 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,17 +38,23 @@ func promoteBackupCmd() *cobra.Command {
 			"The server must be stopped. Devices re-provision on their own. Safe to run again.",
 		Example: "  diyddns-server ca promote-backup --backup-key /mnt/usb/ca-backup.key --config /etc/diyddns/server.yaml",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			st, dir, err := openCAStore(cmd, cfgPath)
+			st, dir, log, err := openCAStore(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = st.Close() }()
 
-			res, err := agenttls.PromoteBackup(cmd.Context(), st, dir, backupKey, time.Now())
+			res, err := agenttls.PromoteBackup(cmd.Context(), st, dir, backupKey, time.Now(), log)
 			if err != nil {
 				return err
 			}
-			return printPromoted(cmd, dir, res)
+			lines := res.Notes
+			if res.NewBackupKeyPath != "" {
+				lines = append(lines, "Backup CA promoted. A new backup key was written to "+res.NewBackupKeyPath+
+					`: move it offline now (see docs/deployment.md, "Agent CA backups").`)
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), strings.Join(lines, "\n"))
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "", "path to server config file")
@@ -57,34 +63,6 @@ func promoteBackupCmd() *cobra.Command {
 		panic(err) //nolint:tricorder // libpanic: the flag was defined one line above; a failure is a programming error
 	}
 	return cmd
-}
-
-// printPromoted reports what PromoteBackup did.
-func printPromoted(cmd *cobra.Command, dir string, res agenttls.PromoteResult) error {
-	out := cmd.OutOrStdout()
-	var errs []error
-	say := func(w io.Writer, format string, args ...any) {
-		_, err := fmt.Fprintf(w, format+"\n", args...)
-		errs = append(errs, err)
-	}
-	switch {
-	case res.AlreadyPromoted && !res.ActiveKeyRestored && res.NewBackupKeyPath == "":
-		say(out, "Backup CA already promoted; nothing to do.")
-	case res.AlreadyPromoted:
-		say(out, "Backup CA already promoted.")
-	}
-	if res.ActiveKeyRestored {
-		say(out, "Restored %s from --backup-key.", filepath.Join(dir, agenttls.CAKeyFile))
-	}
-	if res.NoLocalBackupKey {
-		say(cmd.ErrOrStderr(), "WARN: no %s is present in %s. The recorded backup CA's key must exist offline; "+
-			"without it a new backup CA requires \"diyddns-server ca reset\".", agenttls.CABackupKeyFile, dir)
-	}
-	if res.NewBackupKeyPath != "" {
-		say(out, "Backup CA promoted. A new backup key was written to %s: "+
-			"move it offline now (see docs/deployment.md, \"Agent CA backups\").", res.NewBackupKeyPath)
-	}
-	return errors.Join(errs...)
 }
 
 func resetCmd() *cobra.Command {
@@ -102,7 +80,7 @@ func resetCmd() *cobra.Command {
 			if !confirm {
 				return errors.New("ca reset discards the agent CA and strands every committed device: pass --confirm to proceed")
 			}
-			st, dir, err := openCAStore(cmd, cfgPath)
+			st, dir, _, err := openCAStore(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
@@ -128,16 +106,16 @@ func resetCmd() *cobra.Command {
 }
 
 // openCAStore loads the server config and opens its database. It returns the
-// store and agent.tls.dir; warnings go to stderr.
-func openCAStore(cmd *cobra.Command, cfgPath string) (*store.Store, string, error) {
+// store, agent.tls.dir and the logger it used, whose warnings go to stderr.
+func openCAStore(cmd *cobra.Command, cfgPath string) (*store.Store, string, *slog.Logger, error) {
 	cfg, err := config.Load(viper.New(), cfgPath)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	st, err := store.Open(cmd.Context(), cfg.Database.Path, log)
 	if err != nil {
-		return nil, "", fmt.Errorf("open store: %w", err)
+		return nil, "", nil, fmt.Errorf("open store: %w", err)
 	}
-	return st, cfg.Agent.TLS.Dir, nil
+	return st, cfg.Agent.TLS.Dir, log, nil
 }
