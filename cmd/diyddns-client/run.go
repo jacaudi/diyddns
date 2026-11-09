@@ -55,20 +55,39 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fams, err := enabledFamilies(cfg.Run)
+			if err != nil {
+				return err
+			}
 			logger := newClientLogger(cfg.Logging)
-			mgr, err := mtls.NewManager(mtls.Config{
+			if w := config.ProvidersWarning(cfg.Run); w != "" {
+				logger.Warn(w)
+			}
+			mcfg := mtls.Config{
 				StatePath:         mtls.PathFor(credPath),
 				Creds:             creds,
 				CACertPath:        cfg.Server.CABundle,
 				InsecureProvision: cfg.Run.InsecureProvision,
 				Log:               logger,
 				Now:               time.Now,
-			})
+				Discovery:         cfg.Run.IPDiscovery,
+				Families:          fams,
+			}
+			// pd stays a literal nil unless the poller discovers: a nil *Discoverer
+			// stored in the interface would not be == nil and would panic.
+			var pd poller.Discoverer
+			switch cfg.Run.IPDiscovery {
+			case config.IPDiscoveryAlways:
+				pd = disc
+			case config.IPDiscoveryAuto:
+				mcfg.Lookup = disc.DiscoverFamily
+			}
+			mgr, err := mtls.NewManager(mcfg)
 			if err != nil {
 				return err
 			}
 			host, _ := os.Hostname()
-			p := poller.New(disc, mgr, poller.Options{
+			p := poller.New(pd, mgr, poller.Options{
 				Interval:      cfg.Run.Interval,
 				Logger:        logger,
 				Hostname:      host,
@@ -130,9 +149,40 @@ func explainRunError(err error, serverURL string) error {
 		err, serverURL, serverURL)
 }
 
+// enabledFamilies returns the families run.address_families enables, IPv4 before
+// IPv6 whatever the config order, so every consumer visits them the same way.
+func enabledFamilies(rc config.ClientRunSection) ([]ipdiscovery.Family, error) {
+	var v4, v6 bool
+	for _, fam := range rc.AddressFamilies {
+		switch fam {
+		case "ipv4":
+			v4 = true
+		case "ipv6":
+			v6 = true
+		default:
+			return nil, fmt.Errorf("run: unknown address family %q", fam)
+		}
+	}
+	var out []ipdiscovery.Family
+	if v4 {
+		out = append(out, ipdiscovery.FamilyV4)
+	}
+	if v6 {
+		out = append(out, ipdiscovery.FamilyV6)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("run: no address families enabled")
+	}
+	return out, nil
+}
+
 // buildDiscoverer wires providers per enabled family (config override, else
-// built-in defaults) and constructs the quorum Discoverer.
+// built-in defaults) and constructs the quorum Discoverer. In never mode no
+// lookup ever runs, so it returns nil, nil without checking the quorum.
 func buildDiscoverer(rc config.ClientRunSection) (*ipdiscovery.Discoverer, error) {
+	if rc.IPDiscovery == config.IPDiscoveryNever {
+		return nil, nil
+	}
 	var v4, v6 []ipdiscovery.Provider
 	for _, fam := range rc.AddressFamilies {
 		switch fam {

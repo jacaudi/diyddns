@@ -11,10 +11,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/jacaudi/diyddns/internal/client/checkin"
+	"github.com/jacaudi/diyddns/internal/client/ipdiscovery"
 	"github.com/jacaudi/diyddns/internal/config"
 	"github.com/jacaudi/diyddns/internal/shared"
 )
@@ -204,5 +206,169 @@ func TestExplainRunError_OtherErrorsPassThrough(t *testing.T) {
 	}
 	if got := explainRunError(nil, "https://ddns.example.com"); got != nil {
 		t.Errorf("explainRunError(nil) = %v, want nil", got)
+	}
+}
+
+func TestBuildDiscovererNeverSkipsQuorum(t *testing.T) {
+	rc := config.ClientRunSection{
+		IPDiscovery:     config.IPDiscoveryNever,
+		Quorum:          5,
+		AddressFamilies: []string{"ipv4"},
+		ProvidersV4:     []string{"http://127.0.0.1:1/ip"},
+	}
+	d, err := buildDiscoverer(rc)
+	if err != nil || d != nil {
+		t.Fatalf("buildDiscoverer(never) = %v, %v; want nil, nil", d, err)
+	}
+}
+
+func TestBuildDiscovererAutoValidatesQuorum(t *testing.T) {
+	rc := config.ClientRunSection{
+		IPDiscovery:     config.IPDiscoveryAuto,
+		Quorum:          5,
+		AddressFamilies: []string{"ipv4"},
+		ProvidersV4:     []string{"http://127.0.0.1:1/ip"},
+	}
+	if _, err := buildDiscoverer(rc); err == nil {
+		t.Fatal("buildDiscoverer(auto, quorum 5, one provider) = nil error, want a quorum error")
+	}
+}
+
+func TestBuildDiscovererAlwaysBuilds(t *testing.T) {
+	rc := config.ClientRunSection{
+		IPDiscovery:     config.IPDiscoveryAlways,
+		Quorum:          1,
+		AddressFamilies: []string{"ipv4"},
+		ProvidersV4:     []string{"http://127.0.0.1:1/ip"},
+	}
+	d, err := buildDiscoverer(rc)
+	if err != nil || d == nil {
+		t.Fatalf("buildDiscoverer(always) = %v, %v; want a Discoverer", d, err)
+	}
+}
+
+func TestEnabledFamilies(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []ipdiscovery.Family
+		err  bool
+	}{
+		{name: "order is v4 then v6", in: []string{"ipv6", "ipv4"}, want: []ipdiscovery.Family{ipdiscovery.FamilyV4, ipdiscovery.FamilyV6}},
+		{name: "v6 only", in: []string{"ipv6"}, want: []ipdiscovery.Family{ipdiscovery.FamilyV6}},
+		{name: "duplicates collapse", in: []string{"ipv4", "ipv4"}, want: []ipdiscovery.Family{ipdiscovery.FamilyV4}},
+		{name: "unknown family", in: []string{"ipv5"}, err: true},
+		{name: "none enabled", in: nil, err: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := enabledFamilies(config.ClientRunSection{AddressFamilies: tt.in})
+			if (err != nil) != tt.err {
+				t.Fatalf("enabledFamilies(%v) error = %v, want error %t", tt.in, err, tt.err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("enabledFamilies(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// runOnceMode drives `run --once` in one ip_discovery mode against a fake
+// server that advertises observed_ip and a fake lookup provider. It returns
+// the ipv4 each check-in body carried, how many times the provider was asked,
+// and what the client wrote to stderr.
+func runOnceMode(t *testing.T, mode string, providers bool) (sent []string, lookups int, stderr string) {
+	t.Helper()
+	const lookupAddr = "203.0.113.7"
+
+	ipSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		lookups++
+		_, _ = w.Write([]byte(lookupAddr))
+	}))
+	t.Cleanup(ipSrv.Close)
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/agent/v1/capabilities" {
+			_, _ = w.Write([]byte(`{"server_version":"test","observed_ip":true}`))
+			return
+		}
+		var body struct {
+			IPv4 string `json:"ipv4"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sent = append(sent, body.IPv4)
+		src := "observed"
+		if body.IPv4 != "" {
+			src = "reported"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_id": "dev-xyz", "current_ipv4": lookupAddr, "stored": true,
+			"ip_source": map[string]string{"ipv4": src},
+		})
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, "credentials.json")
+	writeJSON(t, credPath, map[string]string{
+		"server_url": apiSrv.URL, "device_id": "dev-xyz",
+		"secret": base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
+	})
+	cfgYAML := fmt.Sprintf("run:\n  ip_discovery: %s\n  address_families: [ipv4]\n", mode)
+	if providers {
+		cfgYAML += fmt.Sprintf("  quorum: 1\n  providers_v4: [%q]\n", ipSrv.URL)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"--once", "--credentials-file", credPath, "--config", cfgPath})
+	stderr = captureStderr(t, func() {
+		if err := cmd.ExecuteContext(t.Context()); err != nil {
+			t.Errorf("run --once (%s): %v", mode, err)
+		}
+	})
+	return sent, lookups, stderr
+}
+
+// never leaves the address to the server: no provider is built or asked (a
+// typed-nil Discoverer in the poller would panic here), and the quorum default
+// of 2 against no providers is not an error.
+func TestRunCmd_Once_NeverSendsNoAddress(t *testing.T) {
+	sent, lookups, _ := runOnceMode(t, config.IPDiscoveryNever, false)
+	if !slices.Equal(sent, []string{""}) || lookups != 0 {
+		t.Errorf("never: bodies ipv4 = %q, lookups = %d; want [\"\"], 0", sent, lookups)
+	}
+}
+
+// auto reports nothing while the server observes the address.
+func TestRunCmd_Once_AutoLetsServerObserve(t *testing.T) {
+	sent, lookups, _ := runOnceMode(t, config.IPDiscoveryAuto, true)
+	if !slices.Equal(sent, []string{""}) || lookups != 0 {
+		t.Errorf("auto: bodies ipv4 = %q, lookups = %d; want [\"\"], 0", sent, lookups)
+	}
+}
+
+// always is today's behaviour: look up and report, one request.
+func TestRunCmd_Once_AlwaysReportsLookup(t *testing.T) {
+	sent, lookups, _ := runOnceMode(t, config.IPDiscoveryAlways, true)
+	if !slices.Equal(sent, []string{"203.0.113.7"}) || lookups != 1 {
+		t.Errorf("always: bodies ipv4 = %q, lookups = %d; want [203.0.113.7], 1", sent, lookups)
+	}
+}
+
+func TestRunCmd_Once_ProvidersWarning(t *testing.T) {
+	for mode, wantWarn := range map[string]bool{
+		config.IPDiscoveryAuto:   true,
+		config.IPDiscoveryAlways: false,
+	} {
+		t.Run(mode, func(t *testing.T) {
+			_, _, stderr := runOnceMode(t, mode, true)
+			if got := strings.Contains(stderr, "run.providers_v4"); got != wantWarn {
+				t.Errorf("stderr mentions run.providers_v4 = %t, want %t:\n%s", got, wantWarn, stderr)
+			}
+		})
 	}
 }
