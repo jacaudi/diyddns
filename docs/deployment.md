@@ -206,6 +206,7 @@ controllers:
         env:
           DIYDDNS_DATABASE_PATH: /data/diyddns.db
           DIYDDNS_SERVER_BASE_URL: https://ddns.example.com
+          DIYDDNS_SERVER_TRUSTED_PROXIES: <the Envoy pod CIDRs>   # every IPv4 and IPv6 CIDR Envoy reaches diyddns from
         envFrom:
           - secretRef:
               name: diyddns-secret
@@ -344,6 +345,12 @@ in the Compose examples above, or the **Envoy pods' CIDR** on Kubernetes
 (usually the whole pod CIDR). Caddy and Traefik both set `X-Forwarded-For` by
 default; check yours does.
 
+On a dual-stack cluster, `trusted_proxies` must list **every** CIDR Envoy can
+reach diyddns from, both IPv4 and IPv6. A prefix never matches an address of the
+other family, so a list with only IPv4 CIDRs makes Envoy, when it arrives over
+IPv6, an untrusted peer, and Envoy's own address is recorded as the device's
+IPv6 address.
+
 **Kubernetes with Envoy Gateway.** Set
 `DIYDDNS_SERVER_TRUSTED_PROXIES` to the pod CIDR in the `env:` block of the
 values above. Two things keep `X-Forwarded-For` honest:
@@ -364,10 +371,12 @@ PROXY protocol v2 header instead. Four things have to line up:
 
 1. `agent.proxy_protocol: true` (`DIYDDNS_AGENT_PROXY_PROTOCOL`, default
    `false`). It is independent of `trusted_proxies` but reads that list.
-2. `server.trusted_proxies` covering the Envoy pods. A peer **inside** the list
-   MUST send the PROXY header: the listener requires it, and a connection
-   without one is dropped, and one that sends nothing is dropped after the PROXY
-   library's 10 s header timeout. A
+2. `server.trusted_proxies` covering the Envoy pods, every IPv4 and IPv6 CIDR
+   they can connect from (a prefix never matches the other family; see
+   [Main port behind a proxy](#main-port-behind-a-proxy)). With
+   `agent.proxy_protocol: true`, a peer **inside** the list MUST send the PROXY
+   header: one that starts with TLS instead fails on its first read, and one
+   that sends nothing times out after go-proxyproto's 10 s header timeout. A
    peer **outside** the list has any PROXY header it sends read and discarded,
    so a device that connects directly cannot claim another address.
 3. A passthrough `TLSRoute` for the agent hostname.
@@ -423,7 +432,7 @@ run:
 |---|---|
 | `auto` (default) | Sends each enabled family's check-in with no address, one family at a time (IPv4 first), so the server records what it sees. For a family the server cannot observe (an old server, capabilities not yet fetched, the family's connection could not be made, or the server answered `ip_source: none` for it), the client looks that one family up, reports it, and asks the server again about an hour later. A `WARN` explains the fallback, at most once a day per family. |
 | `always` | The previous behaviour: look every family up (quorum of providers), and send one check-in carrying every address. The server records what is reported. |
-| `never` | Never contact a lookup service. If the server records no address for a family, the client logs a `WARN` (once a day) to set `run.ip_discovery` to `auto` or `always`. |
+| `never` | Never contact a lookup service. If the server records no address for a family, the client logs a `WARN` (once a day) to set `run.ip_discovery` to `auto` or `always`. Against a server that does not support observed IPs it logs an `ERROR` once a day: `server does not support observed IPs and run.ip_discovery is never; nothing is being recorded`. |
 
 `run.providers_v4` and `run.providers_v6` still apply: in `auto` only as the
 fallback, in `never` not at all (the client warns at startup if you set them).
@@ -438,7 +447,8 @@ If a client reports an address (`always`, or an `auto` fallback), the
 reported address wins and the observed one is ignored. A reported address that
 is not public is dropped (never replaced by the observed one), the family's
 `ip_source` is `none`, and the server logs a `WARN` (`check-in reported a
-non-public address; dropped`) at most once an hour per device.
+non-public address; dropped`) at most once an hour per device and address
+family.
 
 ### Private paths
 
@@ -521,6 +531,9 @@ That is inherent to observing a connection.
 - A client that reports a private or special-purpose address stops updating
   that family: the server now applies the same public-address check to reported
   addresses and drops the others.
+- Addresses are now stored in canonical form. A device whose stored IP was
+  written in a non-canonical form gets one extra `ip_history` row and one
+  change notification on its first check-in after the upgrade.
 
 ## Agent mTLS (optional)
 
