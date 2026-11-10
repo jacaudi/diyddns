@@ -171,6 +171,7 @@ func provisionMTLS(ctx context.Context, p enrollParams, credPath string, creds c
 	}
 	m, err := mtls.NewManager(mtls.Config{
 		StatePath:         statePath,
+		CredentialsPath:   credPath,
 		Creds:             creds,
 		CACertPath:        p.caCert,
 		InsecureProvision: p.insecureProvision,

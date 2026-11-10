@@ -22,11 +22,14 @@ var ErrNotFound = errors.New("credentials: file not found")
 var ErrExists = errors.New("credentials: file already exists")
 
 // Credentials is the on-disk credentials.json shape. Secret is the device HMAC
-// key as base64 (exactly as the server delivered it).
+// key as base64 (exactly as the server delivered it). PendingSecret is the
+// replacement a secret rotation generated and has not yet seen promoted; it is
+// absent outside a rotation.
 type Credentials struct {
-	ServerURL string `json:"server_url"`
-	DeviceID  string `json:"device_id"`
-	Secret    string `json:"secret"`
+	ServerURL     string `json:"server_url"`
+	DeviceID      string `json:"device_id"`
+	Secret        string `json:"secret"`
+	PendingSecret string `json:"pending_secret,omitempty"`
 }
 
 // DefaultPath returns the default credentials path under the user's

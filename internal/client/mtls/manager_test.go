@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -42,6 +44,8 @@ const (
 	routeSelf    = "GET /agent/v1/self"
 	routeCheckin = "POST /agent/v1/checkin"
 	routeCert    = "POST /agent/v1/cert"
+
+	routeRotateSecret = "POST /agent/v1/rotation/secret"
 
 	portMain  = "main"
 	portAgent = "agent"
@@ -121,13 +125,24 @@ func (l *recLog) all() string {
 
 type call struct{ port, route string }
 
+// oldKey is the env's device secret, the key the fake knows as "old".
+var oldKey = []byte("0123456789abcdef")
+
 // seenReq is one request as the fake saw it: where it landed, which loopback
-// family it arrived on (the local address of the connection) and, for a
-// check-in, its decoded JSON body.
+// family it arrived on (the local address of the connection), the name of the
+// key its signature matched ("" when unsigned or when the fake holds no keys)
+// and, for a check-in or a step-3 submit, its decoded JSON body.
 type seenReq struct {
 	port, route string
 	fam         ipdiscovery.Family
-	body        map[string]string
+	key         string
+	body        map[string]any
+}
+
+// str is the string value of body[k], "" when absent or not a string.
+func (s seenReq) str(k string) string {
+	v, _ := s.body[k].(string)
+	return v
 }
 
 // requestFamily returns the family of the local address r arrived on.
@@ -176,6 +191,19 @@ type fakeServer struct {
 	// certAgentURL and certBundle are what POST /cert answers with.
 	certAgentURL string
 	certBundle   string
+
+	// keys is the name-to-key table signatures are checked against; nil checks
+	// nothing. accept narrows which matched names are served: nil accepts every
+	// request, otherwise a signed request whose matched name is not accepted
+	// gets a plain 401. Unsigned routes (routeCaps) are never checked.
+	keys   map[string][]byte
+	accept map[string]bool
+	// rotation is added as "rotation" to every check-in answer when non-nil.
+	rotation map[string]any
+	// capsRotation adds "rotation": true to the capabilities answer.
+	capsRotation bool
+	// stepThree holds the secret of every authenticated step-3 submit.
+	stepThree []string
 }
 
 func newFakeServer(t *testing.T, clk *testClock, tlsMain bool) *fakeServer {
@@ -278,6 +306,28 @@ func (f *fakeServer) next(c call) (scripted, bool) {
 	return s, true
 }
 
+// authenticate matches r's signature against the fake's key table and reports
+// the matched key's name. ok is false when the request must get a 401: it
+// carries a signature no key made, or one made by a key that is not accepted.
+// Without a key table nothing is checked.
+func (f *fakeServer) authenticate(r *http.Request, body []byte) (name string, ok bool) {
+	f.mu.Lock()
+	keys, accept := f.keys, f.accept
+	f.mu.Unlock()
+	if keys == nil {
+		return "", true
+	}
+	canonical := shared.CanonicalRequest(r.Method, r.URL.Path,
+		r.Header.Get(shared.HeaderTimestamp), r.Header.Get(shared.HeaderNonce), shared.BodyHashHex(body))
+	got := r.Header.Get(shared.HeaderSignature)
+	for n, k := range keys {
+		if hmac.Equal([]byte(shared.Sign(k, canonical)), []byte(got)) {
+			return n, accept == nil || accept[n]
+		}
+	}
+	return "", false
+}
+
 func (f *fakeServer) handler(port string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if port == portAgent && f.down.Load() {
@@ -285,20 +335,36 @@ func (f *fakeServer) handler(port string) http.Handler {
 		}
 		c := call{port, r.Method + " " + r.URL.Path}
 		sr := seenReq{port: port, route: c.route, fam: requestFamily(r)}
-		if c.route == routeCheckin {
-			if err := json.NewDecoder(r.Body).Decode(&sr.body); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if c.route == routeCheckin || c.route == routeRotateSecret {
+			if err := json.Unmarshal(raw, &sr.body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
+		authed := true
+		if c.route != routeCaps {
+			sr.key, authed = f.authenticate(r, raw)
+		}
 		f.mu.Lock()
 		f.calls = append(f.calls, c)
 		f.seen = append(f.seen, sr)
+		if authed && c.route == routeRotateSecret {
+			f.stepThree = append(f.stepThree, sr.str("secret"))
+		}
 		sc, scripted := f.next(c)
-		advertise, observed, capsURL := f.advertise, f.observedIP, f.capsAgentURL
-		certURL, bundle, checkinFn := f.certAgentURL, f.certBundle, f.checkinFn
+		advertise, observed, capsURL, capsRotation := f.advertise, f.observedIP, f.capsAgentURL, f.capsRotation
+		certURL, bundle, checkinFn, rotation := f.certAgentURL, f.certBundle, f.checkinFn, f.rotation
 		f.mu.Unlock()
 
+		if !authed {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if scripted {
 			if sc.after != nil {
 				sc.after()
@@ -317,11 +383,16 @@ func (f *fakeServer) handler(port string) http.Handler {
 			if observed {
 				body["observed_ip"] = true
 			}
+			if capsRotation {
+				body["rotation"] = true
+			}
 			_ = json.NewEncoder(w).Encode(body)
 		case routeSelf:
 			if f.onSelf != nil {
 				f.onSelf()
 			}
+			_, _ = w.Write([]byte(`{}`))
+		case routeRotateSecret:
 			_, _ = w.Write([]byte(`{}`))
 		case routeCheckin:
 			status, body := http.StatusOK, map[string]any{
@@ -332,13 +403,16 @@ func (f *fakeServer) handler(port string) http.Handler {
 					status = http.StatusOK
 				}
 			}
+			if rotation != nil {
+				body["rotation"] = rotation
+			}
 			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(body)
 		case routeCert:
 			var req struct {
 				CSR string `json:"csr"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.Unmarshal(raw, &req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -431,8 +505,10 @@ type env struct {
 	clk       *testClock
 	logs      *recLog
 	statePath string
-	caPath    string
-	insecure  bool
+	// dir holds credentials.json (see config).
+	dir      string
+	caPath   string
+	insecure bool
 
 	// mainURL overrides the fake's main URL (the dual-stack tests point it at
 	// localhost). discovery and families are the Manager's per-family mode.
@@ -451,6 +527,7 @@ func newEnv(t *testing.T, tlsMain bool) *env {
 		clk:       clk,
 		logs:      &recLog{},
 		statePath: filepath.Join(t.TempDir(), FileName),
+		dir:       t.TempDir(),
 		insecure:  !tlsMain,
 		discovery: config.IPDiscoveryNever,
 		families:  []ipdiscovery.Family{ipdiscovery.FamilyV4},
@@ -468,11 +545,12 @@ func newEnv(t *testing.T, tlsMain bool) *env {
 
 func (e *env) config() Config {
 	cfg := Config{
-		StatePath: e.statePath,
+		StatePath:       e.statePath,
+		CredentialsPath: filepath.Join(e.dir, "credentials.json"),
 		Creds: credentials.Credentials{
 			ServerURL: cmp.Or(e.mainURL, e.fs.main.URL),
 			DeviceID:  testDeviceID,
-			Secret:    base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")),
+			Secret:    base64.StdEncoding.EncodeToString(oldKey),
 		},
 		CACertPath:        e.caPath,
 		InsecureProvision: e.insecure,

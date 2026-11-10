@@ -120,10 +120,10 @@ func newDualStackServer(t *testing.T, h http.Handler) string {
 func sourceAnswer(noIP func(ipdiscovery.Family) string) func(seenReq) (int, map[string]any) {
 	return func(r seenReq) (int, map[string]any) {
 		src := map[string]string{}
-		if r.body["ipv4"] != "" {
+		if r.str("ipv4") != "" {
 			src["ipv4"] = "reported"
 		}
-		if r.body["ipv6"] != "" {
+		if r.str("ipv6") != "" {
 			src["ipv6"] = "reported"
 		}
 		if len(src) == 0 {
@@ -190,11 +190,11 @@ func wantRequests(t *testing.T, got []seenReq, want ...reqWant) {
 		if !w.unpinned && g.fam != w.fam {
 			t.Errorf("request %d arrived over %s, want %s", i, g.fam, w.fam)
 		}
-		if g.body["ipv4"] != w.ipv4 || g.body["ipv6"] != w.ipv6 {
-			t.Errorf("request %d carried ipv4=%q ipv6=%q, want ipv4=%q ipv6=%q", i, g.body["ipv4"], g.body["ipv6"], w.ipv4, w.ipv6)
+		if g.str("ipv4") != w.ipv4 || g.str("ipv6") != w.ipv6 {
+			t.Errorf("request %d carried ipv4=%q ipv6=%q, want ipv4=%q ipv6=%q", i, g.str("ipv4"), g.str("ipv6"), w.ipv4, w.ipv6)
 		}
-		if g.body["hostname"] != "host" {
-			t.Errorf("request %d hostname = %q, want the report's metadata", i, g.body["hostname"])
+		if g.str("hostname") != "host" {
+			t.Errorf("request %d hostname = %q, want the report's metadata", i, g.str("hostname"))
 		}
 	}
 }
@@ -589,7 +589,7 @@ func TestDualStackV4OnlyServerRecordsV6Auto(t *testing.T) {
 	mustCycle(t, m)
 
 	got := e.fs.newCheckins(portMain)
-	if len(got) != 3 || got[2].body["ipv6"] != pubV6 {
+	if len(got) != 3 || got[2].str("ipv6") != pubV6 {
 		t.Fatalf("check-ins = %+v, want the third to carry ipv6 %s", got, pubV6)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/jacaudi/diyddns/internal/client/enroll"
 	"github.com/jacaudi/diyddns/internal/client/ipdiscovery"
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 const (
@@ -38,7 +39,9 @@ var ErrAgentUnavailable = errors.New("mtls: agent port failed after commit")
 type Config struct {
 	// StatePath is where mtls.json lives (see PathFor).
 	StatePath string
-	Creds     credentials.Credentials
+	// CredentialsPath is credentials.json, which a secret rotation rewrites.
+	CredentialsPath string
+	Creds           credentials.Credentials
 	// CACertPath trusts a private CA on the main port.
 	CACertPath string
 	// InsecureProvision allows provisioning over an http:// main port.
@@ -88,11 +91,17 @@ type Manager struct {
 	lastInsecureWarn     time.Time
 	lastProbationWarn    time.Time
 	lastNeverUnsupported time.Time
+	lastInsecureRotate   time.Time
+	lastRotateSaveErr    time.Time
 }
 
-// normalizeConfig applies cfg's defaults and validates ip_discovery. It is split
-// out of NewManager to keep that function under the gocyclo limit.
+// normalizeConfig applies cfg's defaults and validates CredentialsPath and
+// ip_discovery. It is split out of NewManager to keep that function under the
+// gocyclo limit.
 func normalizeConfig(cfg Config) (Config, error) {
+	if cfg.CredentialsPath == "" {
+		return cfg, errors.New("mtls: CredentialsPath is required")
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -125,7 +134,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	keys, err := checkin.NewKeys(cfg.Creds.Secret, "")
+	keys, droppedPending, err := loadKeys(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mtls: main client: %w", err)
 	}
@@ -144,6 +153,11 @@ func NewManager(cfg Config) (*Manager, error) {
 		enroll:    enrollClient,
 		mainHTTPS: strings.HasPrefix(mainClient.BaseURL(), "https://"),
 		fam:       make(map[ipdiscovery.Family]*familyState, len(cfg.Families)),
+	}
+	keys.Promoted = m.saveKeys
+	if droppedPending {
+		cfg.Log.Warn("secret rotation: pending_secret in credentials is unreadable; dropped it")
+		m.saveKeysBestEffort()
 	}
 	for _, f := range cfg.Families {
 		m.fam[f] = &familyState{lastWarn: map[string]time.Time{}}
@@ -191,6 +205,9 @@ func (m *Manager) Checkin(ctx context.Context, r checkin.Report) (checkin.Result
 	if err := m.refreshCaps(ctx); err != nil {
 		m.cfg.Log.Warn("capabilities fetch failed; keeping previous", "error", err)
 	}
+	if m.caps.Rotation {
+		r.Capabilities = []string{shared.CapabilityRotation}
+	}
 	if m.cur != nil && !m.cfg.Now().Before(m.cur.notAfter) {
 		m.drop("device certificate expired; will provision again", nil)
 	}
@@ -202,23 +219,33 @@ func (m *Manager) Checkin(ctx context.Context, r checkin.Report) (checkin.Result
 			m.tryProvision(ctx)
 		}
 		if m.cur == nil {
-			return m.checkinFamilies(ctx, m.main, m.pinnedMain, r)
+			return m.checkinVia(ctx, m.main, m.pinnedMain, r)
 		}
 		m.refreshAgentURL()
 		if !m.cur.state.Committed && !m.probe(ctx) {
 			if m.cur == nil {
 				continue // rejected during probation: provision again, or fall to main
 			}
-			return m.checkinFamilies(ctx, m.main, m.pinnedMain, r)
+			return m.checkinVia(ctx, m.main, m.pinnedMain, r)
 		}
-		m.renew(ctx)
-		res, err := m.checkinFamilies(ctx, m.cur.agent, m.cur.pinned, r)
+		m.renew(ctx, false)
+		res, err := m.checkinVia(ctx, m.cur.agent, m.cur.pinned, r)
 		if errors.Is(err, checkin.ErrClientCertRejected) {
 			m.drop("agent port rejected our client certificate; will provision again", nil)
 			continue
 		}
 		return res, agentError(err)
 	}
+}
+
+// checkinVia runs the cycle's final check-in over c (see checkinFamilies) and,
+// when it succeeded, acts on the rotation request it carried.
+func (m *Manager) checkinVia(ctx context.Context, c *checkin.Client, pinned map[ipdiscovery.Family]*checkin.Client, r checkin.Report) (checkin.Result, error) {
+	res, err := m.checkinFamilies(ctx, c, pinned, r)
+	if err == nil {
+		m.afterCheckin(ctx, c, res)
+	}
+	return res, err
 }
 
 // refreshCaps fetches capabilities when never fetched or capsRefresh elapsed.
@@ -324,9 +351,11 @@ func (m *Manager) probe(ctx context.Context) bool {
 }
 
 // renew swaps in a fresh certificate over the agent port when fewer than
-// renewBefore remain. Failure is a WARN; the old certificate keeps working.
-func (m *Manager) renew(ctx context.Context) {
-	if m.cur.notAfter.Sub(m.cfg.Now()) >= renewBefore {
+// renewBefore remain, or at once when force is set. Failure is a WARN; the old
+// certificate keeps working, because the server holds a renewed certificate as
+// pending until the device presents it (#175).
+func (m *Manager) renew(ctx context.Context, force bool) {
+	if !force && m.cur.notAfter.Sub(m.cfg.Now()) >= renewBefore {
 		return
 	}
 	s, err := m.issue(ctx, m.cur.agent, true)
