@@ -446,3 +446,42 @@ func TestNewManager_RequiresCredentialsPath(t *testing.T) {
 		t.Fatalf("err = %v, want %q", err, "mtls: CredentialsPath is required")
 	}
 }
+
+// The B5 gate keys on the hop step 3 takes, not on the configured main URL: a
+// device committed to mTLS rotates over the agent port even though its main
+// URL is http:// and run.insecure_provision is not set.
+func TestRotation_CommittedDeviceRotatesOverAgentPortDespiteHTTPMain(t *testing.T) {
+	e := newEnv(t, false)
+	e.insecure = false
+	e.seed(true)
+	e.fs.capsRotation = true
+	e.fs.keys = map[string][]byte{"old": oldKey}
+	e.fs.rotation = map[string]any{"secret": true}
+	m := e.manager()
+
+	mustCycle(t, m)
+
+	wantFreshPending(t, e.creds(), nil)
+	wantCount(t, e.fs.count(portAgent, routeRotateSecret), 1, "agent-port step-3 requests")
+	wantCount(t, e.fs.count(portMain, routeRotateSecret), 0, "main-port step-3 requests")
+	wantCount(t, e.logs.count(slog.LevelError, "refusing to rotate the device secret"), 0, "refusal ERRORs")
+	wantCount(t, e.logs.count(slog.LevelWarn, "rotating the device secret over insecure http://"), 0, "insecure-rotation WARNs")
+}
+
+// A pending secret of the wrong length is as unreadable as a corrupt one: it is
+// dropped with the same WARN, and the current secret still signs.
+func TestRotation_WrongLengthPendingDroppedWithWarn(t *testing.T) {
+	e := rotEnv(t)
+	cfg := e.config()
+	cfg.Creds.PendingSecret = b64([]byte("short"))
+
+	m, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if m.keys.Pending != nil {
+		t.Error("wrong-length pending kept in memory, want nil")
+	}
+	wantCount(t, e.logs.count(slog.LevelWarn, "pending_secret in credentials is unreadable"), 1, "unreadable-pending WARNs")
+}

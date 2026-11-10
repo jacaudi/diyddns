@@ -15,9 +15,6 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// rotationSecretLen is the byte length of a device secret.
-const rotationSecretLen = 32
-
 // rotationSecretInput is the body of POST /agent/v1/rotation/secret. It is the
 // raw bytes, with no huma Body schema: the body carries a secret, and a schema
 // validation failure (422) would quote the offending value.
@@ -54,7 +51,7 @@ func decodeRotationSecret(raw []byte) ([]byte, error) {
 		Secret string `json:"secret"`
 	}
 	if err := json.Unmarshal(raw, &body); err == nil {
-		if secret, err := base64.StdEncoding.DecodeString(body.Secret); err == nil && len(secret) == rotationSecretLen {
+		if secret, err := base64.StdEncoding.DecodeString(body.Secret); err == nil && len(secret) == shared.DeviceSecretLen {
 			return secret, nil
 		}
 	}

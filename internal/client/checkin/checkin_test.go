@@ -586,6 +586,7 @@ func keyServer(t *testing.T, known map[string][]byte, accept map[string]bool, fa
 		case !s.accept[name]:
 			w.WriteHeader(http.StatusUnauthorized)
 		default:
+			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"device_id":"d","rotation":{"secret":false,"cert":false}}`)
 		}
 	}))
@@ -823,5 +824,158 @@ func TestCheckin_DecodesRotation(t *testing.T) {
 				t.Errorf("Rotation = %+v, want %+v", res.Rotation, tt.want)
 			}
 		})
+	}
+}
+
+// pendingSigned answers every request with h and returns a client whose Keys
+// hold a Pending key, so the first request is signed with it.
+func pendingSigned(t *testing.T, h http.HandlerFunc) (*Client, *Keys, *int) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	promoted := 0
+	keys := &Keys{Current: keyA, Pending: keyB, Promoted: func() error { promoted++; return nil }}
+	c, err := NewClient(srv.URL, testDeviceID, keys, Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c, keys, &promoted
+}
+
+// A pending key is promoted only by a response that is the server's: a 2xx that
+// is not JSON (a captive portal, a proxy's HTML page) must keep both keys.
+func TestKeys_PendingSigned2xxNotJSONKeepsBoth(t *testing.T) {
+	tests := []struct {
+		name, contentType, body string
+	}{
+		{"html 200", "text/html; charset=utf-8", "<html>login</html>"},
+		{"json content type, junk body", "application/json", "<html>login</html>"},
+		{"json body, wrong content type", "text/plain", `{"device_id":"d"}`},
+		{"empty 200", "application/json", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, keys, promoted := pendingSigned(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tt.contentType)
+				_, _ = io.WriteString(w, tt.body)
+			})
+			_, err := c.Checkin(t.Context(), Report{})
+			if !errors.Is(err, ErrServer) {
+				t.Errorf("err = %v, want ErrServer", err)
+			}
+			if !bytes.Equal(keys.Current, keyA) || !bytes.Equal(keys.Pending, keyB) || *promoted != 0 {
+				t.Errorf("keys = %s, promoted %d times; want both kept and no promote", keys, *promoted)
+			}
+		})
+	}
+}
+
+// A redirect on a pending-signed request is never followed: a login page behind
+// it would answer 200 and promote a key the server never accepted.
+func TestKeys_PendingSignedRedirectNotFollowed(t *testing.T) {
+	loginHit := false
+	c, keys, promoted := pendingSigned(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			loginHit = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"device_id":"d"}`)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	})
+	_, err := c.Checkin(t.Context(), Report{})
+	if !errors.Is(err, ErrServer) {
+		t.Errorf("err = %v, want ErrServer", err)
+	}
+	if loginHit {
+		t.Error("the redirect was followed")
+	}
+	if !bytes.Equal(keys.Current, keyA) || !bytes.Equal(keys.Pending, keyB) || *promoted != 0 {
+		t.Errorf("keys = %s, promoted %d times; want both kept and no promote", keys, *promoted)
+	}
+}
+
+// A request signed with Current keeps net/http's redirect handling, so an
+// http to https 308 in front of the server still works.
+func TestKeys_CurrentSignedRedirectFollowed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("hop") == "" {
+			http.Redirect(w, r, r.URL.Path+"?hop=1", http.StatusPermanentRedirect)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"device_id":"d"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, testDeviceID, &Keys{Current: keyA}, Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	res, err := c.Checkin(t.Context(), Report{})
+	if err != nil || res.DeviceID != "d" {
+		t.Errorf("Checkin = %+v, %v; want the redirect followed", res, err)
+	}
+}
+
+// Step 3 carries the new secret, so it must never follow a redirect: the
+// second server is not the configured one and must receive nothing.
+func TestSubmitPendingSecret_RedirectNotFollowed(t *testing.T) {
+	hits := 0
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	t.Cleanup(other.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+	keys := &Keys{Current: keyA, Pending: keyB}
+	c, err := NewClient(srv.URL, testDeviceID, keys, Options{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := c.SubmitPendingSecret(t.Context()); !errors.Is(err, ErrServer) {
+		t.Errorf("err = %v, want ErrServer", err)
+	}
+	if hits != 0 {
+		t.Errorf("the redirect target received %d request(s), want 0", hits)
+	}
+	if !bytes.Equal(keys.Current, keyA) || !bytes.Equal(keys.Pending, keyB) {
+		t.Errorf("keys = %s, want both kept", keys)
+	}
+}
+
+// Keys prints redacted as a value and as a nil pointer too, not only through a
+// non-nil pointer.
+func TestKeys_RedactedAsValueAndNilPointer(t *testing.T) {
+	keys := Keys{Current: keyA, Pending: keyB}
+	var nilKeys *Keys
+	secrets := []string{
+		hex.EncodeToString(keyA), hex.EncodeToString(keyB),
+		base64.StdEncoding.EncodeToString(keyA), base64.StdEncoding.EncodeToString(keyB),
+		fmt.Sprintf("%d", keyA), fmt.Sprintf("%d", keyB),
+	}
+	var logged bytes.Buffer
+	slog.New(slog.NewTextHandler(&logged, nil)).Info("keys", "keys", keys)
+	outs := []string{logged.String()}
+	for _, f := range []string{"%v", "%+v", "%#v", "%s", "%x"} {
+		outs = append(outs, fmt.Sprintf(f, keys), fmt.Sprintf(f, nilKeys))
+	}
+	for _, out := range outs {
+		for _, s := range secrets {
+			if strings.Contains(out, s) {
+				t.Errorf("output %q leaks key material %q", out, s)
+			}
+		}
+	}
+	if got := fmt.Sprintf("%v", keys); !strings.Contains(got, "pending:set") {
+		t.Errorf("value output %q lacks %q", got, "pending:set")
+	}
+}
+
+func TestNewKeys_PendingWrongLength(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString
+	for _, n := range []int{1, 16, 33} {
+		if _, err := NewKeys(b64(keyA), b64(make([]byte, n))); err == nil || !strings.Contains(err.Error(), "must be 32 bytes") {
+			t.Errorf("pending of %d bytes: err = %v, want a length error", n, err)
+		}
 	}
 }

@@ -6,13 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jacaudi/diyddns/internal/client/checkin"
 	"github.com/jacaudi/diyddns/internal/client/credentials"
+	"github.com/jacaudi/diyddns/internal/shared"
 )
-
-// pendingSecretLen is the size of a generated pending secret, in bytes.
-const pendingSecretLen = 32
 
 // loadKeys builds the device's key pair from cfg.Creds. A pending secret that
 // cannot be decoded is dropped (droppedPending), not fatal: the current secret
@@ -79,19 +78,25 @@ func (m *Manager) rotateSecret(ctx context.Context, c *checkin.Client, rot check
 		}
 		return
 	}
-	if !m.mainHTTPS {
+	// B5 gates the hop step 3 really takes: c's URL, not the configured main
+	// URL, so a device committed to mTLS rotates over its agent port.
+	if !strings.HasPrefix(c.BaseURL(), "https://") {
 		if !m.cfg.InsecureProvision {
 			if m.due(&m.lastInsecureRotate) {
 				m.cfg.Log.Error("refusing to rotate the device secret over insecure http://: set run.insecure_provision to allow it")
 			}
 			return
 		}
-		m.cfg.Log.Warn("rotating the device secret over insecure http://: a network attacker can read the new secret")
+		m.cfg.Log.Warn("rotating the device secret over insecure http:// (run.insecure_provision is set): a network attacker can read the new secret")
 	}
 	if m.keys.Pending == nil {
-		p := make([]byte, pendingSecretLen)
-		// crypto/rand.Read never returns an error (Go 1.24).
-		_, _ = rand.Read(p)
+		p := make([]byte, shared.DeviceSecretLen)
+		if _, err := rand.Read(p); err != nil {
+			if m.due(&m.lastRotateSaveErr) {
+				m.cfg.Log.Error("secret rotation: cannot generate a new secret", "error", err)
+			}
+			return
+		}
 		m.keys.Pending = p
 		if err := m.saveKeys(); err != nil {
 			// Sending a secret that could not be persisted would lose it on a restart.
@@ -115,7 +120,7 @@ func (m *Manager) rotateSecret(ctx context.Context, c *checkin.Client, rot check
 }
 
 // rotateCert renews the device certificate now, ahead of renewBefore, when the
-// owner asked for it. Only a committed device renews: one on probation has not
+// admin asked for it. Only a committed device renews: one on probation has not
 // shown its certificate works yet.
 func (m *Manager) rotateCert(ctx context.Context, rot checkin.Rotation) {
 	if rot.Cert && m.cur != nil && m.cur.state.Committed {

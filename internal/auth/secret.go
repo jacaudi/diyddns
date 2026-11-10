@@ -6,15 +6,17 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // randRead is the source of cryptographic randomness, indirected so tests can
 // exercise the RNG-failure branches. Production always uses crypto/rand.Read.
 var randRead = rand.Read
 
-// GenerateSecret returns 32 cryptographically-random bytes — a device's HMAC secret.
+// GenerateSecret returns shared.DeviceSecretLen cryptographically-random bytes — a device's HMAC secret.
 func GenerateSecret() ([]byte, error) {
-	b := make([]byte, 32)
+	b := make([]byte, shared.DeviceSecretLen)
 	if _, err := randRead(b); err != nil {
 		return nil, fmt.Errorf("auth.GenerateSecret: %w", err)
 	}

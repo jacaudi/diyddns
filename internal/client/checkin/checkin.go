@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -71,7 +72,7 @@ type Result struct {
 	Rotation    Rotation
 }
 
-// Rotation says which tracks an owner asked this device to rotate. An old
+// Rotation says which tracks an admin asked this device to rotate. An old
 // server omits it, which reads as no request.
 type Rotation struct {
 	Secret bool `json:"secret"`
@@ -132,12 +133,18 @@ func NewKeys(secretB64, pendingB64 string) (*Keys, error) {
 		if k.Pending, err = base64.StdEncoding.DecodeString(pendingB64); err != nil || len(k.Pending) == 0 {
 			return nil, errors.New("checkin: pending secret is not valid base64")
 		}
+		if len(k.Pending) != shared.DeviceSecretLen {
+			return nil, fmt.Errorf("checkin: pending secret must be %d bytes", shared.DeviceSecretLen)
+		}
 	}
 	return k, nil
 }
 
+// The methods below take a value receiver, so a Keys printed by value, and a
+// nil *Keys (which fmt renders as <nil>), are redacted as well as a *Keys.
+
 // String reports which keys are held, never their bytes.
-func (k *Keys) String() string {
+func (k Keys) String() string {
 	state := func(b []byte) string {
 		if b == nil {
 			return "none"
@@ -148,11 +155,11 @@ func (k *Keys) String() string {
 }
 
 // LogValue keeps the key bytes out of slog output.
-func (k *Keys) LogValue() slog.Value { return slog.StringValue(k.String()) }
+func (k Keys) LogValue() slog.Value { return slog.StringValue(k.String()) }
 
 // Format makes every fmt verb (%v, %+v, %#v, %s, %x) print String, so no verb
 // reaches the key bytes.
-func (k *Keys) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, k.String()) }
+func (k Keys) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, k.String()) }
 
 // Client signs and sends check-ins for one device.
 type Client struct {
@@ -161,6 +168,11 @@ type Client struct {
 	keys     *Keys
 	now      func() time.Time
 	http     *http.Client
+	// noRedirect shares http's transport but returns a 3xx as the response. It
+	// carries every request a redirect must not reach: one signed with a pending
+	// key (a login page behind the redirect would answer 2xx and promote a key
+	// the server never accepted) and step 3 (it carries the new secret).
+	noRedirect *http.Client
 }
 
 // NewClient validates baseURL and (optionally) trusts a CA bundle. keys is
@@ -195,12 +207,16 @@ func NewClient(baseURL, deviceID string, keys *Keys, opts Options) (*Client, err
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
+	follow := &http.Client{Timeout: timeout, Transport: transport}
+	strict := *follow
+	strict.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{
-		baseURL:  baseURL,
-		deviceID: deviceID,
-		keys:     keys,
-		now:      time.Now,
-		http:     &http.Client{Timeout: timeout, Transport: transport},
+		baseURL:    baseURL,
+		deviceID:   deviceID,
+		keys:       keys,
+		now:        time.Now,
+		http:       follow,
+		noRedirect: &strict,
 	}, nil
 }
 
@@ -283,7 +299,9 @@ func (c *Client) RequestCert(ctx context.Context, csrPEM []byte) (CertResponse, 
 // SubmitPendingSecret is step 3 of a secret rotation: it POSTs the pending
 // secret to /agent/v1/rotation/secret, signed with Current only (rule 2), so the
 // new secret travels only inside a request the server can already verify. A 2xx
-// returns nil; a coded 409 is ErrNoSecretRotationPending.
+// returns nil; a coded 409 is ErrNoSecretRotationPending. It never follows a
+// redirect, so the secret reaches only the configured server (any 3xx is an
+// error).
 func (c *Client) SubmitPendingSecret(ctx context.Context) error {
 	if c.keys.Pending == nil {
 		return errors.New("checkin: no pending secret")
@@ -293,7 +311,7 @@ func (c *Client) SubmitPendingSecret(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("checkin: marshal: %w", err)
 	}
-	resp, err := c.send(ctx, c.keys.Current, http.MethodPost, "/agent/v1/rotation/secret", body) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
+	resp, err := c.send(ctx, c.keys.Current, false, http.MethodPost, "/agent/v1/rotation/secret", body) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
 	if err != nil {
 		return err
 	}
@@ -305,37 +323,61 @@ func (c *Client) SubmitPendingSecret(ctx context.Context) error {
 }
 
 // do sends one signed request. While a pending secret exists it signs with that
-// first; a 401 retries with Current in the same cycle (rule 5). A 2xx on the
-// pending key promotes it (Pending becomes Current) and runs Promoted; a
-// transport failure or any other status keeps both keys (rule 7). A nil body is
-// sent as an empty body (and hashed as such). The caller owns resp.Body.
+// first, never following a redirect; a 401 retries with Current in the same
+// cycle (rule 5). A 2xx on the pending key promotes it (Pending becomes Current)
+// and runs Promoted, but only once the response proves to be the server's (see
+// promote); a transport failure, a 3xx or any other status keeps both keys
+// (rule 7). A nil body is sent as an empty body (and hashed as such). The caller
+// owns resp.Body.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	if p := c.keys.Pending; p != nil {
-		resp, err := c.send(ctx, p, method, path, body)
+		resp, err := c.send(ctx, p, false, method, path, body)
 		if err != nil {
 			return nil, err // transport failure: keep both keys (rule 7)
 		}
 		switch {
 		case resp.StatusCode/100 == 2:
-			c.keys.Current, c.keys.Pending = p, nil
-			if c.keys.Promoted != nil {
-				if err := c.keys.Promoted(); err != nil {
-					agenthttp.DrainClose(resp.Body)
-					return nil, fmt.Errorf("checkin: save promoted secret: %w", err)
-				}
-			}
-			return resp, nil
+			return c.promote(resp, p)
 		case resp.StatusCode != http.StatusUnauthorized:
-			return resp, nil // 5xx/4xx: keep both keys (rule 7, SF-7)
+			return resp, nil // 3xx/4xx/5xx: keep both keys (rule 7, SF-7)
 		}
 		agenthttp.DrainClose(resp.Body) // 401: retry with Current in this cycle (rule 5)
 	}
-	return c.send(ctx, c.keys.Current, method, path, body)
+	return c.send(ctx, c.keys.Current, true, method, path, body)
+}
+
+// maxPromoteBody bounds the 2xx body promote buffers; every agent response is a
+// few KiB at most.
+const maxPromoteBody = 1 << 20
+
+// promote makes p the Current key after a pending-signed 2xx, but only when the
+// response is the server's: a JSON body with a JSON content type. Anything else
+// (a captive portal's or a proxy's HTML page) keeps both keys and fails the
+// request, because promoting on it would drop the only secret the server knows.
+// It returns resp with its body replaced by the buffered bytes.
+func (c *Client) promote(resp *http.Response, p []byte) (*http.Response, error) {
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxPromoteBody))
+	agenthttp.DrainClose(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("checkin: read response: %w", err)
+	}
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "application/json" || !json.Valid(buf) {
+		return nil, fmt.Errorf("%w: status %d: response is not the server's JSON; kept both keys", ErrServer, resp.StatusCode)
+	}
+	c.keys.Current, c.keys.Pending = p, nil
+	if c.keys.Promoted != nil {
+		if err := c.keys.Promoted(); err != nil {
+			return nil, fmt.Errorf("checkin: save promoted secret: %w", err)
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(buf))
+	return resp, nil
 }
 
 // send signs method+path+body with key and sends it, with a fresh timestamp and
-// nonce per call. The caller owns resp.Body.
-func (c *Client) send(ctx context.Context, key []byte, method, path string, body []byte) (*http.Response, error) {
+// nonce per call. follow says whether a redirect is followed. The caller owns
+// resp.Body.
+func (c *Client) send(ctx context.Context, key []byte, follow bool, method, path string, body []byte) (*http.Response, error) {
 	ts := strconv.FormatInt(c.now().Unix(), 10)
 	nonce, err := randNonce()
 	if err != nil {
@@ -356,7 +398,11 @@ func (c *Client) send(ctx context.Context, key []byte, method, path string, body
 	req.Header.Set(shared.HeaderNonce, nonce)
 	req.Header.Set(shared.HeaderSignature, sig)
 
-	resp, err := c.http.Do(req)
+	hc := c.http
+	if !follow {
+		hc = c.noRedirect
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("checkin: %s %s: %w", method, path, err)
 	}
