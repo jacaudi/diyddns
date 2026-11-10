@@ -63,7 +63,7 @@ func newAgentListener(t *testing.T, mutate ...func(*api.ServerDeps)) agentListen
 	}
 	agentMux := http.NewServeMux()
 	api.BuildAgent(agentMux, deps)
-	srv := httptest.NewUnstartedServer(api.ClientCertMiddleware(ca, st.Devices(), deps.Log)(agentMux))
+	srv := httptest.NewUnstartedServer(api.ClientCertMiddleware(ca, st.Devices(), deps.Rotation, deps.Log)(agentMux))
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // handshake rejections are expected
 	srv.TLS = &tls.Config{
 		MinVersion:   tls.VersionTLS13,
@@ -455,8 +455,135 @@ func TestAgentListener_RenewOnAgentPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	if after.CertSerial == before.CertSerial {
-		t.Errorf("cert serial unchanged at %q after renewal", after.CertSerial)
+	if after.CertSerial != before.CertSerial {
+		t.Errorf("current serial = %q after renewal, want it left at %q", after.CertSerial, before.CertSerial)
+	}
+	var resp struct {
+		Certificate string `json:"certificate"`
+	}
+	decodeJSON(t, body, &resp)
+	block, _ := pem.Decode([]byte(resp.Certificate))
+	if block == nil {
+		t.Fatalf("response certificate is not PEM: %s", body)
+	}
+	issued, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if want := agenttls.SerialHex(issued.SerialNumber); after.PendingCertSerial != want {
+		t.Errorf("pending serial = %q, want the issued %q", after.PendingCertSerial, want)
+	}
+}
+
+func (l agentListener) device(t *testing.T, id string) store.Device {
+	t.Helper()
+	dev, err := l.st.Devices().GetByID(t.Context(), id)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	return dev
+}
+
+// setPending issues a second certificate for d and records its serial as the
+// pending one, as a renewal does.
+func (l agentListener) setPending(t *testing.T, d testDevice) tls.Certificate {
+	t.Helper()
+	b := issueClientCert(t, l.ca, d.id)
+	if err := l.st.Devices().SetPendingCert(t.Context(), d.id, agenttls.SerialHex(b.Leaf.SerialNumber)); err != nil {
+		t.Fatalf("SetPendingCert: %v", err)
+	}
+	return b
+}
+
+func TestAgentListener_PendingSerialPromotes(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-promote@example.com")
+	if err := l.st.Devices().MarkRotation(t.Context(), d.id, false, true, time.Now().Unix()); err != nil {
+		t.Fatalf("MarkRotation: %v", err)
+	}
+	b := l.setPending(t, d)
+
+	status, body := l.send(t, l.client(t, b), http.MethodGet, "/agent/v1/self", d.id, d.secret, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status over pending cert = %d, want 200, body=%s", status, body)
+	}
+	row := l.device(t, d.id)
+	if row.CertSerial != agenttls.SerialHex(b.Leaf.SerialNumber) || row.CertNotAfter != b.Leaf.NotAfter.Unix() {
+		t.Errorf("current = %q/%d, want B %q/%d", row.CertSerial, row.CertNotAfter, agenttls.SerialHex(b.Leaf.SerialNumber), b.Leaf.NotAfter.Unix())
+	}
+	if row.PendingCertSerial != "" || row.RotateCertAt != 0 {
+		t.Errorf("pending = %q, RotateCertAt = %d, want both cleared", row.PendingCertSerial, row.RotateCertAt)
+	}
+	page, err := l.st.AuditLog().ListPaginated(t.Context(), store.AuditFilter{EventType: "device.rotation.completed"}, "", 10)
+	if err != nil {
+		t.Fatalf("ListPaginated: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Errorf("device.rotation.completed rows = %d, want 1", len(page.Rows))
+	}
+
+	status, body = l.send(t, l.client(t, d.cert), http.MethodGet, "/agent/v1/self", d.id, d.secret, nil)
+	wantCertRejected(t, status, body)
+}
+
+// TestAgentListener_LostRenewalNoLockout: a renewal whose response never arrived
+// leaves the old certificate current, so the device keeps working and the
+// pending serial waits for the next renewal.
+func TestAgentListener_LostRenewalNoLockout(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-lost@example.com")
+
+	status, body := l.send(t, l.client(t, d.cert), http.MethodPost, "/agent/v1/cert", d.id, d.secret, map[string]string{"csr": testCSR(t)})
+	if status != http.StatusOK {
+		t.Fatalf("renew status = %d, want 200, body=%s", status, body)
+	}
+
+	status, body = l.send(t, l.client(t, d.cert), http.MethodGet, "/agent/v1/self", d.id, d.secret, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status over old cert = %d, want 200, body=%s", status, body)
+	}
+	if row := l.device(t, d.id); row.PendingCertSerial == "" {
+		t.Error("pending serial cleared by a request over the old certificate")
+	}
+}
+
+// TestAgentListener_CancelKeepsPendingCert (BL-1): cancelling a rotation never
+// orphans a certificate the device may already hold.
+func TestAgentListener_CancelKeepsPendingCert(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-cancel@example.com")
+	if err := l.st.Devices().MarkRotation(t.Context(), d.id, false, true, time.Now().Unix()); err != nil {
+		t.Fatalf("MarkRotation: %v", err)
+	}
+	b := l.setPending(t, d)
+	if _, err := l.st.Devices().CancelRotation(t.Context(), d.id); err != nil {
+		t.Fatalf("CancelRotation: %v", err)
+	}
+
+	status, body := l.send(t, l.client(t, b), http.MethodGet, "/agent/v1/self", d.id, d.secret, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status over pending cert = %d, want 200, body=%s", status, body)
+	}
+	if row := l.device(t, d.id); row.CertSerial != agenttls.SerialHex(b.Leaf.SerialNumber) {
+		t.Errorf("CertSerial = %q, want B %q", row.CertSerial, agenttls.SerialHex(b.Leaf.SerialNumber))
+	}
+}
+
+// TestAgentListener_OverwrittenPendingIs401: a certificate whose serial was
+// replaced as pending by a later renewal matches neither slot. The
+// pending_superseded path (a promote losing the race) is covered at store level
+// by TestPromoteCert_Outcomes.
+func TestAgentListener_OverwrittenPendingIs401(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-overwrite@example.com")
+	b := l.setPending(t, d)
+	l.setPending(t, d) // overwrites B as the pending serial
+
+	status, body := l.send(t, l.client(t, b), http.MethodGet, "/agent/v1/self", d.id, d.secret, nil)
+	wantCertRejected(t, status, body)
+	recs := withMsg(atLevel(l.logs.records(t), "WARN"), "agent client certificate rejected")
+	if len(recs) != 1 || recs[0]["reason"] != "serial_mismatch" {
+		t.Errorf("rejection records = %v, want one with reason serial_mismatch", recs)
 	}
 }
 

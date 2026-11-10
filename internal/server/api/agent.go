@@ -14,6 +14,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/server/agenttls"
 	"github.com/jacaudi/diyddns/internal/server/clientip"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -42,16 +43,20 @@ func BuildAgent(mux *http.ServeMux, deps ServerDeps) {
 // certificate without verifying it (the handshake cannot name the active CA
 // alone), so this does the real check: the leaf chains to the active CA and is
 // usable only for client authentication, it names a device through its URI SAN,
-// and that device's recorded serial is this certificate's. Anything else is the
-// coded 401 client_cert_rejected. A failing device lookup is a 500 instead, so
-// a database outage never reads as a rejected certificate.
+// and this certificate's serial is the device's current one or its pending one
+// (#175). A pending serial is promoted to current on its first use, on proof
+// of TLS key possession alone and before the HMAC check (M-8): the renewal
+// response that carried the certificate was evidently delivered. Anything else
+// is the coded 401 client_cert_rejected. A failing device lookup or promote is
+// a 500 instead, so a database outage never reads as a rejected certificate and
+// the client never drops a certificate it still needs.
 //
 // It hands r to next untouched (no WithContext or Clone): AccessLog reads
 // r.Pattern off the same request once the mux has routed it.
-func ClientCertMiddleware(ca *agenttls.CA, devices *store.DeviceRepo, log *slog.Logger) func(http.Handler) http.Handler {
+func ClientCertMiddleware(ca *agenttls.CA, devices *store.DeviceRepo, rot *service.RotationService, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			reason, claimed, err := checkClientCert(r, ca, devices)
+			reason, claimed, err := checkClientCert(r, ca, devices, rot)
 			if err != nil {
 				log.LogAttrs(r.Context(), slog.LevelError, "agent client certificate lookup failed",
 					slog.String("claimed_device_id", claimedDeviceID(claimed)), slog.Any("error", err))
@@ -69,18 +74,19 @@ func ClientCertMiddleware(ca *agenttls.CA, devices *store.DeviceRepo, log *slog.
 
 // Rejection reasons logged by rejectClientCert; never sent to the client.
 const (
-	reasonNoCert         = "no_cert"
-	reasonChain          = "chain"
-	reasonNoDeviceURI    = "no_device_uri"
-	reasonUnknownDevice  = "unknown_device"
-	reasonSerialMismatch = "serial_mismatch"
-	reasonDeviceMismatch = "device_mismatch"
+	reasonNoCert            = "no_cert"
+	reasonChain             = "chain"
+	reasonNoDeviceURI       = "no_device_uri"
+	reasonUnknownDevice     = "unknown_device"
+	reasonSerialMismatch    = "serial_mismatch"
+	reasonPendingSuperseded = "pending_superseded"
+	reasonDeviceMismatch    = "device_mismatch"
 )
 
 // checkClientCert returns the reason r's client certificate is refused ("" when
 // accepted) and the device id the certificate claims, if it names one. A
 // non-nil error is a failed device lookup, not a verdict on the certificate.
-func checkClientCert(r *http.Request, ca *agenttls.CA, devices *store.DeviceRepo) (reason, claimed string, err error) {
+func checkClientCert(r *http.Request, ca *agenttls.CA, devices *store.DeviceRepo, rot *service.RotationService) (reason, claimed string, err error) {
 	leaf := peerLeaf(r)
 	if leaf == nil {
 		return reasonNoCert, "", nil
@@ -98,10 +104,22 @@ func checkClientCert(r *http.Request, ca *agenttls.CA, devices *store.DeviceRepo
 		return reasonUnknownDevice, id, nil
 	case err != nil:
 		return "", id, err
-	case dev.CertSerial != agenttls.SerialHex(leaf.SerialNumber):
-		return reasonSerialMismatch, id, nil
 	}
-	return "", id, nil
+	serial := agenttls.SerialHex(leaf.SerialNumber)
+	switch {
+	case dev.CertSerial == serial:
+		return "", id, nil
+	case dev.PendingCertSerial == serial: // serial is never empty, so no "no pending" match
+		accepted, err := rot.PromoteCert(r.Context(), id, serial, leaf.NotAfter.Unix(), dev.RotateCertAt != 0)
+		if err != nil {
+			return "", id, err
+		}
+		if !accepted {
+			return reasonPendingSuperseded, id, nil
+		}
+		return "", id, nil
+	}
+	return reasonSerialMismatch, id, nil
 }
 
 // isClientLeaf is the defense in depth over VerifyClient: x509.Verify accepts a

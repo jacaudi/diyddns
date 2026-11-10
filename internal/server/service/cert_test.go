@@ -156,6 +156,9 @@ func TestCertService_AgentAlwaysIssues(t *testing.T) {
 	if _, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false); err != nil {
 		t.Fatalf("main Issue: %v", err)
 	}
+	if err := st.Devices().MarkRotation(t.Context(), dev.ID, false, true, 1_700_000_000); err != nil {
+		t.Fatalf("MarkRotation: %v", err)
+	}
 	old := getDevice(t, st, dev.ID)
 
 	got, err := svc.Issue(t.Context(), dev.ID, testCSR(t), true)
@@ -163,8 +166,15 @@ func TestCertService_AgentAlwaysIssues(t *testing.T) {
 		t.Fatalf("agent Issue: %v", err)
 	}
 	serial := agenttls.SerialHex(parseCertPEM(t, got.CertificatePEM).SerialNumber)
-	if now := getDevice(t, st, dev.ID); now.CertSerial != serial || serial == old.CertSerial {
-		t.Fatalf("row serial = %q, want new serial %q (old %q)", now.CertSerial, serial, old.CertSerial)
+	now := getDevice(t, st, dev.ID)
+	if now.CertSerial != old.CertSerial {
+		t.Fatalf("current serial = %q, want it left at %q", now.CertSerial, old.CertSerial)
+	}
+	if now.PendingCertSerial != serial || serial == old.CertSerial {
+		t.Fatalf("pending serial = %q, want new serial %q (current %q)", now.PendingCertSerial, serial, old.CertSerial)
+	}
+	if now.RotateCertAt != 1_700_000_000 {
+		t.Fatalf("RotateCertAt = %d, want untouched 1700000000", now.RotateCertAt)
 	}
 	rows := adminAuditRows(t, st, "device.cert_issued")
 	if len(rows) != 2 {
