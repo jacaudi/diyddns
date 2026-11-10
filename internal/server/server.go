@@ -193,10 +193,11 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 		)
 	}
 
-	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
+	audit := service.NewAuditWriter(st)
+	rotationSvc := service.NewRotationService(st, key, audit, ca != nil)
+	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), rotationSvc, key, cfg.Auth.HMAC.SkewWindow, cfg.Auth.HMAC.NonceTTL)
 	sessions := auth.NewSessionManager(st.Sessions(), st.Users(), cfg.Auth.Session.TTL, cfg.Auth.Session.SlideWindow)
 
-	audit := service.NewAuditWriter(st)
 	authSvc := service.NewAuthService(sessions, audit)
 	notifySvc := service.NewNotificationService(st, key, allowedPrivateCIDRs, audit)
 	feedSvc := service.NewFeedService(st, hub, audit)
@@ -264,7 +265,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 	// same instances: they are two thin presentation layers over one service
 	// layer, and a dependency added to a service later must not silently exist
 	// twice.
-	devicesSvc := service.NewDeviceService(st, key, verifier, audit, devNotifier)
+	devicesSvc := service.NewDeviceService(st, key, audit, devNotifier)
 	enrollSvc := service.NewEnrollmentService(st, key, enrollmentCodeTTL, audit, log)
 	adminSvc := service.NewAdminService(st, audit, grantSvc, devNotifier, mailer, log)
 
@@ -288,6 +289,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 		Mailer:      mailer,
 		OIDCMgr:     oidcMgr,
 		HMACKey:     key,
+		Rotation:    rotationSvc,
 		Cfg:         cfg.Auth,
 		Info:        version.Current(),
 

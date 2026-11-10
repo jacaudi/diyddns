@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"errors"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/shared"
@@ -72,32 +71,40 @@ type RequestParts struct {
 	Body                                              []byte
 }
 
-// Verifier authenticates agent HMAC requests. It holds a process-local cache of
-// decrypted secret bytes; a cache entry is evicted via Invalidate when a
-// device's secret is rotated, so the next Verify re-opens it from the DB
-// (device disable is checked live from the DB each request).
+// SecretPromoter promotes a device's verified pending secret. It returns
+// whether the request is accepted. It never sees or returns plaintext:
+// sealed is the stored pending_secret_hash value.
+type SecretPromoter interface {
+	PromoteSecret(ctx context.Context, deviceID, sealed string) (bool, error)
+}
+
+// Verifier authenticates agent HMAC requests. It holds no secret cache: the
+// device row read on each request is the authority, so a rotated or promoted
+// secret takes effect on the next request and a disabled device is refused
+// the same way.
 type Verifier struct {
 	devices  DeviceReader
 	users    UserReader
 	nonces   NonceInserter
+	promoter SecretPromoter
 	key      []byte
 	skew     time.Duration
 	nonceTTL time.Duration
-
-	mu    sync.RWMutex
-	cache map[string][]byte // deviceID -> secret bytes
 }
 
 // NewVerifier constructs a Verifier. key is the 32-byte AES-256-GCM key used to
-// decrypt device secrets; skew bounds the allowed request-timestamp drift;
-// nonceTTL controls how long a recorded signature blocks replay.
-func NewVerifier(d DeviceReader, u UserReader, n NonceInserter, key []byte, skew, nonceTTL time.Duration) *Verifier {
-	return &Verifier{devices: d, users: u, nonces: n, key: key, skew: skew, nonceTTL: nonceTTL, cache: map[string][]byte{}}
+// decrypt device secrets; p promotes a pending secret that just verified; skew
+// bounds the allowed request-timestamp drift; nonceTTL controls how long a
+// recorded signature blocks replay.
+func NewVerifier(d DeviceReader, u UserReader, n NonceInserter, p SecretPromoter, key []byte, skew, nonceTTL time.Duration) *Verifier {
+	return &Verifier{devices: d, users: u, nonces: n, promoter: p, key: key, skew: skew, nonceTTL: nonceTTL}
 }
 
 // Verify authenticates one request and returns the device_id on success. Order:
-// device/user liveness -> skew -> secret -> constant-time compare -> nonce insert
-// (verify BEFORE nonce insert so forged requests never pollute replay_nonces).
+// device/user liveness -> skew -> secret match (current, then pending) -> nonce
+// insert -> promote a matched pending secret (verify BEFORE nonce insert so
+// forged requests never pollute replay_nonces, and nonce BEFORE promote so a
+// replay never reaches the promotion).
 func (v *Verifier) Verify(ctx context.Context, p RequestParts, now int64) (string, error) {
 	dev, err := v.devices.GetByID(ctx, p.Device)
 	if err != nil {
@@ -125,15 +132,9 @@ func (v *Verifier) Verify(ctx context.Context, p RequestParts, now int64) (strin
 		return "", &rejection{reason: "clock_skew"}
 	}
 
-	secret, err := v.secretFor(dev)
+	viaPending, err := v.matchSecret(dev, p)
 	if err != nil {
-		return "", &rejection{reason: "secret_unavailable"}
-	}
-
-	canonical := shared.CanonicalRequest(p.Method, p.Path, p.Timestamp, p.Nonce, shared.BodyHashHex(p.Body))
-	expected := shared.Sign(secret, canonical)
-	if !hmac.Equal([]byte(expected), []byte(p.Signature)) {
-		return "", &rejection{reason: "bad_signature"}
+		return "", err
 	}
 
 	// Fail closed on any insert error, but tell the log which kind: ErrConflict
@@ -145,32 +146,48 @@ func (v *Verifier) Verify(ctx context.Context, p RequestParts, now int64) (strin
 		}
 		return "", &rejection{reason: "nonce_store_error"}
 	}
+	if viaPending {
+		if err := v.promotePending(ctx, dev); err != nil {
+			return "", err
+		}
+	}
 	return dev.ID, nil
 }
 
-// Invalidate evicts the cached decrypted secret for deviceID, forcing the next
-// Verify to re-open the stored (possibly rotated) sealed secret from the DB.
-// Called after a device's secret is rotated so the stale secret stops
-// authenticating.
-func (v *Verifier) Invalidate(deviceID string) {
-	v.mu.Lock()
-	delete(v.cache, deviceID)
-	v.mu.Unlock()
-}
-
-func (v *Verifier) secretFor(dev store.Device) ([]byte, error) {
-	v.mu.RLock()
-	s, ok := v.cache[dev.ID]
-	v.mu.RUnlock()
-	if ok {
-		return s, nil
-	}
+// matchSecret opens the device's secrets and compares the request signature
+// in constant time: the current secret first, then the pending one if any.
+// viaPending reports that the pending secret matched. A current secret that
+// cannot be opened is secret_unavailable; a pending one that cannot be opened
+// counts as no match, as does a signature that fits neither.
+func (v *Verifier) matchSecret(dev store.Device, p RequestParts) (viaPending bool, err error) {
+	// ponytail: no secret cache (#175 P1); re-add a sealed-keyed cache only if profiling shows GCM open on the hot path.
 	secret, err := OpenSecret(v.key, dev.SecretHash)
 	if err != nil {
-		return nil, err
+		return false, &rejection{reason: "secret_unavailable"}
 	}
-	v.mu.Lock()
-	v.cache[dev.ID] = secret
-	v.mu.Unlock()
-	return secret, nil
+	canonical := shared.CanonicalRequest(p.Method, p.Path, p.Timestamp, p.Nonce, shared.BodyHashHex(p.Body))
+	if hmac.Equal([]byte(shared.Sign(secret, canonical)), []byte(p.Signature)) {
+		return false, nil
+	}
+	if dev.PendingSecretHash != "" {
+		if pending, err := OpenSecret(v.key, dev.PendingSecretHash); err == nil &&
+			hmac.Equal([]byte(shared.Sign(pending, canonical)), []byte(p.Signature)) {
+			return true, nil
+		}
+	}
+	return false, &rejection{reason: "bad_signature"}
+}
+
+// promotePending makes the pending secret that just verified current. A store
+// error is promote_error; a refusal (the owner rotated or cancelled meanwhile)
+// is pending_superseded, so the superseded secret never overwrites the row.
+func (v *Verifier) promotePending(ctx context.Context, dev store.Device) error {
+	accepted, err := v.promoter.PromoteSecret(ctx, dev.ID, dev.PendingSecretHash)
+	if err != nil {
+		return &rejection{reason: "promote_error"}
+	}
+	if !accepted {
+		return &rejection{reason: "pending_superseded"}
+	}
+	return nil
 }

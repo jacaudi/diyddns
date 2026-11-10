@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -46,7 +47,7 @@ func newFixture(t *testing.T) (*Verifier, store.Device, []byte, []byte) {
 	sealed, _ := SealSecret(key, secret)
 	dev := store.Device{ID: "dev1", UserID: "usr1", SecretHash: sealed}
 	usr := store.User{ID: "usr1"}
-	v := NewVerifier(fakeDevices{d: dev}, fakeUsers{u: usr}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
+	v := NewVerifier(fakeDevices{d: dev}, fakeUsers{u: usr}, &fakeNonces{seen: map[string]bool{}}, &fakePromoter{accept: true}, key, 120*time.Second, 120*time.Second)
 	return v, dev, key, secret
 }
 
@@ -103,7 +104,7 @@ func TestVerify_DisabledDevice(t *testing.T) {
 	secret, _ := GenerateSecret()
 	sealed, _ := SealSecret(key, secret)
 	v := NewVerifier(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed, Disabled: true}},
-		fakeUsers{u: store.User{ID: "u"}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
+		fakeUsers{u: store.User{ID: "u"}}, &fakeNonces{seen: map[string]bool{}}, &fakePromoter{accept: true}, key, 120*time.Second, 120*time.Second)
 	p := signedParts(secret, 1720000000, nil)
 	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("disabled device must be rejected, got %v", err)
@@ -115,7 +116,7 @@ func TestVerify_DisabledUser(t *testing.T) {
 	secret, _ := GenerateSecret()
 	sealed, _ := SealSecret(key, secret)
 	v := NewVerifier(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed}},
-		fakeUsers{u: store.User{ID: "u", Disabled: true}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
+		fakeUsers{u: store.User{ID: "u", Disabled: true}}, &fakeNonces{seen: map[string]bool{}}, &fakePromoter{accept: true}, key, 120*time.Second, 120*time.Second)
 	p := signedParts(secret, 1720000000, nil)
 	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("disabled user must be rejected, got %v", err)
@@ -124,7 +125,7 @@ func TestVerify_DisabledUser(t *testing.T) {
 
 func TestVerify_UnknownDevice(t *testing.T) {
 	key := make([]byte, 32)
-	v := NewVerifier(fakeDevices{err: store.ErrNotFound}, fakeUsers{}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
+	v := NewVerifier(fakeDevices{err: store.ErrNotFound}, fakeUsers{}, &fakeNonces{seen: map[string]bool{}}, &fakePromoter{accept: true}, key, 120*time.Second, 120*time.Second)
 	p := RequestParts{Device: "nope", Timestamp: "1720000000", Nonce: "n", Signature: "x", Method: "GET", Path: "/agent/v1/self"}
 	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("unknown device must be rejected, got %v", err)
@@ -141,56 +142,170 @@ func (f *fakeRotatingDevices) GetByID(_ context.Context, _ string) (store.Device
 	return f.dev, nil
 }
 
-func TestVerifier_Invalidate_EvictsCachedSecret(t *testing.T) {
+// fakePromoter is a SecretPromoter that records the sealed value it is asked to
+// promote and answers with a canned result.
+type fakePromoter struct {
+	accept bool
+	err    error
+	calls  []string // sealed values
+}
+
+func (f *fakePromoter) PromoteSecret(_ context.Context, _ string, sealed string) (bool, error) {
+	f.calls = append(f.calls, sealed)
+	return f.accept, f.err
+}
+
+// rotFixture is a device mid-rotation: current secret A, pending secret B.
+type rotFixture struct {
+	v       *Verifier
+	dev     *fakeRotatingDevices
+	pr      *fakePromoter
+	key     []byte
+	a, b    []byte
+	sealedA string
+	sealedB string
+}
+
+func newRotFixture(t *testing.T, pr *fakePromoter) rotFixture {
+	t.Helper()
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
 	}
-	secretA, err := GenerateSecret()
+	f := rotFixture{pr: pr, key: key}
+	var err error
+	if f.a, err = GenerateSecret(); err != nil {
+		t.Fatal(err)
+	}
+	if f.b, err = GenerateSecret(); err != nil {
+		t.Fatal(err)
+	}
+	if f.sealedA, err = SealSecret(key, f.a); err != nil {
+		t.Fatal(err)
+	}
+	if f.sealedB, err = SealSecret(key, f.b); err != nil {
+		t.Fatal(err)
+	}
+	f.dev = &fakeRotatingDevices{dev: store.Device{ID: "dev1", UserID: "usr1", SecretHash: f.sealedA, PendingSecretHash: f.sealedB}}
+	f.v = NewVerifier(f.dev, fakeUsers{u: store.User{ID: "usr1"}}, &fakeNonces{seen: map[string]bool{}}, pr, key, 120*time.Second, 120*time.Second)
+	return f
+}
+
+// parts signs a checkin request with secret and the given nonce.
+func parts(secret []byte, nonce string) RequestParts {
+	const ts = "1720000000"
+	sig := shared.Sign(secret, shared.CanonicalRequest("POST", "/agent/v1/checkin", ts, nonce, shared.BodyHashHex(nil)))
+	return RequestParts{Device: "dev1", Timestamp: ts, Nonce: nonce, Signature: sig, Method: "POST", Path: "/agent/v1/checkin"}
+}
+
+const verifyNow int64 = 1720000000
+
+func TestVerify_PendingSecretVerifiesAndPromotes(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: true})
+	id, err := f.v.Verify(t.Context(), parts(f.b, "n1"), verifyNow)
+	if err != nil {
+		t.Fatalf("pending-signed request: %v", err)
+	}
+	if id != "dev1" {
+		t.Fatalf("device id = %q, want dev1", id)
+	}
+	if got, want := f.pr.calls, []string{f.sealedB}; !slices.Equal(got, want) {
+		t.Fatalf("promoter calls = %v, want %v", got, want)
+	}
+}
+
+func TestVerify_CurrentSecretDoesNotPromote(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: true})
+	if _, err := f.v.Verify(t.Context(), parts(f.a, "n1"), verifyNow); err != nil {
+		t.Fatalf("current-signed request: %v", err)
+	}
+	if len(f.pr.calls) != 0 {
+		t.Fatalf("promoter calls = %v, want none", f.pr.calls)
+	}
+}
+
+func TestVerify_PromoteRejectedIs401(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: false})
+	_, err := f.v.Verify(t.Context(), parts(f.b, "n1"), verifyNow)
+	if !errors.Is(err, ErrUnauthorized) || ReasonOf(err) != "pending_superseded" {
+		t.Fatalf("err = %v reason = %q, want ErrUnauthorized / pending_superseded", err, ReasonOf(err))
+	}
+}
+
+func TestVerify_PromoteErrorIs401(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{err: errors.New("db")})
+	_, err := f.v.Verify(t.Context(), parts(f.b, "n1"), verifyNow)
+	if !errors.Is(err, ErrUnauthorized) || ReasonOf(err) != "promote_error" {
+		t.Fatalf("err = %v reason = %q, want ErrUnauthorized / promote_error", err, ReasonOf(err))
+	}
+}
+
+// The nonce is recorded before promotion, so a replayed pending-signed request
+// is rejected without a second promote attempt.
+func TestVerify_NonceBeforePromote(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: true})
+	p := parts(f.b, "n1")
+	if _, err := f.v.Verify(t.Context(), p, verifyNow); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	_, err := f.v.Verify(t.Context(), p, verifyNow)
+	if ReasonOf(err) != "replay" {
+		t.Fatalf("second request reason = %q, want replay", ReasonOf(err))
+	}
+	if len(f.pr.calls) != 1 {
+		t.Fatalf("promoter calls = %d, want 1", len(f.pr.calls))
+	}
+}
+
+// With no cache, a rotated secret_hash takes effect on the very next request.
+func TestVerify_RotatedSecretVerifiesImmediately(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: true})
+	f.dev.dev.PendingSecretHash = ""
+	if _, err := f.v.Verify(t.Context(), parts(f.a, "n1"), verifyNow); err != nil {
+		t.Fatalf("verify with A before rotation: %v", err)
+	}
+	c, err := GenerateSecret()
 	if err != nil {
 		t.Fatal(err)
 	}
-	secretB, err := GenerateSecret()
+	sealedC, err := SealSecret(f.key, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealedA, err := SealSecret(key, secretA)
+	f.dev.dev.SecretHash = sealedC
+	if _, err := f.v.Verify(t.Context(), parts(f.a, "n2"), verifyNow); ReasonOf(err) != "bad_signature" {
+		t.Fatalf("old secret after rotation: reason = %q, want bad_signature", ReasonOf(err))
+	}
+	if _, err := f.v.Verify(t.Context(), parts(c, "n3"), verifyNow); err != nil {
+		t.Fatalf("new secret after rotation: %v", err)
+	}
+}
+
+func TestVerify_NeitherKeyIsBadSignature(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: true})
+	d, err := GenerateSecret()
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealedB, err := SealSecret(key, secretB)
-	if err != nil {
-		t.Fatal(err)
+	_, err = f.v.Verify(t.Context(), parts(d, "n1"), verifyNow)
+	if ReasonOf(err) != "bad_signature" {
+		t.Fatalf("reason = %q, want bad_signature", ReasonOf(err))
 	}
-
-	dr := &fakeRotatingDevices{dev: store.Device{ID: "dev1", UserID: "usr1", SecretHash: sealedA}}
-	v := NewVerifier(dr, fakeUsers{u: store.User{ID: "usr1"}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
-
-	const now int64 = 1720000000
-	parts := func(secret []byte, nonce string) RequestParts {
-		ts := "1720000000"
-		sig := shared.Sign(secret, shared.CanonicalRequest("POST", "/agent/v1/checkin", ts, nonce, shared.BodyHashHex(nil)))
-		return RequestParts{Device: "dev1", Timestamp: ts, Nonce: nonce, Signature: sig, Method: "POST", Path: "/agent/v1/checkin"}
+	if len(f.pr.calls) != 0 {
+		t.Fatalf("promoter calls = %v, want none", f.pr.calls)
 	}
+}
 
-	// Seed the cache with secretA by verifying a request signed with it.
-	if _, err := v.Verify(t.Context(), parts(secretA, "n1"), now); err != nil {
-		t.Fatalf("seed verify with secretA: %v", err)
+// A pending hash that cannot be opened counts as no match, not as an error
+// that would mask a good current-secret verdict or leak a distinct reason.
+func TestVerify_CorruptPendingIsBadSignature(t *testing.T) {
+	f := newRotFixture(t, &fakePromoter{accept: true})
+	f.dev.dev.PendingSecretHash = "not-a-sealed-secret"
+	if _, err := f.v.Verify(t.Context(), parts(f.b, "n1"), verifyNow); ReasonOf(err) != "bad_signature" {
+		t.Fatalf("reason = %q, want bad_signature", ReasonOf(err))
 	}
-
-	// Rotate the stored secret to secretB; the cache still holds secretA.
-	dr.dev.SecretHash = sealedB
-
-	// Without Invalidate: a request signed with the NEW secretB must FAIL
-	// (stale cache still serves secretA).
-	if _, err := v.Verify(t.Context(), parts(secretB, "n2"), now); err == nil {
-		t.Fatal("expected stale cache to reject the new secret before Invalidate")
-	}
-
-	// After Invalidate: the new secretB must now verify.
-	v.Invalidate(dr.dev.ID)
-	if _, err := v.Verify(t.Context(), parts(secretB, "n3"), now); err != nil {
-		t.Fatalf("expected new secret to verify after Invalidate, got %v", err)
+	if _, err := f.v.Verify(t.Context(), parts(f.a, "n2"), verifyNow); err != nil {
+		t.Fatalf("current secret with corrupt pending: %v", err)
 	}
 }
 
@@ -206,7 +321,7 @@ func TestVerify_NonNumericTimestamp(t *testing.T) {
 func TestVerify_CorruptSecretHash(t *testing.T) { // OpenSecret fails in secretFor
 	key := make([]byte, 32)
 	v := NewVerifier(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: "not-valid-sealed"}},
-		fakeUsers{u: store.User{ID: "u"}}, &fakeNonces{seen: map[string]bool{}}, key, 120*time.Second, 120*time.Second)
+		fakeUsers{u: store.User{ID: "u"}}, &fakeNonces{seen: map[string]bool{}}, &fakePromoter{accept: true}, key, 120*time.Second, 120*time.Second)
 	p := RequestParts{Device: "dev1", Timestamp: "1720000000", Nonce: "n", Signature: "x", Method: "GET", Path: "/agent/v1/self"}
 	if _, err := v.Verify(t.Context(), p, 1720000000); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("corrupt secret_hash must be rejected, got %v", err)
@@ -246,7 +361,7 @@ type errNonces struct{ err error }
 
 func (e errNonces) Insert(context.Context, string, int64) error { return e.err }
 
-// All fourteen Verify reasons, each driven by the one condition that produces
+// All sixteen Verify reasons, each driven by the one condition that produces
 // it. Built on this file's existing fakeDevices/fakeUsers/fakeNonces and
 // signedParts helpers.
 func TestVerify_ReasonPerBranch(t *testing.T) {
@@ -259,9 +374,19 @@ func TestVerify_ReasonPerBranch(t *testing.T) {
 	errBoom := errors.New("database is on fire")
 	const ts = 1720000000
 
-	newV := func(d DeviceReader, u UserReader, n NonceInserter) *Verifier {
-		return NewVerifier(d, u, n, key, 120*time.Second, 120*time.Second)
+	newV := func(d DeviceReader, u UserReader, n NonceInserter, p SecretPromoter) *Verifier {
+		return NewVerifier(d, u, n, p, key, 120*time.Second, 120*time.Second)
 	}
+	accept := &fakePromoter{accept: true}
+
+	// pending_superseded / promote_error: a device mid-rotation, request signed
+	// with the pending secret B, and a promoter that refuses or fails.
+	secretB, _ := GenerateSecret()
+	sealedB, _ := SealSecret(key, secretB)
+	pendingDev := goodDev
+	pendingDev.PendingSecretHash = sealedB
+	signedB := signedParts(secretB, ts, nil)
+
 	fresh := func() *fakeNonces { return &fakeNonces{seen: map[string]bool{}} }
 	ok := func() RequestParts { return signedParts(secret, ts, nil) }
 
@@ -294,20 +419,22 @@ func TestVerify_ReasonPerBranch(t *testing.T) {
 		wantReason string
 		cancelCtx  bool // run with an already-cancelled context
 	}{
-		{"unknown_device", newV(fakeDevices{err: store.ErrNotFound}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "unknown_device", false},
-		{"device_lookup_cancelled", newV(fakeDevices{err: errCancelled}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "device_lookup_cancelled", true},
-		{"device_store_error", newV(fakeDevices{err: errBoom}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "device_store_error", false},
-		{"device_disabled", newV(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed, Disabled: true}}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "device_disabled", false},
-		{"unknown_user", newV(fakeDevices{d: goodDev}, fakeUsers{err: store.ErrNotFound}, fresh()), ok(), ts, "unknown_user", false},
-		{"user_lookup_cancelled", newV(fakeDevices{d: goodDev}, fakeUsers{err: errCancelled}, fresh()), ok(), ts, "user_lookup_cancelled", true},
-		{"user_store_error", newV(fakeDevices{d: goodDev}, fakeUsers{err: errBoom}, fresh()), ok(), ts, "user_store_error", false},
-		{"user_disabled", newV(fakeDevices{d: goodDev}, fakeUsers{u: store.User{ID: "u", Disabled: true}}, fresh()), ok(), ts, "user_disabled", false},
-		{"bad_timestamp", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh()), badTS, ts, "bad_timestamp", false},
-		{"clock_skew", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh()), ok(), ts + 3600, "clock_skew", false},
-		{"secret_unavailable", newV(fakeDevices{d: corrupt}, fakeUsers{u: goodUsr}, fresh()), ok(), ts, "secret_unavailable", false},
-		{"bad_signature", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh()), badSig, ts, "bad_signature", false},
-		{"replay", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, replayed), ok(), ts, "replay", false},
-		{"nonce_store_error", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, errNonces{err: errBoom}), ok(), ts, "nonce_store_error", false},
+		{"unknown_device", newV(fakeDevices{err: store.ErrNotFound}, fakeUsers{u: goodUsr}, fresh(), accept), ok(), ts, "unknown_device", false},
+		{"device_lookup_cancelled", newV(fakeDevices{err: errCancelled}, fakeUsers{u: goodUsr}, fresh(), accept), ok(), ts, "device_lookup_cancelled", true},
+		{"device_store_error", newV(fakeDevices{err: errBoom}, fakeUsers{u: goodUsr}, fresh(), accept), ok(), ts, "device_store_error", false},
+		{"device_disabled", newV(fakeDevices{d: store.Device{ID: "dev1", UserID: "u", SecretHash: sealed, Disabled: true}}, fakeUsers{u: goodUsr}, fresh(), accept), ok(), ts, "device_disabled", false},
+		{"unknown_user", newV(fakeDevices{d: goodDev}, fakeUsers{err: store.ErrNotFound}, fresh(), accept), ok(), ts, "unknown_user", false},
+		{"user_lookup_cancelled", newV(fakeDevices{d: goodDev}, fakeUsers{err: errCancelled}, fresh(), accept), ok(), ts, "user_lookup_cancelled", true},
+		{"user_store_error", newV(fakeDevices{d: goodDev}, fakeUsers{err: errBoom}, fresh(), accept), ok(), ts, "user_store_error", false},
+		{"user_disabled", newV(fakeDevices{d: goodDev}, fakeUsers{u: store.User{ID: "u", Disabled: true}}, fresh(), accept), ok(), ts, "user_disabled", false},
+		{"bad_timestamp", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh(), accept), badTS, ts, "bad_timestamp", false},
+		{"clock_skew", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh(), accept), ok(), ts + 3600, "clock_skew", false},
+		{"secret_unavailable", newV(fakeDevices{d: corrupt}, fakeUsers{u: goodUsr}, fresh(), accept), ok(), ts, "secret_unavailable", false},
+		{"bad_signature", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, fresh(), accept), badSig, ts, "bad_signature", false},
+		{"replay", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, replayed, accept), ok(), ts, "replay", false},
+		{"nonce_store_error", newV(fakeDevices{d: goodDev}, fakeUsers{u: goodUsr}, errNonces{err: errBoom}, accept), ok(), ts, "nonce_store_error", false},
+		{"pending_superseded", newV(fakeDevices{d: pendingDev}, fakeUsers{u: goodUsr}, fresh(), &fakePromoter{accept: false}), signedB, ts, "pending_superseded", false},
+		{"promote_error", newV(fakeDevices{d: pendingDev}, fakeUsers{u: goodUsr}, fresh(), &fakePromoter{err: errBoom}), signedB, ts, "promote_error", false},
 	}
 
 	seen := map[string]bool{}
@@ -335,7 +462,7 @@ func TestVerify_ReasonPerBranch(t *testing.T) {
 	}
 	// Counted outside the subtest on purpose: a Fatalf-ing subtest must not
 	// also trip this guard and bury the real failure under a second one.
-	if len(seen) != 14 {
-		t.Fatalf("table covers %d distinct reasons, want 14", len(seen))
+	if len(seen) != 16 {
+		t.Fatalf("table covers %d distinct reasons, want 16", len(seen))
 	}
 }

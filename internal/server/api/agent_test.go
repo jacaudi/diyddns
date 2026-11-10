@@ -65,7 +65,8 @@ func newAgentHarnessWith(t *testing.T, mutate func(*api.ServerDeps)) agentHarnes
 	t.Cleanup(func() { _ = st.Close() })
 
 	key := agentTestKey32()
-	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
+	rot := service.NewRotationService(st, key, service.NewAuditWriter(st), false)
+	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), rot, key, 120*time.Second, 120*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
 	checkinSvc := service.NewCheckinService(st, nopNotifier{}, slog.New(slog.DiscardHandler), time.Now)
@@ -74,6 +75,8 @@ func newAgentHarnessWith(t *testing.T, mutate func(*api.ServerDeps)) agentHarnes
 		Log:      log,
 		Store:    st,
 		Verifier: verifier,
+		Rotation: rot,
+		HMACKey:  key,
 		Enroll:   enroll,
 		Checkin:  checkinSvc,
 		Info:     version.Info{Version: "v1.2.3"},

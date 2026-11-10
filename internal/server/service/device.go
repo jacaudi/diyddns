@@ -8,30 +8,21 @@ import (
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// SecretCacheInvalidator evicts a device's cached HMAC secret so a rotated
-// secret takes effect immediately. Satisfied by *auth.Verifier.
-type SecretCacheInvalidator interface {
-	Invalidate(deviceID string)
-}
-
 // DeviceService provides owner-scoped device read and management operations. A
 // device owned by a different user is always reported as store.ErrNotFound, so
 // callers cannot distinguish "not yours" from "doesn't exist".
 type DeviceService struct {
 	deviceMutator // st, audit, notify — shared with AdminService (#132 D8)
 	key           []byte
-	invalidator   SecretCacheInvalidator
 }
 
 // NewDeviceService constructs a DeviceService. key is the 32-byte AEAD key used
-// to seal rotated device secrets (see auth.SealSecret); invalidator evicts the
-// HMAC verifier's secret cache on rotation; audit records lifecycle events;
-// notify is told when a device joins or leaves the gateway feed (#106).
-func NewDeviceService(st *store.Store, key []byte, invalidator SecretCacheInvalidator, audit AuditSink, notify DeviceNotifier) *DeviceService {
+// to seal rotated device secrets (see auth.SealSecret); audit records lifecycle
+// events; notify is told when a device joins or leaves the gateway feed (#106).
+func NewDeviceService(st *store.Store, key []byte, audit AuditSink, notify DeviceNotifier) *DeviceService {
 	return &DeviceService{
 		st: st, audit: audit, notify: notify,
-		key:         key,
-		invalidator: invalidator,
+		key: key,
 	}
 }
 
@@ -169,9 +160,10 @@ func (s *DeviceService) Delete(ctx context.Context, userID, id string) error {
 	return nil
 }
 
-// RotateSecret mints a fresh HMAC secret, re-seals it into the device row,
-// evicts the verifier's cached secret, and returns the new plaintext secret —
-// shown to the caller exactly once and never persisted or logged in the clear.
+// RotateSecret mints a fresh HMAC secret, re-seals it into the device row (the
+// verifier keeps no cache, so the next request sees the new row), and returns
+// the new plaintext secret, shown to the caller exactly once and never
+// persisted or logged in the clear.
 func (s *DeviceService) RotateSecret(ctx context.Context, userID, id string) ([]byte, error) {
 	if _, err := s.ownedDevice(ctx, userID, id); err != nil {
 		return nil, fmt.Errorf("service.RotateSecret: %w", err)
@@ -187,7 +179,6 @@ func (s *DeviceService) RotateSecret(ctx context.Context, userID, id string) ([]
 	if err := s.st.Devices().RotateSecret(ctx, id, sealed); err != nil {
 		return nil, fmt.Errorf("service.RotateSecret: %w", err)
 	}
-	s.invalidator.Invalidate(id)
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: userID, EventType: "device.secret.rotated", TargetType: "device", TargetID: id,
 	})
