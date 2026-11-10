@@ -72,6 +72,7 @@ type active struct {
 // concurrent use: the poller calls it from one goroutine.
 type Manager struct {
 	cfg        Config
+	keys       *checkin.Keys // shared by every checkin client below
 	main       *checkin.Client
 	pinnedMain map[ipdiscovery.Family]*checkin.Client // main, one per enabled family
 	enroll     *enroll.Client
@@ -89,11 +90,9 @@ type Manager struct {
 	lastNeverUnsupported time.Time
 }
 
-// NewManager builds the main-port clients from cfg.Creds.ServerURL and
-// cfg.CACertPath and loads any saved state. State that loads but cannot be used
-// (for example an unparseable pinned bundle) is deleted like a corrupt file, so
-// the device provisions again.
-func NewManager(cfg Config) (*Manager, error) {
+// normalizeConfig applies cfg's defaults and validates ip_discovery. It is split
+// out of NewManager to keep that function under the gocyclo limit.
+func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -106,15 +105,31 @@ func NewManager(cfg Config) (*Manager, error) {
 	case config.IPDiscoveryAlways, config.IPDiscoveryNever:
 	case config.IPDiscoveryAuto:
 		if cfg.Lookup == nil {
-			return nil, errors.New("mtls: ip_discovery auto needs a Lookup")
+			return cfg, errors.New("mtls: ip_discovery auto needs a Lookup")
 		}
 	default:
-		return nil, fmt.Errorf("mtls: unknown ip_discovery %q", cfg.Discovery)
+		return cfg, fmt.Errorf("mtls: unknown ip_discovery %q", cfg.Discovery)
 	}
 	if cfg.Discovery == config.IPDiscoveryAlways {
 		cfg.Families = nil // always sends one unpinned request; no family state, no pinned clients
 	}
-	mainClient, err := checkin.NewClient(cfg.Creds.ServerURL, cfg.Creds.DeviceID, cfg.Creds.Secret, checkin.Options{CACertPath: cfg.CACertPath})
+	return cfg, nil
+}
+
+// NewManager builds the main-port clients from cfg.Creds.ServerURL and
+// cfg.CACertPath and loads any saved state. State that loads but cannot be used
+// (for example an unparseable pinned bundle) is deleted like a corrupt file, so
+// the device provisions again.
+func NewManager(cfg Config) (*Manager, error) {
+	cfg, err := normalizeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := checkin.NewKeys(cfg.Creds.Secret, "")
+	if err != nil {
+		return nil, fmt.Errorf("mtls: main client: %w", err)
+	}
+	mainClient, err := checkin.NewClient(cfg.Creds.ServerURL, cfg.Creds.DeviceID, keys, checkin.Options{CACertPath: cfg.CACertPath})
 	if err != nil {
 		return nil, fmt.Errorf("mtls: main client: %w", err)
 	}
@@ -124,6 +139,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	m := &Manager{
 		cfg:       cfg,
+		keys:      keys,
 		main:      mainClient,
 		enroll:    enrollClient,
 		mainHTTPS: strings.HasPrefix(mainClient.BaseURL(), "https://"),
@@ -333,7 +349,7 @@ func (m *Manager) activate(s State) (*active, error) {
 		return nil, err
 	}
 	opts := checkin.Options{TLSConfig: tc}
-	agent, err := checkin.NewClient(s.AgentURL, m.cfg.Creds.DeviceID, m.cfg.Creds.Secret, opts)
+	agent, err := checkin.NewClient(s.AgentURL, m.cfg.Creds.DeviceID, m.keys, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +366,7 @@ func (m *Manager) pinnedClients(baseURL string, opts checkin.Options) (map[ipdis
 	out := make(map[ipdiscovery.Family]*checkin.Client, len(m.cfg.Families))
 	for _, f := range m.cfg.Families {
 		opts.Network = networkOf(f)
-		c, err := checkin.NewClient(baseURL, m.cfg.Creds.DeviceID, m.cfg.Creds.Secret, opts)
+		c, err := checkin.NewClient(baseURL, m.cfg.Creds.DeviceID, m.keys, opts)
 		if err != nil {
 			return nil, err
 		}

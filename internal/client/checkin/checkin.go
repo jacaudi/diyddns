@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,9 +41,17 @@ var (
 	ErrServer             = errors.New("checkin: server error")
 )
 
+// ErrNoSecretRotationPending is the server's coded 409 to step 3: no secret
+// rotation is requested for this device, so the client drops its pending secret.
+var ErrNoSecretRotationPending = errors.New("checkin: no secret rotation pending")
+
 // Report is the IP/metadata a device reports. Empty families are omitted so
-// the server preserves the stored value (merge-on-empty).
-type Report struct{ IPv4, IPv6, Hostname, OS, ClientVersion string }
+// the server preserves the stored value (merge-on-empty). Capabilities lists the
+// optional features this client speaks; empty is omitted from the wire.
+type Report struct {
+	IPv4, IPv6, Hostname, OS, ClientVersion string
+	Capabilities                            []string
+}
 
 // IPSource says, per family the check-in carried, where the recorded address
 // came from: "reported", "observed" or "none". A family the check-in did not
@@ -59,6 +68,14 @@ type Result struct {
 	CurrentIPv6 string
 	Stored      bool
 	IPSource    IPSource
+	Rotation    Rotation
+}
+
+// Rotation says which tracks an owner asked this device to rotate. An old
+// server omits it, which reads as no request.
+type Rotation struct {
+	Secret bool `json:"secret"`
+	Cert   bool `json:"cert"`
 }
 
 // Options configures the client. CACertPath trusts a self-signed homelab CA.
@@ -77,11 +94,12 @@ type Options struct {
 // D7). Their json tags MUST match internal/server/api/checkin.go exactly; the
 // test decodes the posted body with the server's tag set to guard against drift.
 type checkinRequest struct {
-	IPv4          string `json:"ipv4,omitempty"`
-	IPv6          string `json:"ipv6,omitempty"`
-	Hostname      string `json:"hostname,omitempty"`
-	OS            string `json:"os,omitempty"`
-	ClientVersion string `json:"client_version,omitempty"`
+	IPv4          string   `json:"ipv4,omitempty"`
+	IPv6          string   `json:"ipv6,omitempty"`
+	Hostname      string   `json:"hostname,omitempty"`
+	OS            string   `json:"os,omitempty"`
+	ClientVersion string   `json:"client_version,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
 type checkinResponse struct {
@@ -90,28 +108,68 @@ type checkinResponse struct {
 	CurrentIPv6 string   `json:"current_ipv6"`
 	Stored      bool     `json:"stored"`
 	IPSource    IPSource `json:"ip_source"`
+	Rotation    Rotation `json:"rotation"`
 }
+
+// Keys is the device's HMAC key pair, shared by every Client the Manager builds
+// (single goroutine, no lock). Current signs when Pending is nil.
+type Keys struct {
+	Current, Pending []byte
+	// Promoted runs after a Pending-signed 2xx swapped Pending into Current; nil
+	// is a no-op. Its error fails that request (rule 4: persist before acting).
+	Promoted func() error
+}
+
+// NewKeys decodes the wire-base64 secret and, when non-empty, the pending one.
+// An empty pendingB64 leaves Pending nil.
+func NewKeys(secretB64, pendingB64 string) (*Keys, error) {
+	cur, err := base64.StdEncoding.DecodeString(secretB64)
+	if err != nil || len(cur) == 0 {
+		return nil, errors.New("checkin: secret is not valid base64")
+	}
+	k := &Keys{Current: cur}
+	if pendingB64 != "" {
+		if k.Pending, err = base64.StdEncoding.DecodeString(pendingB64); err != nil || len(k.Pending) == 0 {
+			return nil, errors.New("checkin: pending secret is not valid base64")
+		}
+	}
+	return k, nil
+}
+
+// String reports which keys are held, never their bytes.
+func (k *Keys) String() string {
+	state := func(b []byte) string {
+		if b == nil {
+			return "none"
+		}
+		return "set"
+	}
+	return fmt.Sprintf("checkin.Keys{current:%s, pending:%s}", state(k.Current), state(k.Pending))
+}
+
+// LogValue keeps the key bytes out of slog output.
+func (k *Keys) LogValue() slog.Value { return slog.StringValue(k.String()) }
+
+// Format makes every fmt verb (%v, %+v, %#v, %s, %x) print String, so no verb
+// reaches the key bytes.
+func (k *Keys) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, k.String()) }
 
 // Client signs and sends check-ins for one device.
 type Client struct {
 	baseURL  string
 	deviceID string
-	key      []byte
+	keys     *Keys
 	now      func() time.Time
 	http     *http.Client
 }
 
-// NewClient validates baseURL, decodes the wire-base64 secret to the raw HMAC
-// key, and (optionally) trusts a CA bundle.
-func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, error) {
+// NewClient validates baseURL and (optionally) trusts a CA bundle. keys is
+// shared with every other client built over it.
+func NewClient(baseURL, deviceID string, keys *Keys, opts Options) (*Client, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("checkin: server URL must be http(s): %q", baseURL)
-	}
-	key, err := base64.StdEncoding.DecodeString(secretB64)
-	if err != nil || len(key) == 0 {
-		return nil, fmt.Errorf("checkin: secret is not valid base64")
 	}
 	var transport *http.Transport
 	if opts.TLSConfig != nil {
@@ -140,7 +198,7 @@ func NewClient(baseURL, deviceID, secretB64 string, opts Options) (*Client, erro
 	return &Client{
 		baseURL:  baseURL,
 		deviceID: deviceID,
-		key:      key,
+		keys:     keys,
 		now:      time.Now,
 		http:     &http.Client{Timeout: timeout, Transport: transport},
 	}, nil
@@ -222,16 +280,69 @@ func (c *Client) RequestCert(ctx context.Context, csrPEM []byte) (CertResponse, 
 	return out, nil
 }
 
-// do signs method+path+body with the device secret and sends it. A nil body
-// is sent as an empty body (and hashed as such). The caller owns resp.Body.
+// SubmitPendingSecret is step 3 of a secret rotation: it POSTs the pending
+// secret to /agent/v1/rotation/secret, signed with Current only (rule 2), so the
+// new secret travels only inside a request the server can already verify. A 2xx
+// returns nil; a coded 409 is ErrNoSecretRotationPending.
+func (c *Client) SubmitPendingSecret(ctx context.Context) error {
+	if c.keys.Pending == nil {
+		return errors.New("checkin: no pending secret")
+	}
+	// A map, not a struct with a Secret field, keeps gosec G117 quiet.
+	body, err := json.Marshal(map[string]string{"secret": base64.StdEncoding.EncodeToString(c.keys.Pending)})
+	if err != nil {
+		return fmt.Errorf("checkin: marshal: %w", err)
+	}
+	resp, err := c.send(ctx, c.keys.Current, http.MethodPost, "/agent/v1/rotation/secret", body) //nolint:bodyclose // resp.Body IS closed, inside agenthttp.DrainClose below; bodyclose can't trace Close() through a named helper
+	if err != nil {
+		return err
+	}
+	defer agenthttp.DrainClose(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return classify(resp)
+	}
+	return nil
+}
+
+// do sends one signed request. While a pending secret exists it signs with that
+// first; a 401 retries with Current in the same cycle (rule 5). A 2xx on the
+// pending key promotes it (Pending becomes Current) and runs Promoted; a
+// transport failure or any other status keeps both keys (rule 7). A nil body is
+// sent as an empty body (and hashed as such). The caller owns resp.Body.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	if p := c.keys.Pending; p != nil {
+		resp, err := c.send(ctx, p, method, path, body)
+		if err != nil {
+			return nil, err // transport failure: keep both keys (rule 7)
+		}
+		switch {
+		case resp.StatusCode/100 == 2:
+			c.keys.Current, c.keys.Pending = p, nil
+			if c.keys.Promoted != nil {
+				if err := c.keys.Promoted(); err != nil {
+					agenthttp.DrainClose(resp.Body)
+					return nil, fmt.Errorf("checkin: save promoted secret: %w", err)
+				}
+			}
+			return resp, nil
+		case resp.StatusCode != http.StatusUnauthorized:
+			return resp, nil // 5xx/4xx: keep both keys (rule 7, SF-7)
+		}
+		agenthttp.DrainClose(resp.Body) // 401: retry with Current in this cycle (rule 5)
+	}
+	return c.send(ctx, c.keys.Current, method, path, body)
+}
+
+// send signs method+path+body with key and sends it, with a fresh timestamp and
+// nonce per call. The caller owns resp.Body.
+func (c *Client) send(ctx context.Context, key []byte, method, path string, body []byte) (*http.Response, error) {
 	ts := strconv.FormatInt(c.now().Unix(), 10)
 	nonce, err := randNonce()
 	if err != nil {
 		return nil, err
 	}
 	canonical := shared.CanonicalRequest(method, path, ts, nonce, shared.BodyHashHex(body))
-	sig := shared.Sign(c.key, canonical)
+	sig := shared.Sign(key, canonical)
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -273,6 +384,8 @@ func classify(resp *http.Response) error {
 		return fmt.Errorf("%w: upgrade this client", ErrMTLSRequired)
 	case resp.StatusCode == http.StatusConflict && p.Code == shared.CodeCertAlreadyIssued:
 		return ErrCertAlreadyIssued
+	case resp.StatusCode == http.StatusConflict && p.Code == shared.CodeNoSecretRotationPending:
+		return ErrNoSecretRotationPending
 	default:
 		return fmt.Errorf("%w: status %d: %s", ErrServer, resp.StatusCode, p.Detail)
 	}
