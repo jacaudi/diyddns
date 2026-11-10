@@ -9,6 +9,8 @@
   <div class="btn-row"><a class="btn" href="{{.HistoryURL}}">View full history</a></div>
 </div>
 
+{{template "rotationNotes" .}}
+
 {{/* The same three read-only cards as the owner's page, from partials.html
      (#132 D12). This page deliberately has NO reveal modal and never renders
      .Secret or .Credentials: those are the owner's, and no admin handler sets
@@ -50,7 +52,39 @@
     </form>
   </div>
   {{end}}
+
+  <div class="danger-item">
+    <div class="meta">
+      <strong>Rotation</strong>
+      <span>Asks the client to replace its secret{{if .CertRotation}} or certificate{{end}} at its next check-in. A pending request stays until it completes or is cancelled.</span>
+    </div>
+    <div class="btn-row">
+      <form method="post" action="/admin/devices/{{.Device.ID}}/rotation">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <input type="hidden" name="target" value="secret">
+        <button class="btn danger" type="submit">Rotate secret</button>
+      </form>
+      {{if .CertRotation}}
+      <form method="post" action="/admin/devices/{{.Device.ID}}/rotation">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <input type="hidden" name="target" value="cert">
+        <button class="btn danger" type="submit">Rotate certificate</button>
+      </form>
+      <form method="post" action="/admin/devices/{{.Device.ID}}/rotation">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <input type="hidden" name="target" value="both">
+        <button class="btn danger" type="submit">Rotate both</button>
+      </form>
+      {{end}}
+      {{if .RotationPending}}
+      <form method="post" action="/admin/devices/{{.Device.ID}}/rotation/cancel">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <button class="btn" type="submit">Cancel rotation</button>
+      </form>
+      {{end}}
+    </div>
+  </div>
 </div>
 
-<p class="muted">Renaming, secret rotation and deletion are only available to the device's owner.</p>
+<p class="muted">Renaming and deletion are only available to the device's owner.</p>
 {{end}}

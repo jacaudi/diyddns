@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
@@ -35,6 +36,9 @@ type adminDevicesData struct {
 	Status  string // selected status token, "" for all
 	Total   int    // devices on the server, before filtering — distinguishes the two empty states
 	Summary string
+	// PendingRotation counts every device with a rotation outstanding, before
+	// filtering, like Total (#175).
+	PendingRotation int
 }
 
 // handleAdminDevices renders every device across users, read-only (#105).
@@ -58,9 +62,13 @@ func (h *handler) handleAdminDevices(w http.ResponseWriter, r *http.Request, usr
 
 	rows := make([]adminDeviceRow, 0, len(devices))
 	counts := map[Status]int{}
+	pending := 0
 	for _, d := range devices {
 		row := newDeviceRow(d, latest[d.ID], h.deps.Cfg.Feed, now)
 		counts[row.Status]++
+		if service.RotationStateOf(d).Pending() {
+			pending++
+		}
 		if (owner != "" && d.UserID != owner) || !row.matchesStatus(status) {
 			continue
 		}
@@ -80,6 +88,8 @@ func (h *handler) handleAdminDevices(w http.ResponseWriter, r *http.Request, usr
 		Status:  status,
 		Total:   len(devices),
 		Summary: deviceSummary(len(devices), counts),
+
+		PendingRotation: pending,
 	})
 }
 

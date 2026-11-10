@@ -48,6 +48,8 @@
   <div class="btn-row"><a class="btn" href="{{.HistoryURL}}">View full history</a></div>
 </div>
 
+{{template "rotationNotes" .}}
+
 <div class="grid cols-2">
   {{template "deviceAddressesCard" .}}
   {{template "deviceFactsCard" .}}

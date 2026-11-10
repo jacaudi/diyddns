@@ -326,6 +326,7 @@ func buildMux(cfg config.Server, st *store.Store, log *slog.Logger, ca *agenttls
 		Notify:      notifySvc,
 		Feed:        feedSvc,
 		APIKeys:     apiKeySvc,
+		Rotation:    rotationSvc,
 		Info:        version.Current(),
 		StartedAt:   time.Now(),
 	}
