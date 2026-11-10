@@ -36,6 +36,7 @@ func withAgentMTLS(t *testing.T, requireMTLS bool, ca **agenttls.CA) func(*api.S
 		}
 		*ca = c
 		deps.Cert = service.NewCertService(deps.Store, c, testAgentURL, service.NewAuditWriter(deps.Store))
+		deps.Rotation = service.NewRotationService(deps.Store, deps.HMACKey, service.NewAuditWriter(deps.Store), true)
 		deps.AgentURL = testAgentURL
 		deps.RequireMTLS = requireMTLS
 	}

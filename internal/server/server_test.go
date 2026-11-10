@@ -462,7 +462,7 @@ func TestVerifier_SurvivesRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st2.Close() })
 
-	v := auth.NewVerifier(st2.Devices(), st2.Users(), st2.ReplayNonces(), key, 120*time.Second, 120*time.Second)
+	v := auth.NewVerifier(st2.Devices(), st2.Users(), st2.ReplayNonces(), service.NewRotationService(st2, key, service.NewAuditWriter(st2), false), key, 120*time.Second, 120*time.Second)
 
 	now := int64(1720000000)
 	ts := strconv.FormatInt(now, 10)

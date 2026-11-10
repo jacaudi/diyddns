@@ -80,11 +80,12 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
+	rot := service.NewRotationService(st, key, service.NewAuditWriter(st), false)
+	verifier := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), rot, key, 120*time.Second, 120*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	enroll := service.NewEnrollmentService(st, key, 15*time.Minute, discardAgentAudit{}, log)
 	checkinSvc := service.NewCheckinService(st, nopNotifier{}, slog.New(slog.DiscardHandler), time.Now)
-	devicesSvc := service.NewDeviceService(st, key, verifier, discardAgentAudit{}, nopDeviceNotifier{})
+	devicesSvc := service.NewDeviceService(st, key, discardAgentAudit{}, nopDeviceNotifier{})
 
 	cfg := config.Auth{
 		Session: config.SessionCfg{
@@ -127,6 +128,7 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 		Log:         log,
 		Store:       st,
 		Verifier:    verifier,
+		Rotation:    rot,
 		Sessions:    sessions,
 		Enroll:      enroll,
 		Devices:     devicesSvc,

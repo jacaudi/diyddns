@@ -1,38 +1,34 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/jacaudi/diyddns/internal/auth"
+	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
 
-// fakeInvalidator is a mutation-checked SecretCacheInvalidator: it records
-// every device ID passed to Invalidate so tests can assert eviction happened
-// exactly once, for exactly the right device.
-type fakeInvalidator struct{ called []string }
-
-func (f *fakeInvalidator) Invalidate(id string) { f.called = append(f.called, id) }
-
 // newDeviceServiceTest opens a fresh in-memory store, seeds one user, and
-// builds a DeviceService wired to a fakeInvalidator, a discard audit sink,
-// and a recording membership notifier. Reused by every DeviceService test
-// in this file.
-func newDeviceServiceTest(t *testing.T) (*store.Store, string, *DeviceService, *fakeInvalidator) {
+// builds a DeviceService wired to a discard audit sink and a recording
+// membership notifier. Reused by every DeviceService test in this file.
+func newDeviceServiceTest(t *testing.T) (*store.Store, string, *DeviceService) {
 	t.Helper()
-	st, userID, svc, inv, _ := newDeviceServiceTestWithNotifier(t)
-	return st, userID, svc, inv
+	st, userID, svc, _ := newDeviceServiceTestWithNotifier(t)
+	return st, userID, svc
 }
 
-func newDeviceServiceTestWithNotifier(t *testing.T) (*store.Store, string, *DeviceService, *fakeInvalidator, *recordingDeviceNotifier) {
+func newDeviceServiceTestWithNotifier(t *testing.T) (*store.Store, string, *DeviceService, *recordingDeviceNotifier) {
 	t.Helper()
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
-	inv := &fakeInvalidator{}
 	n := &recordingDeviceNotifier{}
-	svc := NewDeviceService(st, testKey32(), inv, discardAudit{}, n)
-	return st, usr.ID, svc, inv, n
+	svc := NewDeviceService(st, testKey32(), discardAudit{}, n)
+	return st, usr.ID, svc, n
 }
 
 // giveIP records an address for dev so it becomes a feed member.
@@ -44,7 +40,7 @@ func giveIP(t *testing.T, st *store.Store, deviceID, v4 string) {
 }
 
 func TestDeviceService_Get_ReturnsOwnedDevice(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "laptop")
 
 	got, err := svc.Get(t.Context(), userID, dev.ID)
@@ -57,7 +53,7 @@ func TestDeviceService_Get_ReturnsOwnedDevice(t *testing.T) {
 }
 
 func TestDeviceService_Get_OtherUsersDeviceErrNotFound(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	other := seedUser(t, st, "other@b.co", "user")
 	dev := seedDevice(t, st, userID, "laptop")
 
@@ -68,7 +64,7 @@ func TestDeviceService_Get_OtherUsersDeviceErrNotFound(t *testing.T) {
 }
 
 func TestDeviceService_List_ReturnsOnlyCallersDevices(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	other := seedUser(t, st, "other@b.co", "user")
 	seedDevice(t, st, userID, "laptop")
 	seedDevice(t, st, userID, "phone")
@@ -92,7 +88,7 @@ func TestDeviceService_List_ReturnsOnlyCallersDevices(t *testing.T) {
 // list's counterpart to List reports a device's last-recorded address even
 // after the sweep has cleared current_ipv4.
 func TestDeviceService_ListWithExpiry_ReturnsLatestAddress(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "laptop")
 
 	if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{
@@ -118,7 +114,7 @@ func TestDeviceService_ListWithExpiry_ReturnsLatestAddress(t *testing.T) {
 // leak through the single-device fallback the detail page uses when none of
 // its five preview rows carries a family's address.
 func TestDeviceService_LatestAddress_OwnerScoped(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	other := seedUser(t, st, "other@b.co", "user")
 	dev := seedDevice(t, st, other.ID, "tablet")
 
@@ -128,7 +124,7 @@ func TestDeviceService_LatestAddress_OwnerScoped(t *testing.T) {
 }
 
 func TestDeviceService_LatestAddress_ReturnsRecordedValue(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "laptop")
 
 	if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{
@@ -147,7 +143,7 @@ func TestDeviceService_LatestAddress_ReturnsRecordedValue(t *testing.T) {
 }
 
 func TestDeviceService_Rename_OwnerScoped(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "old-label")
 
 	got, err := svc.Rename(t.Context(), userID, dev.ID, "new-label")
@@ -165,7 +161,7 @@ func TestDeviceService_Rename_OwnerScoped(t *testing.T) {
 }
 
 func TestDeviceService_Rename_ConflictSurfaces(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	seedDevice(t, st, userID, "taken")
 	dev := seedDevice(t, st, userID, "other")
 	if _, err := svc.Rename(t.Context(), userID, dev.ID, "taken"); !errors.Is(err, store.ErrConflict) {
@@ -174,7 +170,7 @@ func TestDeviceService_Rename_ConflictSurfaces(t *testing.T) {
 }
 
 func TestDeviceService_SetEnabled_TogglesDisabled(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "d")
 	got, err := svc.SetEnabled(t.Context(), userID, dev.ID, true)
 	if err != nil {
@@ -186,7 +182,7 @@ func TestDeviceService_SetEnabled_TogglesDisabled(t *testing.T) {
 }
 
 func TestDeviceService_Delete_OwnerScoped(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "d")
 	if err := svc.Delete(t.Context(), "not-owner", dev.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("foreign delete err = %v, want ErrNotFound", err)
@@ -199,12 +195,31 @@ func TestDeviceService_Delete_OwnerScoped(t *testing.T) {
 	}
 }
 
-func TestDeviceService_RotateSecret_ReSealsAndEvicts(t *testing.T) {
-	st, userID, svc, inv := newDeviceServiceTest(t)
-	dev := seedDevice(t, st, userID, "d")
-	before, err := st.Devices().GetByID(t.Context(), dev.ID)
+// TestDeviceService_RotateSecret_NextRequestSeesNewSecret pins that there is no
+// secret cache to evict: a Verifier over the real store rejects the old secret
+// right after RotateSecret and accepts the new one.
+func TestDeviceService_RotateSecret_NextRequestSeesNewSecret(t *testing.T) {
+	st, userID, svc := newDeviceServiceTest(t)
+	key := testKey32()
+	old := bytes.Repeat([]byte{0x07}, 32)
+	sealed, err := auth.SealSecret(key, old)
 	if err != nil {
 		t.Fatal(err)
+	}
+	dev, err := st.Devices().Create(t.Context(), store.Device{UserID: userID, Label: "laptop", SecretHash: sealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(),
+		NewRotationService(st, key, discardAudit{}, false), key, 120*time.Second, 120*time.Second)
+	const now int64 = 1720000000
+	signed := func(secret []byte, nonce string) auth.RequestParts {
+		ts := strconv.FormatInt(now, 10)
+		sig := shared.Sign(secret, shared.CanonicalRequest("POST", "/agent/v1/checkin", ts, nonce, shared.BodyHashHex(nil)))
+		return auth.RequestParts{Device: dev.ID, Timestamp: ts, Nonce: nonce, Signature: sig, Method: "POST", Path: "/agent/v1/checkin"}
+	}
+	if _, err := v.Verify(t.Context(), signed(old, "n1"), now); err != nil {
+		t.Fatalf("old secret before rotate: %v", err)
 	}
 
 	secret, err := svc.RotateSecret(t.Context(), userID, dev.ID)
@@ -214,15 +229,11 @@ func TestDeviceService_RotateSecret_ReSealsAndEvicts(t *testing.T) {
 	if len(secret) == 0 {
 		t.Fatal("expected a plaintext secret")
 	}
-	after, err := st.Devices().GetByID(t.Context(), dev.ID)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := v.Verify(t.Context(), signed(old, "n2"), now); !errors.Is(err, auth.ErrUnauthorized) {
+		t.Fatalf("old secret after rotate: err = %v, want ErrUnauthorized", err)
 	}
-	if after.SecretHash == before.SecretHash {
-		t.Fatal("expected SecretHash to change after rotate")
-	}
-	if len(inv.called) != 1 || inv.called[0] != dev.ID {
-		t.Fatalf("Invalidate calls = %v, want [%s]", inv.called, dev.ID)
+	if _, err := v.Verify(t.Context(), signed(secret, "n3"), now); err != nil {
+		t.Fatalf("new secret after rotate: %v", err)
 	}
 	// Foreign owner cannot rotate.
 	if _, err := svc.RotateSecret(t.Context(), "nope", dev.ID); !errors.Is(err, store.ErrNotFound) {
@@ -231,7 +242,7 @@ func TestDeviceService_RotateSecret_ReSealsAndEvicts(t *testing.T) {
 }
 
 func TestDeviceService_History_Paginates(t *testing.T) {
-	st, userID, svc, _ := newDeviceServiceTest(t)
+	st, userID, svc := newDeviceServiceTest(t)
 	dev := seedDevice(t, st, userID, "d")
 	for i := range 3 {
 		if _, err := st.IPHistory().Append(t.Context(), store.IPHistory{DeviceID: dev.ID, IPv4: "203.0.113.1", ObservedAt: int64(1000 + i)}); err != nil {
@@ -257,7 +268,7 @@ func TestDeviceService_History_Paginates(t *testing.T) {
 // the pre-write row and the "after" is that row with the flag set to its
 // intended value — never a re-read.
 func TestDeviceService_SetEnabled_EmitsMembershipEvents(t *testing.T) {
-	st, userID, svc, _, n := newDeviceServiceTestWithNotifier(t)
+	st, userID, svc, n := newDeviceServiceTestWithNotifier(t)
 	dev := seedDevice(t, st, userID, "d")
 	giveIP(t, st, dev.ID, "203.0.113.9")
 
@@ -294,7 +305,7 @@ func TestDeviceService_SetEnabled_EmitsMembershipEvents(t *testing.T) {
 // TestDeviceService_SetEnabled_OwnerDisabledEmitsNothing: the owner check
 // applies to removed as much as to added (pass 2 S1).
 func TestDeviceService_SetEnabled_OwnerDisabledEmitsNothing(t *testing.T) {
-	st, userID, svc, _, n := newDeviceServiceTestWithNotifier(t)
+	st, userID, svc, n := newDeviceServiceTestWithNotifier(t)
 	dev := seedDevice(t, st, userID, "d")
 	giveIP(t, st, dev.ID, "203.0.113.9")
 	if err := st.Users().SetDisabled(t.Context(), userID, true); err != nil {
@@ -313,7 +324,7 @@ func TestDeviceService_SetEnabled_OwnerDisabledEmitsNothing(t *testing.T) {
 }
 
 func TestDeviceService_Delete_EmitsRemovedForMember(t *testing.T) {
-	st, userID, svc, _, n := newDeviceServiceTestWithNotifier(t)
+	st, userID, svc, n := newDeviceServiceTestWithNotifier(t)
 	member := seedDevice(t, st, userID, "m")
 	giveIP(t, st, member.ID, "203.0.113.9")
 	quiet := seedDevice(t, st, userID, "q")
@@ -334,7 +345,7 @@ func TestDeviceService_Delete_EmitsRemovedForMember(t *testing.T) {
 func TestDeviceService_NotifierPanicDoesNotFailTheRequest(t *testing.T) {
 	st := openTestStore(t)
 	usr := seedUser(t, st, "a@b.co", "user")
-	svc := NewDeviceService(st, testKey32(), &fakeInvalidator{}, discardAudit{}, panickingDeviceNotifier{})
+	svc := NewDeviceService(st, testKey32(), discardAudit{}, panickingDeviceNotifier{})
 	dev := seedDevice(t, st, usr.ID, "d")
 	giveIP(t, st, dev.ID, "203.0.113.9")
 

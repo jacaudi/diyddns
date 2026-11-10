@@ -26,14 +26,6 @@ import (
 	"github.com/jacaudi/diyddns/internal/version"
 )
 
-// fakeInvalidator satisfies service.SecretCacheInvalidator. The real
-// implementation is *auth.Verifier, whose cache these tests never exercise.
-type fakeInvalidator struct{ invalidated []string }
-
-func (f *fakeInvalidator) Invalidate(deviceID string) {
-	f.invalidated = append(f.invalidated, deviceID)
-}
-
 // testDeps builds a fully-wired Deps over an in-memory store, and returns the
 // store so tests can seed users and devices directly.
 //
@@ -86,7 +78,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Sessions:    sessions,
 		Cfg:         cfg,
 		Log:         log,
-		Devices:     service.NewDeviceService(st, key, &fakeInvalidator{}, audit, nopDeviceNotifier{}),
+		Devices:     service.NewDeviceService(st, key, audit, nopDeviceNotifier{}),
 		Enroll:      service.NewEnrollmentService(st, key, 15*time.Minute, audit, log),
 		Admin:       service.NewAdminService(st, audit, grants, nopDeviceNotifier{}, nil, log),
 		Grants:      grants,

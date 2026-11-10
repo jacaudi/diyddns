@@ -18,6 +18,7 @@ import (
 
 	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/logtest"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/shared"
 	"github.com/jacaudi/diyddns/internal/store"
 )
@@ -89,7 +90,7 @@ func hmacProbe(t *testing.T) (build func(*testing.T, []byte, string) *http.Reque
 	st := openTestStore(t)
 	key := testKey32()
 	dev, secret = seedDeviceWithSecret(t, st, key, "probe", "probe@example.test")
-	v := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
+	v := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), service.NewRotationService(st, key, service.NewAuditWriter(st), false), key, 120*time.Second, 120*time.Second)
 
 	log, buf := captureLogger()
 
@@ -247,7 +248,7 @@ func TestHMACMiddleware_ProbesBodyRestoreAndAuth(t *testing.T) {
 	st := openTestStore(t)
 	key := testKey32()
 	dev, secret := seedDeviceWithSecret(t, st, key, "probe-device", "probe@example.com")
-	v := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), key, 120*time.Second, 120*time.Second)
+	v := auth.NewVerifier(st.Devices(), st.Users(), st.ReplayNonces(), service.NewRotationService(st, key, service.NewAuditWriter(st), false), key, 120*time.Second, 120*time.Second)
 
 	const path = "/agent/v1/probe"
 

@@ -45,7 +45,8 @@ type ServerDeps struct {
 	Notify      *service.NotificationService // nil unless notifications.enabled (#152) — the outbound-webhook admin ops are only registered when non-nil, see Build; mirrors the Passkey/Grants nil-tolerant gate
 	Mailer      email.Mailer                 // SMTP transport backing GrantService's self-service recovery emails; nil until Task 9 wires it
 	OIDCMgr     *oidc.Manager
-	HMACKey     []byte // decoded AEAD master key, for sealing the OIDC flow cookie
+	HMACKey     []byte                   // decoded AEAD master key, for sealing the OIDC flow cookie
+	Rotation    *service.RotationService // credential rotation; also the Verifier's SecretPromoter
 	Cfg         config.Auth
 	Info        version.Info
 
