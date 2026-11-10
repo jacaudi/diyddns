@@ -14,10 +14,11 @@ import (
 
 var (
 	// ErrInvalidRotationTarget is returned for a target other than secret,
-	// cert or both. Mapped to HTTP 400 by the API layer.
+	// cert or both. Mapped to HTTP 400 by the web UI (the REST API rejects it as
+	// 422 first).
 	ErrInvalidRotationTarget = errors.New("service: invalid rotation target")
 
-	// ErrDeviceDisabled is returned when an owner or admin asks to rotate a
+	// ErrDeviceDisabled is returned when an admin asks to rotate a
 	// device that, or whose owner account, is disabled.
 	ErrDeviceDisabled = errors.New("service: device or its owner account is disabled")
 
@@ -259,7 +260,7 @@ func (s *RotationService) PromoteSecret(ctx context.Context, deviceID, sealed st
 		return false, fmt.Errorf("service.PromoteSecret: %w", err)
 	}
 	if promoted {
-		s.auditCompleted(ctx, deviceID, map[string]string{"track": "secret"})
+		auditRotationCompleted(ctx, s.audit, deviceID, map[string]string{"track": "secret"})
 	}
 	return accepted, nil
 }
@@ -274,15 +275,18 @@ func (s *RotationService) PromoteCert(ctx context.Context, deviceID, serial stri
 		return false, fmt.Errorf("service.PromoteCert: %w", err)
 	}
 	if promoted && requested {
-		s.auditCompleted(ctx, deviceID, map[string]string{"track": "cert", "serial": serial})
+		auditRotationCompleted(ctx, s.audit, deviceID, map[string]string{"track": "cert", "serial": serial})
 	}
 	return accepted, nil
 }
 
-// auditCompleted writes the system-actor device.rotation.completed row.
-func (s *RotationService) auditCompleted(ctx context.Context, deviceID string, details map[string]string) {
+// auditRotationCompleted writes the system-actor device.rotation.completed row.
+// Every way a requested rotation completes writes it through here: the two
+// promotions and the two paths that complete it by clearing the mark (a
+// main-port certificate issuance, an owner rotate-secret).
+func auditRotationCompleted(ctx context.Context, sink AuditSink, deviceID string, details map[string]string) {
 	b, _ := json.Marshal(details)
-	s.audit.Log(ctx, store.AuditEntry{
+	sink.Log(ctx, store.AuditEntry{
 		EventType: "device.rotation.completed", TargetType: "device", TargetID: deviceID,
 		DetailsJSON: string(b),
 	})

@@ -51,7 +51,7 @@ type Device struct {
 	CertSerial   string
 	CertNotAfter int64
 
-	// RotateSecretAt and RotateCertAt are unix seconds when an owner requested
+	// RotateSecretAt and RotateCertAt are unix seconds when an admin requested
 	// a rotation on that track (#175); 0 when none is pending, stored as NULL.
 	RotateSecretAt int64
 	RotateCertAt   int64

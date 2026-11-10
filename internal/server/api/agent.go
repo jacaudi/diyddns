@@ -60,7 +60,7 @@ func ClientCertMiddleware(ca *agenttls.CA, devices *store.DeviceRepo, rot *servi
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			reason, claimed, err := checkClientCert(r, ca, devices, rot)
 			if err != nil {
-				log.LogAttrs(r.Context(), slog.LevelError, "agent client certificate lookup failed",
+				log.LogAttrs(r.Context(), slog.LevelError, "agent client certificate check failed",
 					slog.String("claimed_device_id", claimedDeviceID(claimed)), slog.Any("error", err))
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
@@ -87,7 +87,8 @@ const (
 
 // checkClientCert returns the reason r's client certificate is refused ("" when
 // accepted) and the device id the certificate claims, if it names one. A
-// non-nil error is a failed device lookup, not a verdict on the certificate.
+// non-nil error is a failed device lookup or promote, not a verdict on the
+// certificate.
 func checkClientCert(r *http.Request, ca *agenttls.CA, devices *store.DeviceRepo, rot *service.RotationService) (reason, claimed string, err error) {
 	leaf := peerLeaf(r)
 	if leaf == nil {

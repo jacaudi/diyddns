@@ -44,7 +44,7 @@ type checkinResponse struct {
 	// IPSource says, per family this check-in carried, where the recorded
 	// address came from. It is {} when the check-in carried no family.
 	IPSource ipSourceBody `json:"ip_source"`
-	// Rotation says which tracks an owner asked this device to rotate. It is
+	// Rotation says which tracks an admin asked this device to rotate. It is
 	// always emitted; a client that does not know it ignores it.
 	Rotation rotationFlags `json:"rotation"`
 }

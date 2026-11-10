@@ -49,7 +49,7 @@ type CheckinResult struct {
 	// SourceV4 and SourceV6 report, per family, how this check-in's address
 	// was decided. "" means the family was not carried.
 	SourceV4, SourceV6 IPSource
-	// RotateSecret and RotateCert say an owner has requested a rotation on that
+	// RotateSecret and RotateCert say an admin has requested a rotation on that
 	// track, read from the device as it was before this check-in (#175).
 	RotateSecret, RotateCert bool
 }

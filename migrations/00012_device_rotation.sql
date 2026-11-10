@@ -1,7 +1,7 @@
 -- +goose Up
 -- +goose StatementBegin
 -- #175: server-directed credential rotation. rotate_secret_at and
--- rotate_cert_at are unix seconds when an owner requested a rotation on that
+-- rotate_cert_at are unix seconds when an admin requested a rotation on that
 -- track; NULL means none pending. pending_secret_hash is sealed exactly like
 -- secret_hash (auth.SealSecret), so promotion is a column copy.
 -- pending_cert_serial is lowercase hex. There is no pending_cert_not_after:
