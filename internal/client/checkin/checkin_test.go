@@ -870,28 +870,67 @@ func TestKeys_PendingSigned2xxNotJSONKeepsBoth(t *testing.T) {
 	}
 }
 
-// A redirect on a pending-signed request is never followed: a login page behind
-// it would answer 200 and promote a key the server never accepted.
-func TestKeys_PendingSignedRedirectNotFollowed(t *testing.T) {
-	loginHit := false
-	c, keys, promoted := pendingSigned(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/login" {
-			loginHit = true
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"device_id":"d"}`)
-			return
-		}
-		http.Redirect(w, r, "/login", http.StatusFound)
-	})
-	_, err := c.Checkin(t.Context(), Report{})
-	if !errors.Is(err, ErrServer) {
-		t.Errorf("err = %v, want ErrServer", err)
+// signedByPending reports whether r was signed with the pending key B.
+func signedByPending(r *http.Request) bool {
+	body, _ := io.ReadAll(r.Body)
+	canonical := shared.CanonicalRequest(r.Method, r.URL.Path,
+		r.Header.Get(shared.HeaderTimestamp), r.Header.Get(shared.HeaderNonce), shared.BodyHashHex(body))
+	return shared.Sign(keyB, canonical) == r.Header.Get(shared.HeaderSignature)
+}
+
+// A redirect on a pending-signed request is never followed and never promotes:
+// a login page behind it would answer 200 and promote a key the server never
+// accepted. The cycle falls back to Current (like a 401), so a device behind an
+// http to https 308 proxy keeps reporting while a pending secret is held.
+func TestKeys_PendingSignedRedirectFallsBackToCurrent(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		// proxied: the redirect applies to Current-signed requests too, as a
+		// proxy's does; the Current request follows it to the final hop.
+		proxied bool
+	}{
+		{"login redirect, only the pending key", http.StatusFound, false},
+		{"308 proxy, every request", http.StatusPermanentRedirect, true},
 	}
-	if loginHit {
-		t.Error("the redirect was followed")
-	}
-	if !bytes.Equal(keys.Current, keyA) || !bytes.Equal(keys.Pending, keyB) || *promoted != 0 {
-		t.Errorf("keys = %s, promoted %d times; want both kept and no promote", keys, *promoted)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var pendingAtTarget bool
+			c, keys, promoted := pendingSigned(t, func(w http.ResponseWriter, r *http.Request) {
+				pending := signedByPending(r)
+				if r.URL.Query().Get("hop") != "" {
+					if pending {
+						mu.Lock()
+						pendingAtTarget = true
+						mu.Unlock()
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"device_id":"d"}`)
+					return
+				}
+				if pending || tt.proxied {
+					http.Redirect(w, r, r.URL.Path+"?hop=1", tt.status)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"device_id":"d"}`)
+			})
+
+			res, err := c.Checkin(t.Context(), Report{})
+
+			if err != nil || res.DeviceID != "d" {
+				t.Fatalf("Checkin = %+v, %v; want success through the Current key", res, err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if pendingAtTarget {
+				t.Error("the pending-signed request followed the redirect")
+			}
+			if !bytes.Equal(keys.Current, keyA) || !bytes.Equal(keys.Pending, keyB) || *promoted != 0 {
+				t.Errorf("keys = %s, promoted %d times; want both kept and no promote", keys, *promoted)
+			}
+		})
 	}
 }
 

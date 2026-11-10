@@ -323,12 +323,13 @@ func (c *Client) SubmitPendingSecret(ctx context.Context) error {
 }
 
 // do sends one signed request. While a pending secret exists it signs with that
-// first, never following a redirect; a 401 retries with Current in the same
-// cycle (rule 5). A 2xx on the pending key promotes it (Pending becomes Current)
-// and runs Promoted, but only once the response proves to be the server's (see
-// promote); a transport failure, a 3xx or any other status keeps both keys
-// (rule 7). A nil body is sent as an empty body (and hashed as such). The caller
-// owns resp.Body.
+// first, never following a redirect; a 401 or a 3xx retries with Current in the
+// same cycle (rule 5), which does follow redirects, so a device behind an
+// http to https proxy keeps reporting while it holds a pending secret. A 2xx on
+// the pending key promotes it (Pending becomes Current) and runs Promoted, but
+// only once the response proves to be the server's (see promote); a transport
+// failure or any other status keeps both keys (rule 7). A nil body is sent as an
+// empty body (and hashed as such). The caller owns resp.Body.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	if p := c.keys.Pending; p != nil {
 		resp, err := c.send(ctx, p, false, method, path, body)
@@ -338,10 +339,10 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) (*htt
 		switch {
 		case resp.StatusCode/100 == 2:
 			return c.promote(resp, p)
-		case resp.StatusCode != http.StatusUnauthorized:
-			return resp, nil // 3xx/4xx/5xx: keep both keys (rule 7, SF-7)
+		case resp.StatusCode != http.StatusUnauthorized && resp.StatusCode/100 != 3:
+			return resp, nil // 4xx/5xx: keep both keys (rule 7, SF-7)
 		}
-		agenthttp.DrainClose(resp.Body) // 401: retry with Current in this cycle (rule 5)
+		agenthttp.DrainClose(resp.Body) // 401 or 3xx: retry with Current in this cycle (rule 5)
 	}
 	return c.send(ctx, c.keys.Current, true, method, path, body)
 }
