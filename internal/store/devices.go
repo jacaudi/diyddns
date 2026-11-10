@@ -322,7 +322,7 @@ func (r *DeviceRepo) ListAll(ctx context.Context) ([]Device, error) {
 // confirmed", expiring the device on the next tick.
 func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion, hostname, os string, lastSeenAt int64) error {
 	return updateDeviceIP(ctx, r.db, id, ipv4, ipv6, clientVersion, hostname, os,
-		ipv4 != "", ipv6 != "", lastSeenAt, NowUnix())
+		ipv4 != "", ipv6 != "", lastSeenAt, NowUnix(), false, false)
 }
 
 // updateDeviceIP is the contact write for a check-in that CHANGED an address.
@@ -345,11 +345,12 @@ func (r *DeviceRepo) UpdateIP(ctx context.Context, id, ipv4, ipv6, clientVersion
 // takes its ELSE and the four per-family columns are unchanged, which is
 // correct.
 func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersion, hostname, os string,
-	v4Asserted, v6Asserted bool, lastSeenAt, updatedAt int64) error {
+	v4Asserted, v6Asserted bool, lastSeenAt, updatedAt int64, supportsRotation, viaAgent bool) error {
 	res, err := ex.ExecContext(ctx,
 		`UPDATE devices
 		 SET current_ipv4 = ?, current_ipv6 = ?, client_version = ?,
 		     hostname = ?, os = ?, last_seen_at = ?, updated_at = ?,
+		     supports_rotation = ?, last_checkin_mtls = ?,
 		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
 		     v6_confirmed_at = CASE WHEN ? THEN ? ELSE v6_confirmed_at END,
 		     v4_warn_level   = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
@@ -357,6 +358,7 @@ func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersio
 		 WHERE id = ?`,
 		nullIfEmpty(ipv4), nullIfEmpty(ipv6), nullIfEmpty(clientVersion),
 		nullIfEmpty(hostname), nullIfEmpty(os), nullIfZero(lastSeenAt), updatedAt,
+		boolToInt(supportsRotation), boolToInt(viaAgent),
 		v4Asserted, lastSeenAt,
 		v6Asserted, lastSeenAt,
 		v4Asserted, v6Asserted,
@@ -382,21 +384,24 @@ func updateDeviceIP(ctx context.Context, ex execer, id, ipv4, ipv6, clientVersio
 // common case.
 // Returns ErrNotFound if no row matched.
 func (r *DeviceRepo) Touch(ctx context.Context, id string, v4Asserted, v6Asserted bool, lastSeenAt int64) error {
-	return touchDevice(ctx, r.db, id, v4Asserted, v6Asserted, lastSeenAt)
+	return touchDevice(ctx, r.db, id, v4Asserted, v6Asserted, lastSeenAt, false, false)
 }
 
 // touchDevice carries the Touch UPDATE itself. Runs on the pool for Touch and
 // on the transaction for RecordIPChange.
-func touchDevice(ctx context.Context, ex execer, id string, v4Asserted, v6Asserted bool, lastSeenAt int64) error {
+func touchDevice(ctx context.Context, ex execer, id string, v4Asserted, v6Asserted bool, lastSeenAt int64,
+	supportsRotation, viaAgent bool) error {
 	res, err := ex.ExecContext(ctx,
 		`UPDATE devices
 		 SET last_seen_at = ?, updated_at = ?,
+		     supports_rotation = ?, last_checkin_mtls = ?,
 		     v4_confirmed_at = CASE WHEN ? THEN ? ELSE v4_confirmed_at END,
 		     v6_confirmed_at = CASE WHEN ? THEN ? ELSE v6_confirmed_at END,
 		     v4_warn_level   = CASE WHEN ? THEN 0 ELSE v4_warn_level END,
 		     v6_warn_level   = CASE WHEN ? THEN 0 ELSE v6_warn_level END
 		 WHERE id = ?`,
 		nullIfZero(lastSeenAt), NowUnix(),
+		boolToInt(supportsRotation), boolToInt(viaAgent),
 		v4Asserted, lastSeenAt,
 		v6Asserted, lastSeenAt,
 		v4Asserted, v6Asserted,
@@ -442,7 +447,7 @@ func (r *DeviceRepo) Rename(ctx context.Context, id, newLabel string) error {
 // Returns ErrNotFound if no row matched.
 func (r *DeviceRepo) RotateSecret(ctx context.Context, id, newSecretHash string) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE devices SET secret_hash = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE devices SET secret_hash = ?, pending_secret_hash = NULL, rotate_secret_at = NULL, updated_at = ? WHERE id = ?`,
 		newSecretHash, NowUnix(), id,
 	)
 	if err != nil {
@@ -691,7 +696,8 @@ func (r *DeviceRepo) SetCert(ctx context.Context, id, serial string, notAfter in
 // absent (callers load the device first, so that is the only not-found check).
 func (r *DeviceRepo) SetCertIfNoLive(ctx context.Context, id, serial string, notAfter, now int64) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE devices SET cert_serial = ?, cert_not_after = ?, updated_at = ?
+		`UPDATE devices SET cert_serial = ?, cert_not_after = ?,
+		        pending_cert_serial = NULL, rotate_cert_at = NULL, updated_at = ?
 		  WHERE id = ? AND (cert_serial IS NULL OR cert_not_after <= ?)`,
 		serial, notAfter, NowUnix(), id, now,
 	)
@@ -708,13 +714,15 @@ func (r *DeviceRepo) SetCertIfNoLive(ctx context.Context, id, serial string, not
 	return nil
 }
 
-// ClearCert forgets the device's recorded agent certificate. cleared is false
-// when none was recorded or the device is absent (callers load the device
-// first, so that is the only not-found check).
+// ClearCert forgets the device's recorded agent certificate and any pending
+// one, and ends a pending cert rotation. cleared is false when neither was
+// recorded or the device is absent (callers load the device first, so that is the
+// only not-found check).
 func (r *DeviceRepo) ClearCert(ctx context.Context, id string) (cleared bool, err error) {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE devices SET cert_serial = NULL, cert_not_after = NULL, updated_at = ?
-		  WHERE id = ? AND cert_serial IS NOT NULL`,
+		`UPDATE devices SET cert_serial = NULL, cert_not_after = NULL,
+		        pending_cert_serial = NULL, rotate_cert_at = NULL, updated_at = ?
+		  WHERE id = ? AND (cert_serial IS NOT NULL OR pending_cert_serial IS NOT NULL)`,
 		NowUnix(), id,
 	)
 	if err != nil {
@@ -725,4 +733,198 @@ func (r *DeviceRepo) ClearCert(ctx context.Context, id string) (cleared bool, er
 		return false, fmt.Errorf("devices.ClearCert: RowsAffected: %w", err)
 	}
 	return n == 1, nil
+}
+
+// markRotationSet is the SET clause MarkRotation and MarkAllRotation share. A
+// requested track takes COALESCE(rotate_*_at, now), so re-marking never moves
+// the instant a rotation was first requested. Args: secret, now, cert, now,
+// updated_at.
+const markRotationSet = `SET rotate_secret_at = CASE WHEN ? THEN COALESCE(rotate_secret_at, ?) ELSE rotate_secret_at END,
+	    rotate_cert_at   = CASE WHEN ? THEN COALESCE(rotate_cert_at, ?)   ELSE rotate_cert_at   END,
+	    updated_at       = ?`
+
+// MarkRotation requests a rotation on each track asked for (#175). A track
+// already marked keeps its original instant. Returns ErrNotFound if no row
+// matched.
+func (r *DeviceRepo) MarkRotation(ctx context.Context, id string, secret, cert bool, now int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices `+markRotationSet+` WHERE id = ?`,
+		secret, now, cert, now, NowUnix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("devices.MarkRotation: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("devices.MarkRotation: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("devices.MarkRotation: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// RotationCounts is what MarkAllRotation reports. Marked counts the devices
+// whose owner and device are both enabled. AwaitingUpgrade (client lacks the
+// capability) and AwaitingMTLS (cert track only: capable client whose last
+// check-in was not over mTLS) are disjoint subsets of Marked, in that
+// precedence. SkippedDisabled counts devices left unmarked because the device
+// or its owner account is disabled.
+type RotationCounts struct{ Marked, AwaitingUpgrade, AwaitingMTLS, SkippedDisabled int }
+
+// MarkAllRotation requests a rotation on every enabled device of an enabled
+// owner, and counts the outcome, in one transaction. No crypto runs inside it:
+// the pool is one connection.
+func (r *DeviceRepo) MarkAllRotation(ctx context.Context, secret, cert bool, now int64) (RotationCounts, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RotationCounts{}, fmt.Errorf("devices.MarkAllRotation: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE devices `+markRotationSet+`
+		  WHERE id IN (SELECT d.id FROM devices d JOIN users u ON u.id = d.user_id
+		                WHERE d.disabled = 0 AND u.disabled = 0)`,
+		secret, now, cert, now, NowUnix(),
+	); err != nil {
+		return RotationCounts{}, fmt.Errorf("devices.MarkAllRotation: %w", err)
+	}
+
+	var c RotationCounts
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(CASE WHEN d.disabled = 0 AND u.disabled = 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN d.disabled = 0 AND u.disabled = 0
+		                           AND d.supports_rotation = 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN ? AND d.disabled = 0 AND u.disabled = 0
+		                           AND d.supports_rotation = 1 AND d.last_checkin_mtls = 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN d.disabled = 1 OR u.disabled = 1 THEN 1 ELSE 0 END), 0)
+		   FROM devices d JOIN users u ON u.id = d.user_id`,
+		cert,
+	).Scan(&c.Marked, &c.AwaitingUpgrade, &c.AwaitingMTLS, &c.SkippedDisabled); err != nil {
+		return RotationCounts{}, fmt.Errorf("devices.MarkAllRotation: counts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return RotationCounts{}, fmt.Errorf("devices.MarkAllRotation: commit: %w", err)
+	}
+	return c, nil
+}
+
+// CancelRotation ends any pending rotation: both marks and the pending secret.
+// It leaves pending_cert_serial alone: the certificate was already issued and
+// stays valid, so cancel never orphans it. cleared is false when nothing was
+// pending. Returns ErrNotFound for an unknown id.
+func (r *DeviceRepo) CancelRotation(ctx context.Context, id string) (cleared bool, err error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET rotate_secret_at = NULL, rotate_cert_at = NULL,
+		        pending_secret_hash = NULL, updated_at = ?
+		  WHERE id = ? AND (rotate_secret_at IS NOT NULL OR rotate_cert_at IS NOT NULL
+		                    OR pending_secret_hash IS NOT NULL)`,
+		NowUnix(), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("devices.CancelRotation: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("devices.CancelRotation: RowsAffected: %w", err)
+	}
+	if n == 1 {
+		return true, nil
+	}
+	if _, err := r.GetByID(ctx, id); err != nil {
+		return false, fmt.Errorf("devices.CancelRotation: %w", err)
+	}
+	return false, nil
+}
+
+// SetPendingSecret stores the sealed hash of the client's proposed secret. It
+// stores only while a secret rotation is marked and secret_hash is still
+// currentSealed, the value the caller read and verified against: an owner
+// rotation in between changes secret_hash, so the store fails and stored is
+// false.
+func (r *DeviceRepo) SetPendingSecret(ctx context.Context, id, sealed, currentSealed string) (stored bool, err error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET pending_secret_hash = ?, updated_at = ?
+		  WHERE id = ? AND rotate_secret_at IS NOT NULL AND secret_hash = ?`,
+		sealed, NowUnix(), id, currentSealed,
+	)
+	if err != nil {
+		return false, fmt.Errorf("devices.SetPendingSecret: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("devices.SetPendingSecret: RowsAffected: %w", err)
+	}
+	return n == 1, nil
+}
+
+// SetPendingCert records the serial of the certificate issued for a pending
+// cert rotation, leaving the current certificate in place. Returns ErrNotFound
+// if no row matched.
+func (r *DeviceRepo) SetPendingCert(ctx context.Context, id, serial string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE devices SET pending_cert_serial = ?, updated_at = ? WHERE id = ?`,
+		serial, NowUnix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("devices.SetPendingCert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("devices.SetPendingCert: RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("devices.SetPendingCert: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// PromoteSecret makes the pending secret current, but only if it is still the
+// sealed value the caller verified. promoted reports that THIS call changed
+// the row; accepted additionally covers a concurrent request that already
+// promoted the same value. Anything else is rejected.
+func (r *DeviceRepo) PromoteSecret(ctx context.Context, id, sealed string) (promoted, accepted bool, err error) {
+	return r.promote(ctx, "PromoteSecret", id, sealed,
+		func(d Device) string { return d.SecretHash },
+		`UPDATE devices SET secret_hash = pending_secret_hash, pending_secret_hash = NULL,
+		        rotate_secret_at = NULL, updated_at = ?
+		  WHERE id = ? AND pending_secret_hash = ?`,
+		NowUnix(), id, sealed)
+}
+
+// PromoteCert makes the pending certificate current, but only if its serial is
+// still the one the caller verified. promoted and accepted are as in
+// PromoteSecret.
+func (r *DeviceRepo) PromoteCert(ctx context.Context, id, serial string, notAfter int64) (promoted, accepted bool, err error) {
+	return r.promote(ctx, "PromoteCert", id, serial,
+		func(d Device) string { return d.CertSerial },
+		`UPDATE devices SET cert_serial = pending_cert_serial, cert_not_after = ?,
+		        pending_cert_serial = NULL, rotate_cert_at = NULL, updated_at = ?
+		  WHERE id = ? AND pending_cert_serial = ?`,
+		notAfter, NowUnix(), id, serial)
+}
+
+// promote runs one conditional promote UPDATE. promoted reports that THIS call
+// changed the row. With 0 rows it re-reads the device: another request may
+// already have promoted the same value, and that request is accepted too.
+// Anything else (cancel, overwrite, owner rotate) is rejected.
+func (r *DeviceRepo) promote(ctx context.Context, op, id, verified string,
+	current func(Device) string, query string, args ...any) (promoted, accepted bool, err error) {
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, false, fmt.Errorf("devices.%s: %w", op, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, false, fmt.Errorf("devices.%s: RowsAffected: %w", op, err)
+	}
+	if n == 1 {
+		return true, true, nil
+	}
+	d, err := r.GetByID(ctx, id)
+	if err != nil {
+		return false, false, fmt.Errorf("devices.%s: %w", op, err)
+	}
+	return false, current(d) == verified, nil
 }

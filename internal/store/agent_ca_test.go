@@ -170,3 +170,21 @@ func TestAgentCA_ResetIsIdempotent(t *testing.T) {
 		t.Errorf("device cert = (%q, %d), want cleared", d.CertSerial, d.CertNotAfter)
 	}
 }
+
+func TestClearDeviceCerts_ClearsPending(t *testing.T) {
+	s, ctx := newTestStore(t)
+	id := seedCertDevice(t, ctx, s, "a@example.com", "one")
+	if err := s.Devices().SetPendingCert(ctx, id, "0b"); err != nil {
+		t.Fatalf("SetPendingCert: %v", err)
+	}
+	if err := s.AgentCA().Reset(ctx); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	d, err := s.Devices().GetByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if d.PendingCertSerial != "" {
+		t.Errorf("PendingCertSerial = %q, want empty", d.PendingCertSerial)
+	}
+}

@@ -133,3 +133,50 @@ func TestClearCert(t *testing.T) {
 		t.Fatalf("ClearCert unknown = (%v, %v), want (false, nil)", cleared, err)
 	}
 }
+
+func TestClearCert_ClearsPendingAndRotateCertAt(t *testing.T) {
+	s, ctx := newTestStore(t)
+	id := seedCertDevice(t, ctx, s, "cp@example.com", "home")
+	repo := s.Devices()
+	mustNo(t, repo.MarkRotation(ctx, id, false, true, 100))
+	mustNo(t, repo.SetPendingCert(ctx, id, "0b"))
+
+	cleared, err := repo.ClearCert(ctx, id)
+	if err != nil || !cleared {
+		t.Fatalf("ClearCert = (%v, %v), want (true, nil)", cleared, err)
+	}
+	d, _ := repo.GetByID(ctx, id)
+	if d.PendingCertSerial != "" || d.RotateCertAt != 0 {
+		t.Errorf("row = (%q, %d), want pending cleared and RotateCertAt 0", d.PendingCertSerial, d.RotateCertAt)
+	}
+}
+
+func TestSetCertIfNoLive_ClearsPendingAndRotateCertAt(t *testing.T) {
+	s, ctx := newTestStore(t)
+	id := seedCertDevice(t, ctx, s, "sp@example.com", "home")
+	repo := s.Devices()
+	mustNo(t, repo.MarkRotation(ctx, id, false, true, 100))
+	mustNo(t, repo.SetPendingCert(ctx, id, "0b"))
+
+	mustNo(t, repo.SetCertIfNoLive(ctx, id, "aa", 5000, 1000))
+	d, _ := repo.GetByID(ctx, id)
+	if d.PendingCertSerial != "" || d.RotateCertAt != 0 {
+		t.Errorf("row = (%q, %d), want pending cleared and RotateCertAt 0", d.PendingCertSerial, d.RotateCertAt)
+	}
+}
+
+func TestSetPendingCert_KeepsCurrent(t *testing.T) {
+	s, ctx := newTestStore(t)
+	id := seedCertDevice(t, ctx, s, "kc@example.com", "home")
+	repo := s.Devices()
+	mustNo(t, repo.SetCert(ctx, id, "0a", 1000))
+
+	mustNo(t, repo.SetPendingCert(ctx, id, "0b"))
+	d, _ := repo.GetByID(ctx, id)
+	if d.CertSerial != "0a" || d.PendingCertSerial != "0b" {
+		t.Errorf("row = (%q, %q), want (0a, 0b)", d.CertSerial, d.PendingCertSerial)
+	}
+	if err := repo.SetPendingCert(ctx, "nope", "0b"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown: %v, want ErrNotFound", err)
+	}
+}

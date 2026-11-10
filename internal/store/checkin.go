@@ -21,6 +21,10 @@ type IPChange struct {
 	IPv4, IPv6    string
 	ClientVersion string
 	Hostname, OS  string
+
+	// SupportsRotation is set when the client advertised the rotation capability
+	// this cycle; ViaAgent when the request arrived over mTLS (#175).
+	SupportsRotation, ViaAgent bool
 }
 
 // IPChangeOutcome is what RecordIPChange decided and wrote. Prev is the device
@@ -86,12 +90,12 @@ func (s *Store) RecordIPChange(ctx context.Context, c IPChange) (IPChangeOutcome
 	if out.CurrIPv4 == prev.CurrentIPv4 && out.CurrIPv6 == prev.CurrentIPv6 {
 		// Unchanged is still a contact: advance last_seen_at so a stable-IP
 		// device is distinguishable from a dead one (#12).
-		if err := touchDevice(ctx, tx, c.DeviceID, v4Asserted, v6Asserted, now); err != nil {
+		if err := touchDevice(ctx, tx, c.DeviceID, v4Asserted, v6Asserted, now, c.SupportsRotation, c.ViaAgent); err != nil {
 			return IPChangeOutcome{}, fmt.Errorf("store.RecordIPChange: %w", err)
 		}
 	} else {
 		if err := updateDeviceIP(ctx, tx, c.DeviceID, out.CurrIPv4, out.CurrIPv6, c.ClientVersion, c.Hostname, c.OS,
-			v4Asserted, v6Asserted, now, now); err != nil {
+			v4Asserted, v6Asserted, now, now, c.SupportsRotation, c.ViaAgent); err != nil {
 			return IPChangeOutcome{}, fmt.Errorf("store.RecordIPChange: %w", err)
 		}
 		out.Row, err = appendIPHistory(ctx, tx, IPHistory{
