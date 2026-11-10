@@ -115,21 +115,23 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 }
 
 // registerAgentOps registers the agent-facing operations (enroll, checkin,
-// self, and cert when the agent listener is enabled) onto agentAPI. Each
-// vertical is isolated in its own file (enroll.go, checkin.go, cert.go) so a
-// future agent op is a new file plus a line here, not an edit to an existing
-// one.
+// self, rotation, and cert when the agent listener is enabled) onto agentAPI.
+// Each vertical is isolated in its own file (enroll.go, checkin.go, rotation.go,
+// cert.go) so a future agent op is a new file plus a line here, not an edit to
+// an existing one.
 func registerAgentOps(a huma.API, deps ServerDeps) {
 	registerEnrollOps(a, deps)
-	registerCheckinOps(a, deps, mainAgentMWs(a, deps), false)
+	mws := mainAgentMWs(a, deps)
+	registerCheckinOps(a, deps, mws, false)
+	registerRotationOps(a, deps, mws)
 	if deps.Cert != nil {
 		registerCertOps(a, deps, false, huma.Middlewares{hmacMW(a, deps)})
 	}
 }
 
-// mainAgentMWs is the middleware chain for the main port's check-in and self:
-// the observation of the request's origin (X-Forwarded-For behind a trusted
-// proxy), then HMAC, preceded by the mtls_required refusal when
+// mainAgentMWs is the middleware chain for the main port's check-in, self and
+// rotation: the observation of the request's origin (X-Forwarded-For behind a
+// trusted proxy), then HMAC, preceded by the mtls_required refusal when
 // agent.require_mtls is set. Capabilities, enroll and cert stay outside it so a
 // client can still learn the requirement and obtain a certificate.
 func mainAgentMWs(a huma.API, deps ServerDeps) huma.Middlewares {

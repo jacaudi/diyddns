@@ -1,12 +1,14 @@
 package api_test
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -21,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jacaudi/diyddns/internal/auth"
 	"github.com/jacaudi/diyddns/internal/server/agenttls"
 	"github.com/jacaudi/diyddns/internal/server/api"
 	"github.com/jacaudi/diyddns/internal/shared"
@@ -395,7 +398,7 @@ func TestAgentListener_NoHMACIs401Plain(t *testing.T) {
 }
 
 // TestAgentListener_EveryRouteRequiresHMAC proves the listener never trusts the
-// certificate alone: registerCheckinOps and registerCertOps rely on BuildAgent
+// certificate alone: registerCheckinOps, registerCertOps and registerRotationOps rely on BuildAgent
 // passing hmacMW, so a route registered without it would answer a bare cert.
 func TestAgentListener_EveryRouteRequiresHMAC(t *testing.T) {
 	l := newAgentListener(t)
@@ -406,6 +409,7 @@ func TestAgentListener_EveryRouteRequiresHMAC(t *testing.T) {
 		{http.MethodPost, "/agent/v1/checkin", `{"ipv4":"1.2.3.4"}`},
 		{http.MethodGet, "/agent/v1/self", ""},
 		{http.MethodPost, "/agent/v1/cert", `{"csr":"x"}`},
+		{http.MethodPost, "/agent/v1/rotation/secret", `{"secret":"x"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
@@ -417,7 +421,7 @@ func TestAgentListener_EveryRouteRequiresHMAC(t *testing.T) {
 	}
 }
 
-func TestAgentListener_OnlyThreeRoutes(t *testing.T) {
+func TestAgentListener_UnservedRoutesAre404(t *testing.T) {
 	l := newAgentListener(t)
 	d := l.newDevice(t, "agent-404@example.com")
 	c := l.client(t, d.cert)
@@ -436,6 +440,28 @@ func TestAgentListener_OnlyThreeRoutes(t *testing.T) {
 				t.Errorf("status = %d, want 404, body=%s", status, body)
 			}
 		})
+	}
+}
+
+func TestAgentListener_RotationSecret(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-rotsecret@example.com")
+	if err := l.st.Devices().MarkRotation(t.Context(), d.id, true, false, time.Now().Unix()); err != nil {
+		t.Fatalf("MarkRotation: %v", err)
+	}
+	newSecret := rotNewSecret()
+
+	status, body := l.send(t, l.client(t, d.cert), http.MethodPost, rotPath, d.id, d.secret,
+		map[string]string{"secret": base64.StdEncoding.EncodeToString(newSecret)})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	got, err := auth.OpenSecret(agentTestKey32(), l.device(t, d.id).PendingSecretHash)
+	if err != nil {
+		t.Fatalf("OpenSecret: %v", err)
+	}
+	if !bytes.Equal(got, newSecret) {
+		t.Error("stored pending secret differs from the one submitted")
 	}
 }
 
