@@ -11,7 +11,7 @@ const (
 	// CodeCertAlreadyIssued (409): the main port will not issue a second
 	// certificate while the device has a live one.
 	CodeCertAlreadyIssued = "cert_already_issued"
-	// CodeMTLSRequired (403): the main port refuses check-in and self when
+	// CodeMTLSRequired (403): the main port refuses check-in, self and rotation when
 	// agent.require_mtls is set.
 	CodeMTLSRequired = "mtls_required"
 	// CodeNoSecretRotationPending (409): the device has no secret rotation

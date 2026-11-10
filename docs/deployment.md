@@ -15,6 +15,12 @@ in a container unless you mount it — use a volume, or pass `--credentials-file
     docker run --rm -v diyddns-client:/home/nonroot/.config \
       ghcr.io/jacaudi/diyddns/client:v0.4.0 enroll --code <code> --server <url>
 
+The client rewrites `credentials.json` during [credential rotation](#credential-rotation)
+by writing a new file and renaming it over the old one, so the file's
+**directory** must be writable. A single-file bind mount of `credentials.json`
+cannot be replaced that way and fails rotation with `secret rotation: cannot
+save credentials`. Mount the directory (or a volume) instead.
+
 `<url>` must be reachable **from inside the client container**, which rules out
 the `http://localhost:8080` the server block above uses: inside the container
 `localhost` is the container itself, so enroll fails with `dial tcp
@@ -443,6 +449,15 @@ advertises `observed_ip: true` in its capabilities; a client that does not see
 it assumes an old server and looks up. A server logs one `INFO` line per
 check-in with `device_id`, `peer`, `observed`, `ipv4_source` and `ipv6_source`.
 
+Credential rotation adds three more fields to the same exchange. The server
+advertises `rotation: true` in its capabilities. A client that sees it sends
+`"capabilities": ["rotation"]` in its check-in request (it omits the field
+otherwise, because the server rejects unknown request fields with a 422), which
+tells the server the device can rotate. The check-in response always carries
+`rotation: {"secret": bool, "cert": bool}`, the tracks an admin has asked this
+device to rotate; an old client ignores it. See
+[Credential rotation](#credential-rotation).
+
 If a client reports an address (`always`, or an `auto` fallback), the
 reported address wins and the observed one is ignored. A reported address that
 is not public is dropped (never replaced by the observed one), the family's
@@ -648,6 +663,77 @@ if your chart names the container differently:
 `openssl pkey` prints nothing and exits 0 when the file is a valid private
 key; confirm that **before** the `rm`, and store the file offline.
 
+### Credential rotation
+
+An admin can ask a device to replace its secret, its certificate, or both. The
+device does it on its own at its next check-in; nothing is typed into the
+device. Secret rotation works with or without the agent port. Certificate
+rotation needs `agent.listen`.
+
+The new secret never travels in a response. The client generates it and sends it
+to the server inside a request signed with the **old** secret; the server holds
+it as pending, and promotes it the first time the device signs a request with
+it. A new certificate is issued the same way as a renewal and is promoted the
+first time the device presents it on the agent port. Until then the old
+credential keeps working, so a lost response or a crashed client never locks the
+device out.
+
+**Admin endpoints** (session cookie of an admin, plus the `X-CSRF-Token` header,
+as for the other admin writes):
+
+| Request | Body | Response |
+|---|---|---|
+| `POST /api/v1/admin/devices/{id}/rotation` | `{"target": "secret" \| "cert" \| "both"}` | `200` `{"secret": {"since": <unix s>, "status": "..."}, "cert": {...}}`; a track with nothing pending is `{"since": null, "status": null}` |
+| `POST /api/v1/admin/devices/rotation` | `{"target": "secret" \| "cert" \| "both"}` | `200` `{"marked": n, "awaiting_upgrade": n, "awaiting_mtls": n, "skipped_disabled": n}`, each a count of devices |
+| `DELETE /api/v1/admin/devices/{id}/rotation` | none | `204`, whether or not anything was pending |
+
+A `target` outside the three values is a `422`. An unknown device is a `404`. A
+disabled device, or one whose owner account is disabled, is a `409`; so is
+`cert` or `both` when the server has no agent listener. The fleet request marks
+every enabled device and counts the disabled ones it skipped.
+
+`status` is one of:
+
+- `pending`: the device has been asked and will rotate at its next check-in.
+- `awaiting_upgrade`: **waiting for client upgrade**. The device has not said it
+  supports rotation (an older client). The request is kept and takes effect
+  once it checks in with an upgraded client.
+- `awaiting_mtls`: **waiting for mTLS** (certificate track only). The device's
+  last check-in did not come over the agent port, so it has no certificate to
+  renew yet.
+
+`awaiting_upgrade` wins over `awaiting_mtls`, which wins over `pending`.
+
+**In the web UI**, an admin device page has a Rotation row with **Rotate
+secret**, **Rotate certificate**, **Rotate both** (the last two only when the
+agent listener is on) and, while anything is pending, **Cancel rotation**. Both
+device pages list each pending track with the time it was requested and any
+waiting reason. The admin devices page counts them in the **Devices pending
+rotation** tile.
+
+**A pending rotation never expires.** It ends only when the device completes it,
+an admin cancels it, or, for the certificate track, **Reset certificate**, a
+later renewal, or the certificate's expiry. A device that is off for a month
+rotates when it returns.
+
+**Cancel keeps an already-issued pending certificate.** Cancel clears the
+request and any pending secret, but a certificate the server has already issued
+stays valid: the device may be holding only the new certificate, and dropping
+the server's record of it would lock the device out. It is promoted when the
+device next presents it, and it is replaced by a later renewal or ends at
+expiry.
+
+Rotation writes `device.rotation.requested` (one row per request, including a
+fleet request), `device.rotation.cancelled` (only when something was pending) and
+`device.rotation.completed` audit entries. A completion is one row per track, with
+the `track` (`secret` or `cert`) in its details.
+
+**Threat model.** Rotation replaces a credential the legitimate client still
+holds. It does **not** evict an attacker who already holds the current secret:
+they can race the client's step of proposing a new one. To recover a compromised
+device, use the owner's **Rotate secret** (which discards any pending secret) or
+disable the device.
+
 ### Runbooks
 
 **The active CA key is lost: `ca promote-backup`.** This makes the backup CA
@@ -679,13 +765,18 @@ deliberately loud.
 certificate the server has recorded for that device, so the device provisions
 a new one on its next check-in.
 
-**Lost renewal response.** A device logs `ask an admin to click "Reset
-certificate"`. The server recorded a renewed certificate that the device never
-received (the response was lost in transit), so the agent port rejects the
-device's old certificate and the main port refuses to issue another (409
-`cert_already_issued`). Click **Reset certificate** for that device; it
-recovers on its next check-in. Under `require_mtls` the device cannot report
-until you do.
+**Lost renewal response.** This no longer locks a device out. When a renewal
+response is lost in transit, the server keeps the device's old certificate
+current and holds the renewed one as pending until the device presents it. The
+device still has its old certificate, keeps checking in with it, and renews
+again next time. Nothing to do.
+
+**Lost device key.** A device logs `ask an admin to click "Reset certificate"`
+when the server records a live certificate for it but the device no longer has
+the matching key (for example `mtls.json` was deleted): the main port refuses to
+issue another (409 `cert_already_issued`). Click **Reset certificate** for that
+device; it recovers on its next check-in. Under `require_mtls` the device cannot
+report until you do.
 
 **`diyddns-client mtls reset`** deletes `mtls.json` (the device's key,
 certificate and pinned CA) on the device. Pair it with **Reset certificate**

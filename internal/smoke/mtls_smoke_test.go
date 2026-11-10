@@ -139,6 +139,43 @@ func TestAgentMTLSSmoke(t *testing.T) {
 		t.Fatalf("main-port check-in: status %d body %s, want 403 mtls_required", status, body)
 	}
 
+	step(t, "an admin marks both tracks; two runs rotate the secret and the certificate")
+	oldSecret := credsField(t, credsPath, "secret")
+	oldCert := readMTLSState(t, statePath).CertPEM
+	rotStatus, rotBody := postJSON(t, client, baseURL+"/api/v1/admin/devices/"+deviceID+"/rotation",
+		map[string]string{"target": "both"}, csrf)
+	if rotStatus != http.StatusOK {
+		t.Fatalf("mark rotation: %d %s", rotStatus, rotBody)
+	}
+	runOnce() // sees rotation: stores a pending secret (step 3) and renews (pending serial)
+	runOnce() // presents the new cert and signs with the pending secret: both promote
+	if credsField(t, credsPath, "secret") == oldSecret {
+		t.Fatal("secret unchanged after rotation")
+	}
+	var creds map[string]any
+	rawCreds, err := os.ReadFile(credsPath)
+	if err != nil {
+		t.Fatalf("read credentials: %v", err)
+	}
+	mustJSON(t, rawCreds, &creds)
+	if _, ok := creds["pending_secret"]; ok {
+		t.Fatal("credentials.json still holds pending_secret after promotion")
+	}
+	if readMTLSState(t, statePath).CertPEM == oldCert {
+		t.Fatal("certificate unchanged after rotation")
+	}
+	auditStatus, auditBody := get(t, client, baseURL+"/api/v1/admin/audit?event_type=device.rotation.completed")
+	if auditStatus != http.StatusOK {
+		t.Fatalf("audit: %d %s", auditStatus, auditBody)
+	}
+	var audit struct {
+		Rows []map[string]any `json:"rows"`
+	}
+	mustJSON(t, auditBody, &audit)
+	if len(audit.Rows) != 2 {
+		t.Fatalf("device.rotation.completed rows = %d, want 2 (secret and cert): %s", len(audit.Rows), auditBody)
+	}
+
 	step(t, "an admin resets the certificate; the next run re-provisions in the same cycle")
 	before := readMTLSState(t, statePath)
 	clearURL := fmt.Sprintf("%s/admin/devices/%s/cert/clear", baseURL, deviceID)

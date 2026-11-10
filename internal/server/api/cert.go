@@ -77,7 +77,7 @@ func certErr(ctx context.Context, deps ServerDeps, deviceID string, err error) e
 }
 
 // mtlsRequiredMW refuses the request with the coded 403 mtls_required. It is
-// attached to the main port's check-in and self when agent.require_mtls is set,
+// attached to the main port's check-in, self and rotation when agent.require_mtls is set,
 // ahead of HMAC verification, and never calls next.
 func mtlsRequiredMW(ctx huma.Context, _ func(huma.Context)) {
 	_, w := humago.Unwrap(ctx)
