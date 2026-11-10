@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jacaudi/diyddns/internal/config"
+	"github.com/jacaudi/diyddns/internal/server/service"
 	"github.com/jacaudi/diyddns/internal/server/stale"
 	"github.com/jacaudi/diyddns/internal/store"
 	"github.com/jacaudi/diyddns/internal/version"
@@ -536,6 +537,13 @@ type deviceDetailData struct {
 	ShowExpiry  bool
 	V4ExpiresIn string
 	V6ExpiresIn string
+
+	// RotationNotes are the pending-rotation sentences both device pages show
+	// (#175); RotationPending gates the admin page's Cancel rotation form, and
+	// CertRotation its certificate buttons (the agent listener must be on).
+	RotationNotes   []string
+	RotationPending bool
+	CertRotation    bool
 }
 
 // ownedDevice loads a device for the signed-in user, rendering 404 when it does
@@ -565,17 +573,21 @@ func (h *handler) newDetailData(r *http.Request, usr store.User, sess store.Sess
 		return deviceDetailData{}, err
 	}
 	now := time.Now()
+	rot := service.RotationStateOf(dev)
 	data := deviceDetailData{
-		appData:     h.newAppData(usr, sess, dev.Label, v.Nav),
-		Device:      dev,
-		Status:      deviceStatus(dev, now),
-		LastSeenRel: relTime(dev.LastSeenAt, now),
-		LastSeenAbs: absTime(dev.LastSeenAt),
-		CreatedAbs:  absTime(dev.CreatedAt),
-		Owner:       v.OwnerEmail,
-		OwnerURL:    v.OwnerURL,
-		HistoryURL:  v.HistoryURL,
-		History:     historyRows(page.Rows, now),
+		appData:         h.newAppData(usr, sess, dev.Label, v.Nav),
+		Device:          dev,
+		Status:          deviceStatus(dev, now),
+		LastSeenRel:     relTime(dev.LastSeenAt, now),
+		LastSeenAbs:     absTime(dev.LastSeenAt),
+		CreatedAbs:      absTime(dev.CreatedAt),
+		Owner:           v.OwnerEmail,
+		OwnerURL:        v.OwnerURL,
+		HistoryURL:      v.HistoryURL,
+		History:         historyRows(page.Rows, now),
+		RotationNotes:   rotationNotes(rot),
+		RotationPending: rot.Pending(),
+		CertRotation:    h.deps.Rotation.CertEnabled(),
 	}
 
 	needV4 := dev.CurrentIPv4 == ""

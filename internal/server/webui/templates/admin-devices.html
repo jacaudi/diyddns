@@ -3,6 +3,10 @@
   <div><h1>All Devices</h1><p class="sub">{{.Summary}}</p></div>
 </div>
 
+<div class="grid cols-4 stats">
+  <div class="card stat"><div class="label">Devices pending rotation</div><div class="value">{{.PendingRotation}}</div></div>
+</div>
+
 {{if eq .Total 0}}
 <div class="card"><div class="empty">
   <div class="icon">📡</div>

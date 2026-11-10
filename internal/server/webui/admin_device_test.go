@@ -63,7 +63,7 @@ func TestAdminDevice_RendersAForeignDeviceReadOnly(t *testing.T) {
 		`action="/admin/devices/` + dev.ID + `/enabled"`,
 		`name="disabled" value="true"`,
 		`<a href="/admin/devices">All Devices</a>`,
-		"only available to the device's owner",
+		"Renaming and deletion are only available to the device's owner.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
@@ -79,8 +79,8 @@ func TestAdminDevice_RendersAForeignDeviceReadOnly(t *testing.T) {
 			t.Errorf("body must not contain %q", forbidden)
 		}
 	}
-	if n := strings.Count(body, `<form method="post"`); n != 1 {
-		t.Errorf("%d POST forms, want exactly 1 (disable)", n)
+	if n := strings.Count(body, `<form method="post"`); n != 4 {
+		t.Errorf("%d POST forms, want exactly 4 (disable, rotate secret/cert/both)", n)
 	}
 	if n := strings.Count(body, `data-label="When"`); n != 5 {
 		t.Errorf("%d history preview rows, want the five newest", n)
@@ -214,6 +214,8 @@ func TestAdminDeviceSetEnabled_DisablesThenEnables(t *testing.T) {
 // TestAdminDevice_OwnerOnlyActionsAreNotRouted is the enforcement of #132 D3:
 // there is no admin rename, rotate-secret or delete route at all, so a
 // crafted POST with a valid CSRF token reaches ServeMux's 404, not a handler.
+// Admin-directed rotation is routed separately, under /rotation (#175); the
+// owner's rotate-secret stays unrouted here.
 func TestAdminDevice_OwnerOnlyActionsAreNotRouted(t *testing.T) {
 	deps, st, cookie, sess, _, dev := adminDeviceFixture(t)
 	h, _ := New(deps)

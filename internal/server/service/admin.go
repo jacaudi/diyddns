@@ -407,9 +407,8 @@ func (s *AdminService) GetDevice(ctx context.Context, id string) (store.Device, 
 // admin (#132 D4, D7). actor is the admin's session: its UserID is the audit
 // actor and its IP the audit source, following #137. The device's owner is
 // resolved here and is the party the audit row's details and the owner
-// notice name. Besides ClearDeviceCert (#173), this is the only admin mutation
-// of a device: rename, secret rotation and deletion stay with the owner
-// (#132 D3).
+// notice name. Rename and deletion stay with the owner (#132 D3); secret
+// rotation by an admin now goes through RotationService (#175).
 //
 // Idempotent (#132 D11): when the device already holds the requested state
 // nothing is written, audited or mailed — a double-submit must not send the

@@ -86,6 +86,7 @@ func testDeps(t *testing.T) (Deps, *store.Store) {
 		Notify:      notify,
 		Feed:        feedSvc,
 		APIKeys:     apiKeys,
+		Rotation:    service.NewRotationService(st, key, audit, true),
 		Info:        version.Info{Version: "test", Commit: "abc1234", Date: "2026-08-07"},
 		StartedAt:   time.Now().Add(-2 * time.Hour),
 	}, st

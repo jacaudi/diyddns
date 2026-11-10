@@ -45,6 +45,9 @@ type Deps struct {
 	Notify      *service.NotificationService
 	Feed        *service.FeedService
 	APIKeys     *service.APIKeyService
+	// Rotation marks and cancels credential rotations (#175); its CertEnabled
+	// gates the admin page's certificate buttons.
+	Rotation *service.RotationService
 
 	Info      version.Info
 	StartedAt time.Time // handler-build time; the /admin/server uptime tile reads it
@@ -113,6 +116,8 @@ func New(deps Deps) (http.Handler, []string) {
 		{"GET /admin/devices/{id}/history", h.requireAdmin(h.handleAdminDeviceHistory)},
 		{"POST /admin/devices/{id}/enabled", h.requirePostAdmin(h.handleAdminDeviceSetEnabled)},
 		{"POST /admin/devices/{id}/cert/clear", h.requirePostAdmin(h.handleAdminDeviceClearCert)},
+		{"POST /admin/devices/{id}/rotation", h.requirePostAdmin(h.handleAdminDeviceRotate)},
+		{"POST /admin/devices/{id}/rotation/cancel", h.requirePostAdmin(h.handleAdminDeviceRotationCancel)},
 		{"GET /admin/audit", h.requireAdmin(h.handleAdminAudit)},
 		{"GET /admin/server", h.requireAdmin(h.handleAdminServer)},
 		{"GET /static/", http.FileServerFS(staticFS)},

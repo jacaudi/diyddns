@@ -57,9 +57,9 @@ func (h *handler) handleAdminDeviceHistory(w http.ResponseWriter, r *http.Reques
 // handleAdminDeviceSetEnabled is one of the two admin mutations of a device
 // (enable/disable, #132 D4, and certificate reset, #173). The session goes to
 // the service whole so the audit row carries the admin's id and IP (#137).
-// Rename, secret rotation and deletion are deliberately not routed under
-// /admin/devices: their absence from webui.New's table is the enforcement
-// (#132 D3). No typed confirmation -- the owner's route has none and the
+// Rename and deletion are deliberately not routed under /admin/devices: their
+// absence from webui.New's table is the enforcement (#132 D3). Admin-directed
+// rotation is routed (#175); see handleAdminDeviceRotate. No typed confirmation -- the owner's route has none and the
 // action is reversible.
 //
 // It does NOT go through adminDevice first: SetDeviceEnabled resolves the

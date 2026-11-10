@@ -120,3 +120,13 @@
   {{else}}<div class="empty"><h3>No check-ins recorded yet</h3></div>{{end}}
 </div>
 {{end}}
+
+{{/* The pending-rotation notes (#175), shared by the owner's page and the
+     admin's: one paragraph per track, nothing at all when none is pending.
+     Dot is deviceDetailData. */}}
+{{define "rotationNotes"}}{{if .RotationNotes}}
+<div class="card"><div class="card-body">
+  {{range .RotationNotes}}<p>{{.}}</p>
+  {{end}}
+</div></div>
+{{end}}{{end}}
