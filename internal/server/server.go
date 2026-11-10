@@ -517,7 +517,7 @@ func handler(cfg config.Server, st *store.Store, log *slog.Logger, inst Instrume
 	// the r.TLS the certificate check reads.
 	agentMux := http.NewServeMux()
 	api.BuildAgent(agentMux, apiDeps)
-	agentHandler := chain(api.ClientCertMiddleware(ca, st.Devices(), log)(agentMux))
+	agentHandler := chain(api.ClientCertMiddleware(ca, st.Devices(), apiDeps.Rotation, log)(agentMux))
 	return chain(wrapped), agentHandler, oidcMgr, allowedPrivateCIDRs, hub, sw, nil
 }
 

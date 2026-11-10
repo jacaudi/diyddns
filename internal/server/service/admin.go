@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -457,7 +458,7 @@ func (s *AdminService) ClearDeviceCert(ctx context.Context, actor store.Session,
 	if !cleared {
 		return nil
 	}
-	details, _ := json.Marshal(map[string]string{"owner_user_id": owner.ID, "serial": dev.CertSerial})
+	details, _ := json.Marshal(map[string]string{"owner_user_id": owner.ID, "serial": cmp.Or(dev.CertSerial, dev.PendingCertSerial)})
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: actor.UserID, EventType: "device.cert_cleared", TargetType: "device", TargetID: id,
 		DetailsJSON: string(details), IP: actor.IP,

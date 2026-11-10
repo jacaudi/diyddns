@@ -38,10 +38,13 @@ func NewCertService(st *store.Store, ca *agenttls.CA, agentURL string, audit Aud
 }
 
 // Issue signs a certificate for deviceID over csrPEM's public key and records
-// its serial and expiry on the device row. renewal is true on the agent
-// listener, where the caller already proved it holds the current certificate,
-// so Issue always issues; on the main listener (renewal false) it issues only
-// when the device has no live certificate (#173).
+// it on the device row. renewal is true on the agent listener, where the caller
+// already proved it holds the current certificate, so Issue always issues and
+// records only the serial as pending: the current certificate stays valid until
+// the new one is first used (ClientCertMiddleware promotes it), so a response
+// lost in transit cannot lock the device out (#175). On the main listener
+// (renewal false) it issues only when the device has no live certificate, and
+// records the serial and expiry as current (#173).
 //
 // The crypto runs before the database write, so the store's single connection
 // is never held across it. On the main listener the write is a
@@ -71,7 +74,7 @@ func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte,
 			return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", ErrCertAlreadyIssued)
 		}
 	} else {
-		err = s.st.Devices().SetCert(ctx, deviceID, issued.Serial, notAfter)
+		err = s.st.Devices().SetPendingCert(ctx, deviceID, issued.Serial)
 	}
 	if err != nil {
 		return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", err)

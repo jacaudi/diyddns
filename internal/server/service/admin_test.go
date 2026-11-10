@@ -746,6 +746,31 @@ func TestAdminService_SetDeviceEnabled_UnknownDeviceWritesNothing(t *testing.T) 
 	}
 }
 
+func TestClearDeviceCert_AuditsPendingSerialWhenNoCurrent(t *testing.T) {
+	st, svc := newAdminSvc(t)
+	admin := seedUser(t, st, "admin@x", "admin")
+	owner := seedUser(t, st, "owner@x", "user")
+	dev := seedDevice(t, st, owner.ID, "theirs")
+	if err := st.Devices().SetPendingCert(t.Context(), dev.ID, "pend456"); err != nil {
+		t.Fatalf("SetPendingCert: %v", err)
+	}
+
+	if err := svc.ClearDeviceCert(t.Context(), store.Session{UserID: admin.ID}, dev.ID); err != nil {
+		t.Fatalf("ClearDeviceCert: %v", err)
+	}
+	rows := adminAuditRows(t, st, "device.cert_cleared")
+	if len(rows) != 1 {
+		t.Fatalf("device.cert_cleared rows = %d, want 1", len(rows))
+	}
+	var details map[string]string
+	if err := json.Unmarshal([]byte(rows[0].DetailsJSON), &details); err != nil {
+		t.Fatalf("DetailsJSON %q: %v", rows[0].DetailsJSON, err)
+	}
+	if details["serial"] != "pend456" {
+		t.Fatalf("details = %v, want serial=pend456", details)
+	}
+}
+
 func TestAdminService_ClearDeviceCert(t *testing.T) {
 	st, svc := newAdminSvc(t)
 	admin := seedUser(t, st, "admin@x", "admin")
