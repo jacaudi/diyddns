@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/jacaudi/diyddns/internal/server/clientip"
 	"github.com/jacaudi/diyddns/internal/server/service"
+	"github.com/jacaudi/diyddns/internal/shared"
 )
 
 // checkinBody is the JSON wire shape of POST /agent/v1/checkin. It exists
@@ -25,6 +27,8 @@ type checkinBody struct {
 	Hostname      string `json:"hostname,omitempty"`
 	OS            string `json:"os,omitempty"`
 	ClientVersion string `json:"client_version,omitempty"`
+	// Capabilities lists what the client supports; unknown entries are ignored.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type checkinInput struct {
@@ -40,6 +44,15 @@ type checkinResponse struct {
 	// IPSource says, per family this check-in carried, where the recorded
 	// address came from. It is {} when the check-in carried no family.
 	IPSource ipSourceBody `json:"ip_source"`
+	// Rotation says which tracks an owner asked this device to rotate. It is
+	// always emitted; a client that does not know it ignores it.
+	Rotation rotationFlags `json:"rotation"`
+}
+
+// rotationFlags is the per-track rotation request a check-in answers with.
+type rotationFlags struct {
+	Secret bool `json:"secret"`
+	Cert   bool `json:"cert"`
 }
 
 // ipSourceBody is the per-family source of a check-in's recorded address:
@@ -87,7 +100,7 @@ func addrOrEmpty(a netip.Addr) string {
 // onto a: POST /agent/v1/checkin and GET /agent/v1/self. Both attach mws (which
 // must include HMAC verification) and read the authenticated device id via
 // DeviceIDFrom.
-func registerCheckinOps(a huma.API, deps ServerDeps, mws huma.Middlewares) {
+func registerCheckinOps(a huma.API, deps ServerDeps, mws huma.Middlewares, viaAgent bool) {
 	huma.Register(a, huma.Operation{
 		Method:      http.MethodPost,
 		Path:        "/agent/v1/checkin",
@@ -100,13 +113,15 @@ func registerCheckinOps(a huma.API, deps ServerDeps, mws huma.Middlewares) {
 			observed = obs.Addr
 		}
 		res, err := deps.Checkin.Checkin(ctx, deviceID, service.CheckinReport{
-			IPv4:          in.Body.IPv4,
-			IPv6:          in.Body.IPv6,
-			Hostname:      in.Body.Hostname,
-			OS:            in.Body.OS,
-			ClientVersion: in.Body.ClientVersion,
-			Observed:      observed,
-			Peer:          obs.Peer,
+			IPv4:             in.Body.IPv4,
+			IPv6:             in.Body.IPv6,
+			Hostname:         in.Body.Hostname,
+			OS:               in.Body.OS,
+			ClientVersion:    in.Body.ClientVersion,
+			SupportsRotation: slices.Contains(in.Body.Capabilities, shared.CapabilityRotation),
+			ViaAgent:         viaAgent,
+			Observed:         observed,
+			Peer:             obs.Peer,
 		})
 		if err != nil {
 			deps.Log.LogAttrs(ctx, slog.LevelError, "checkin failed",
@@ -126,6 +141,7 @@ func registerCheckinOps(a huma.API, deps ServerDeps, mws huma.Middlewares) {
 			CurrentIPv6: res.CurrentIPv6,
 			Stored:      res.Stored,
 			IPSource:    ipSourceBody{IPv4: string(res.SourceV4), IPv6: string(res.SourceV6)},
+			Rotation:    rotationFlags{Secret: res.RotateSecret, Cert: res.RotateCert},
 		}}, nil
 	})
 

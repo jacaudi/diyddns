@@ -773,3 +773,21 @@ func TestCheckinReportedDroppedWarnIsPerFamily(t *testing.T) {
 		t.Errorf("dropped WARNs at +61m = %d, want 4", n)
 	}
 }
+
+func TestCheckin_RotationFlagsFromPrev(t *testing.T) {
+	st := openTestStore(t)
+	usr := seedUser(t, st, "rot@b.co", "user")
+	dev := seedDevice(t, st, usr.ID, "laptop")
+	svc := NewCheckinService(st, nopNotifier{}, slog.New(slog.DiscardHandler), time.Now)
+
+	if err := st.Devices().MarkRotation(t.Context(), dev.ID, true, false, 1); err != nil {
+		t.Fatalf("MarkRotation: %v", err)
+	}
+	res, err := svc.Checkin(t.Context(), dev.ID, CheckinReport{IPv4: "1.2.3.4"})
+	if err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if !res.RotateSecret || res.RotateCert {
+		t.Errorf("RotateSecret=%v RotateCert=%v, want true,false", res.RotateSecret, res.RotateCert)
+	}
+}

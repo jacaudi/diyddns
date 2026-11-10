@@ -18,6 +18,9 @@ type Capabilities struct {
 	// ObservedIP tells a client the server records the address it observes and
 	// answers check-ins with ip_source; always true on a server that has it.
 	ObservedIP bool `json:"observed_ip"`
+	// Rotation tells a client the server supports secret and certificate
+	// rotation (#175); always true on a server that has it.
+	Rotation bool `json:"rotation"`
 	// AgentMTLS is present only when the agent listener is enabled (#173).
 	AgentMTLS *AgentMTLSCapability `json:"agent_mtls,omitempty"`
 }
@@ -40,6 +43,7 @@ func registerCapabilities(a huma.API, deps ServerDeps) {
 			OIDCEnabled:       deps.OIDCMgr.Enabled(),
 			OIDCDeviceEnabled: deps.OIDCMgr.DeviceEnabled(),
 			ObservedIP:        true,
+			Rotation:          true,
 		}
 		if deps.AgentURL != "" {
 			caps.AgentMTLS = &AgentMTLSCapability{AgentURL: deps.AgentURL}
