@@ -50,6 +50,28 @@ type Device struct {
 	// Public material only; the device key never reaches the server.
 	CertSerial   string
 	CertNotAfter int64
+
+	// RotateSecretAt and RotateCertAt are unix seconds when an owner requested
+	// a rotation on that track (#175); 0 when none is pending, stored as NULL.
+	RotateSecretAt int64
+	RotateCertAt   int64
+
+	// PendingSecretHash is the sealed hash of the client's proposed new secret,
+	// in exactly the secret_hash encoding so promotion is a column copy; ""
+	// when NULL.
+	PendingSecretHash string
+
+	// PendingCertSerial is the lowercase-hex serial of the certificate issued
+	// for a pending cert rotation; "" when NULL.
+	PendingCertSerial string
+
+	// SupportsRotation is set once the client has advertised the rotation
+	// capability.
+	SupportsRotation bool
+
+	// LastCheckinMTLS records whether the device's last check-in arrived over
+	// mTLS.
+	LastCheckinMTLS bool
 }
 
 // DeviceRepo provides persistence operations for Device records.
@@ -77,7 +99,9 @@ const deviceColumns = `id, user_id, label, secret_hash,
 	current_ipv4, current_ipv6, hostname, os, client_version,
 	last_seen_at, disabled, created_at, updated_at,
 	v4_confirmed_at, v6_confirmed_at, v4_warn_level, v6_warn_level,
-	cert_serial, cert_not_after`
+	cert_serial, cert_not_after,
+	rotate_secret_at, rotate_cert_at, pending_secret_hash, pending_cert_serial,
+	supports_rotation, last_checkin_mtls`
 
 func scanDevice(row scanner) (Device, error) {
 	var d Device
@@ -88,6 +112,9 @@ func scanDevice(row scanner) (Device, error) {
 	var v4Level, v6Level int64
 	var certSerial sql.NullString
 	var certNotAfter sql.NullInt64
+	var rotateSecretAt, rotateCertAt sql.NullInt64
+	var pendingSecretHash, pendingCertSerial sql.NullString
+	var supportsRotation, lastCheckinMTLS int64
 
 	err := row.Scan(
 		&d.ID,
@@ -109,6 +136,12 @@ func scanDevice(row scanner) (Device, error) {
 		&v6Level,
 		&certSerial,
 		&certNotAfter,
+		&rotateSecretAt,
+		&rotateCertAt,
+		&pendingSecretHash,
+		&pendingCertSerial,
+		&supportsRotation,
+		&lastCheckinMTLS,
 	)
 	if err != nil {
 		return Device{}, err
@@ -126,6 +159,12 @@ func scanDevice(row scanner) (Device, error) {
 	d.V6WarnLevel = int(v6Level)
 	d.CertSerial = certSerial.String
 	d.CertNotAfter = certNotAfter.Int64
+	d.RotateSecretAt = rotateSecretAt.Int64
+	d.RotateCertAt = rotateCertAt.Int64
+	d.PendingSecretHash = pendingSecretHash.String
+	d.PendingCertSerial = pendingCertSerial.String
+	d.SupportsRotation = supportsRotation != 0
+	d.LastCheckinMTLS = lastCheckinMTLS != 0
 	return d, nil
 }
 
