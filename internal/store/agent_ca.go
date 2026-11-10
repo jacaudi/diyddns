@@ -21,8 +21,8 @@ type AgentCARepo struct{ db *sql.DB }
 func (s *Store) AgentCA() *AgentCARepo { return &AgentCARepo{db: s.db} }
 
 // clearDeviceCerts is the statement Promote and Reset share: a new or removed
-// CA invalidates every certificate it signed.
-const clearDeviceCerts = `UPDATE devices SET cert_serial = NULL, cert_not_after = NULL`
+// CA invalidates every certificate it signed, pending ones included.
+const clearDeviceCerts = `UPDATE devices SET cert_serial = NULL, cert_not_after = NULL, pending_cert_serial = NULL`
 
 // Get returns the CA pair. Returns ErrNotFound if none is recorded.
 func (r *AgentCARepo) Get(ctx context.Context) (AgentCA, error) {
