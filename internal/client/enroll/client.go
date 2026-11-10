@@ -27,6 +27,9 @@ type Capabilities struct {
 	// ObservedIP is true when the server answers check-ins with ip_source and can
 	// record the address it observed; an older server omits it.
 	ObservedIP bool `json:"observed_ip"`
+	// Rotation is true when the server accepts the "rotation" check-in capability
+	// and the step-3 secret endpoint; an older server omits it.
+	Rotation bool `json:"rotation"`
 	// AgentMTLS is non-nil only when the server runs the mTLS agent listener.
 	AgentMTLS *AgentMTLS `json:"agent_mtls,omitempty"`
 }

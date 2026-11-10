@@ -129,9 +129,12 @@ func (m *Manager) checkinFamilies(ctx context.Context, unpinned *checkin.Client,
 		case err != nil:
 			failed = append(failed, err)
 		default:
-			// The cycle's result is the last answer, with Stored OR-ed across
-			// families and each family's ip_source taken from its own response.
+			// The cycle's result is the last answer, with Stored and the rotation
+			// request OR-ed across families and each family's ip_source taken from its
+			// own response.
 			res.Stored = res.Stored || out.Stored
+			res.Rotation.Secret = res.Rotation.Secret || out.Rotation.Secret
+			res.Rotation.Cert = res.Rotation.Cert || out.Rotation.Cert
 			res.IPSource = withSource(out.IPSource, f, sourceFor(res.IPSource, f))
 			out, ok = res, true
 		}

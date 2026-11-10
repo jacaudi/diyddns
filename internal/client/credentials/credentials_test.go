@@ -174,3 +174,31 @@ func assertNoTmpFiles(t *testing.T, dir string) {
 		}
 	}
 }
+
+func TestPendingSecretRoundTripAndOmitted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+
+	want := Credentials{ServerURL: "https://ddns.example.com", DeviceID: "dev_123", Secret: "c2VjcmV0", PendingSecret: "bmV3"}
+	if err := Save(path, want, false); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got != want {
+		t.Errorf("round trip: got %+v want %+v", got, want)
+	}
+
+	want.PendingSecret = ""
+	if err := Save(path, want, true); err != nil {
+		t.Fatalf("Save without pending: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(raw), "pending_secret") {
+		t.Errorf("file carries pending_secret although it is empty: %s", raw)
+	}
+}

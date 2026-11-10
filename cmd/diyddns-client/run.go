@@ -65,6 +65,7 @@ func newRunCmd() *cobra.Command {
 			}
 			mcfg := mtls.Config{
 				StatePath:         mtls.PathFor(credPath),
+				CredentialsPath:   credPath,
 				Creds:             creds,
 				CACertPath:        cfg.Server.CABundle,
 				InsecureProvision: cfg.Run.InsecureProvision,
