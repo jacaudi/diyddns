@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
@@ -200,7 +201,7 @@ func TestRunOnceNilDiscovererPostsEmptyReport(t *testing.T) {
 	}
 
 	want := checkin.Report{Hostname: "host", OS: "linux", ClientVersion: "1.2.3"}
-	if c.last != want {
+	if !reflect.DeepEqual(c.last, want) {
 		t.Errorf("report = %+v, want %+v (no addresses)", c.last, want)
 	}
 }
