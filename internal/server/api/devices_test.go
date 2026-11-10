@@ -152,10 +152,14 @@ func buildServerDeps(t *testing.T) (*store.Store, api.ServerDeps) {
 // checkin, self), browser auth surface (logout, me, passkey + OIDC login,
 // passkey bootstrap claim), and the device management surface under test
 // here. OIDC is left unset (disabled) — see newOIDCHarness for the
-// OIDC-enabled variant.
-func newFullHarness(t *testing.T) fullHarness {
+// OIDC-enabled variant. Each mutate func edits the deps before api.Build, so a
+// test can switch on an optional dependency (see withAgentMTLS).
+func newFullHarness(t *testing.T, mutate ...func(*api.ServerDeps)) fullHarness {
 	t.Helper()
 	st, deps := buildServerDeps(t)
+	for _, m := range mutate {
+		m(&deps)
+	}
 
 	mux := http.NewServeMux()
 	api.Build(mux, deps)
