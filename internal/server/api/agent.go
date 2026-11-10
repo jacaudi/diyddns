@@ -34,7 +34,7 @@ func BuildAgent(mux *http.ServeMux, deps ServerDeps) {
 	// wrap (or none), never behind X-Forwarded-For, so a header a client sends is
 	// not read.
 	mws := huma.Middlewares{observeMW(clientip.ObservedFromPeer, deps.TrustedProxies), hmacMW(a, deps), certBindingMW(a, deps)}
-	registerCheckinOps(a, deps, mws)
+	registerCheckinOps(a, deps, mws, true)
 	registerCertOps(a, deps, true, mws)
 }
 

@@ -121,7 +121,7 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 // one.
 func registerAgentOps(a huma.API, deps ServerDeps) {
 	registerEnrollOps(a, deps)
-	registerCheckinOps(a, deps, mainAgentMWs(a, deps))
+	registerCheckinOps(a, deps, mainAgentMWs(a, deps), false)
 	if deps.Cert != nil {
 		registerCertOps(a, deps, false, huma.Middlewares{hmacMW(a, deps)})
 	}

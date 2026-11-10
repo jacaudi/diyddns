@@ -18,6 +18,11 @@ import (
 type CheckinReport struct {
 	IPv4, IPv6, Hostname, OS, ClientVersion string
 	Observed, Peer                          netip.Addr
+
+	// SupportsRotation is set when the client advertised the rotation capability
+	// on this check-in; ViaAgent when the request arrived over the mTLS agent
+	// listener (#175).
+	SupportsRotation, ViaAgent bool
 }
 
 // IPSource says where a family's recorded address came from on one check-in.
@@ -44,6 +49,9 @@ type CheckinResult struct {
 	// SourceV4 and SourceV6 report, per family, how this check-in's address
 	// was decided. "" means the family was not carried.
 	SourceV4, SourceV6 IPSource
+	// RotateSecret and RotateCert say an owner has requested a rotation on that
+	// track, read from the device as it was before this check-in (#175).
+	RotateSecret, RotateCert bool
 }
 
 // Notifier is fired after a check-in that actually changed a device's recorded
@@ -113,12 +121,14 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 	// page and the history page disagreed and "last change" — derived from
 	// the latest history row — silently skipped the change (#97).
 	out, err := s.st.RecordIPChange(ctx, store.IPChange{
-		DeviceID:      deviceID,
-		IPv4:          v4.ip,
-		IPv6:          v6.ip,
-		ClientVersion: r.ClientVersion,
-		Hostname:      r.Hostname,
-		OS:            r.OS,
+		DeviceID:         deviceID,
+		IPv4:             v4.ip,
+		IPv6:             v6.ip,
+		ClientVersion:    r.ClientVersion,
+		Hostname:         r.Hostname,
+		OS:               r.OS,
+		SupportsRotation: r.SupportsRotation,
+		ViaAgent:         r.ViaAgent,
 	})
 	if err != nil {
 		return CheckinResult{}, fmt.Errorf("service.Checkin: %w", err)
@@ -140,12 +150,14 @@ func (s *CheckinService) Checkin(ctx context.Context, deviceID string, r Checkin
 	}
 
 	return CheckinResult{
-		DeviceID:    out.Prev.ID,
-		CurrentIPv4: out.CurrIPv4,
-		CurrentIPv6: out.CurrIPv6,
-		Stored:      out.Changed,
-		SourceV4:    v4.src,
-		SourceV6:    v6.src,
+		DeviceID:     out.Prev.ID,
+		CurrentIPv4:  out.CurrIPv4,
+		CurrentIPv6:  out.CurrIPv6,
+		Stored:       out.Changed,
+		SourceV4:     v4.src,
+		SourceV6:     v6.src,
+		RotateSecret: out.Prev.RotateSecretAt != 0,
+		RotateCert:   out.Prev.RotateCertAt != 0,
 	}, nil
 }
 

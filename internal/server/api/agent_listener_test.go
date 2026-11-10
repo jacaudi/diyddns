@@ -686,3 +686,21 @@ func TestAgentListener_CertRejectionCarriesTheChallenge(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentListener_CheckinSetsLastCheckinMTLS(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-lastmtls@example.com")
+
+	status, body := l.send(t, l.client(t, d.cert), http.MethodPost, "/agent/v1/checkin", d.id, d.secret,
+		map[string]any{"ipv4": "203.0.113.5", "capabilities": []string{shared.CapabilityRotation}})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", status, body)
+	}
+	dev, err := l.st.Devices().GetByID(t.Context(), d.id)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if !dev.LastCheckinMTLS || !dev.SupportsRotation {
+		t.Errorf("LastCheckinMTLS=%v SupportsRotation=%v, want both true", dev.LastCheckinMTLS, dev.SupportsRotation)
+	}
+}

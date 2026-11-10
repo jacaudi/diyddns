@@ -153,3 +153,21 @@ func TestCapabilitiesObservedIP(t *testing.T) {
 		t.Errorf("observed_ip = %v, want true", got.ObservedIP)
 	}
 }
+
+func TestCapabilitiesRotation(t *testing.T) {
+	h := newFullHarness(t)
+	resp, err := http.Get(h.srv.URL + "/agent/v1/capabilities")
+	if err != nil {
+		t.Fatalf("get capabilities: %v", err)
+	}
+	defer resp.Body.Close()
+	var got struct {
+		Rotation *bool `json:"rotation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Rotation == nil || !*got.Rotation {
+		t.Errorf("rotation = %v, want true", got.Rotation)
+	}
+}
