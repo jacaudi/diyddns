@@ -165,7 +165,8 @@ func (s *DeviceService) Delete(ctx context.Context, userID, id string) error {
 // the new plaintext secret, shown to the caller exactly once and never
 // persisted or logged in the clear.
 func (s *DeviceService) RotateSecret(ctx context.Context, userID, id string) ([]byte, error) {
-	if _, err := s.ownedDevice(ctx, userID, id); err != nil {
+	dev, err := s.ownedDevice(ctx, userID, id)
+	if err != nil {
 		return nil, fmt.Errorf("service.RotateSecret: %w", err)
 	}
 	secret, err := auth.GenerateSecret()
@@ -182,6 +183,10 @@ func (s *DeviceService) RotateSecret(ctx context.Context, userID, id string) ([]
 	s.audit.Log(ctx, store.AuditEntry{
 		ActorUserID: userID, EventType: "device.secret.rotated", TargetType: "device", TargetID: id,
 	})
+	if dev.RotateSecretAt != 0 {
+		// The write cleared the mark, which completes the requested rotation.
+		auditRotationCompleted(ctx, s.audit, id, map[string]string{"track": "secret"})
+	}
 	return secret, nil
 }
 

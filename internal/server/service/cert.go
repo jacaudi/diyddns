@@ -54,6 +54,9 @@ func NewCertService(st *store.Store, ca *agenttls.CA, agentURL string, audit Aud
 // CSR and store.ErrNotFound for an unknown device.
 func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte, renewal bool) (IssuedCert, error) {
 	now := s.now()
+	// completesRotation: the main-port write below clears rotate_cert_at, which
+	// completes a requested cert rotation without a promote step to audit it.
+	var completesRotation bool
 	if !renewal {
 		dev, err := s.st.Devices().GetByID(ctx, deviceID)
 		if err != nil {
@@ -62,6 +65,7 @@ func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte,
 		if dev.CertSerial != "" && dev.CertNotAfter > now.Unix() {
 			return IssuedCert{}, fmt.Errorf("service.CertService.Issue: %w", ErrCertAlreadyIssued)
 		}
+		completesRotation = dev.RotateCertAt != 0
 	}
 	issued, err := s.ca.IssueDevice(csrPEM, deviceID, now)
 	if err != nil {
@@ -92,6 +96,9 @@ func (s *CertService) Issue(ctx context.Context, deviceID string, csrPEM []byte,
 		EventType: "device.cert_issued", TargetType: "device", TargetID: deviceID,
 		DetailsJSON: string(details),
 	})
+	if completesRotation {
+		auditRotationCompleted(ctx, s.audit, deviceID, map[string]string{"track": "cert", "serial": issued.Serial})
+	}
 	return IssuedCert{
 		CertificatePEM: string(issued.CertPEM),
 		CABundlePEM:    string(s.ca.Bundle()),

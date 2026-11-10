@@ -414,3 +414,44 @@ func TestDeviceMutator_FlipDisabled_EmitsFromPreWriteSnapshot(t *testing.T) {
 		t.Fatalf("unknown device err = %v, want ErrNotFound", err)
 	}
 }
+
+// An owner rotate-secret clears rotate_secret_at, which completes a requested
+// secret rotation with no promote step: it must be audited like a promotion is.
+func TestDeviceService_RotateSecret_AuditsCompletedRotation(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested bool
+		want      int
+	}{
+		{"rotation requested", true, 1},
+		{"routine rotate", false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := openTestStore(t)
+			usr := seedUser(t, st, "a@b.co", "user")
+			dev := seedDevice(t, st, usr.ID, "laptop")
+			svc := NewDeviceService(st, testKey32(), NewAuditWriter(st), &recordingDeviceNotifier{})
+			if tt.requested {
+				if err := st.Devices().MarkRotation(t.Context(), dev.ID, true, false, 1_700_000_000); err != nil {
+					t.Fatalf("MarkRotation: %v", err)
+				}
+			}
+
+			if _, err := svc.RotateSecret(t.Context(), usr.ID, dev.ID); err != nil {
+				t.Fatalf("RotateSecret: %v", err)
+			}
+
+			rows := auditRows(t, st, "device.rotation.completed")
+			if len(rows) != tt.want {
+				t.Fatalf("completed rows = %d, want %d", len(rows), tt.want)
+			}
+			if tt.want == 0 {
+				return
+			}
+			if d := decodeDetails(t, rows[0]); rows[0].ActorUserID != "" || rows[0].TargetID != dev.ID || d["track"] != "secret" || len(d) != 1 {
+				t.Errorf("row = %+v details %v, want a system row for %s with track secret", rows[0], d, dev.ID)
+			}
+		})
+	}
+}

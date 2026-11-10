@@ -256,3 +256,47 @@ func TestCertService_UnknownDeviceNotFound(t *testing.T) {
 		})
 	}
 }
+
+// A main-port issuance clears rotate_cert_at, which completes a requested cert
+// rotation with no promote step: it must be audited like a promotion is.
+func TestCertService_MainIssuanceAuditsCompletedRotation(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested bool
+		want      int
+	}{
+		{"rotation requested", true, 1},
+		{"routine first issuance", false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, svc, _, dev := newCertSvc(t)
+			if tt.requested {
+				if err := st.Devices().MarkRotation(t.Context(), dev.ID, false, true, 1_700_000_000); err != nil {
+					t.Fatalf("MarkRotation: %v", err)
+				}
+			}
+
+			got, err := svc.Issue(t.Context(), dev.ID, testCSR(t), false)
+			if err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+
+			rows := adminAuditRows(t, st, "device.rotation.completed")
+			if len(rows) != tt.want {
+				t.Fatalf("completed rows = %d, want %d", len(rows), tt.want)
+			}
+			if tt.want == 0 {
+				return
+			}
+			serial := agenttls.SerialHex(parseCertPEM(t, got.CertificatePEM).SerialNumber)
+			var d map[string]string
+			if err := json.Unmarshal([]byte(rows[0].DetailsJSON), &d); err != nil {
+				t.Fatalf("details %q: %v", rows[0].DetailsJSON, err)
+			}
+			if rows[0].ActorUserID != "" || rows[0].TargetID != dev.ID || d["track"] != "cert" || d["serial"] != serial {
+				t.Errorf("row = %+v details %v, want a system row for %s with track cert, serial %s", rows[0], d, dev.ID, serial)
+			}
+		})
+	}
+}

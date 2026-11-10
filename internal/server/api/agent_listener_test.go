@@ -730,3 +730,33 @@ func TestAgentListener_CheckinSetsLastCheckinMTLS(t *testing.T) {
 		t.Errorf("LastCheckinMTLS=%v SupportsRotation=%v, want both true", dev.LastCheckinMTLS, dev.SupportsRotation)
 	}
 }
+
+// TestAgentListener_PromoteErrorIs500 pins that a database error while promoting
+// a pending certificate is a server fault, not a coded 401: a coded 401 would
+// make a healthy client drop its certificate and lock itself out. The lookup
+// succeeds here; only the promote UPDATE fails.
+func TestAgentListener_PromoteErrorIs500(t *testing.T) {
+	l := newAgentListener(t)
+	d := l.newDevice(t, "agent-promote-err@example.com")
+	b := l.setPending(t, d)
+	if _, err := l.st.DB().ExecContext(t.Context(),
+		`CREATE TRIGGER fail_promote BEFORE UPDATE OF pending_cert_serial ON devices
+		 BEGIN SELECT RAISE(ABORT, 'promote blocked'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	status, body := l.send(t, l.client(t, b), http.MethodGet, "/agent/v1/self", d.id, d.secret, nil)
+
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body=%s", status, body)
+	}
+	if strings.Contains(string(body), shared.CodeClientCertRejected) {
+		t.Errorf("body names %q, want no cert-rejected code: %s", shared.CodeClientCertRejected, body)
+	}
+	if recs := withMsg(atLevel(l.logs.records(t), "ERROR"), "agent client certificate check failed"); len(recs) != 1 {
+		t.Errorf("check-failed ERROR records = %v, want one", recs)
+	}
+	if row := l.device(t, d.id); row.CertSerial != agenttls.SerialHex(d.cert.Leaf.SerialNumber) || row.PendingCertSerial == "" {
+		t.Errorf("row = cert %q pending %q, want the old certificate current and the pending one kept", row.CertSerial, row.PendingCertSerial)
+	}
+}
