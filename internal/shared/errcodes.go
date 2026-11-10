@@ -14,4 +14,7 @@ const (
 	// CodeMTLSRequired (403): the main port refuses check-in and self when
 	// agent.require_mtls is set.
 	CodeMTLSRequired = "mtls_required"
+	// CodeNoSecretRotationPending (409): the device has no secret rotation
+	// requested; the client drops its pending secret.
+	CodeNoSecretRotationPending = "no_secret_rotation_pending"
 )
