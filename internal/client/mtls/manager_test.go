@@ -374,6 +374,8 @@ func (f *fakeServer) handler(port string) http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]string{"code": sc.code, "detail": "scripted"})
 			return
 		}
+		// Like the real server: the client promotes a pending key only on a JSON 2xx.
+		w.Header().Set("Content-Type", "application/json")
 		switch c.route {
 		case routeCaps:
 			body := map[string]any{"server_version": "test"}
