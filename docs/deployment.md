@@ -685,7 +685,7 @@ as for the other admin writes):
 |---|---|---|
 | `POST /api/v1/admin/devices/{id}/rotation` | `{"target": "secret" \| "cert" \| "both"}` | `200` `{"secret": {"since": <unix s>, "status": "..."}, "cert": {...}}`; a track with nothing pending is `{"since": null, "status": null}` |
 | `POST /api/v1/admin/devices/rotation` | `{"target": "secret" \| "cert" \| "both"}` | `200` `{"marked": n, "awaiting_upgrade": n, "awaiting_mtls": n, "skipped_disabled": n}`, each a count of devices |
-| `DELETE /api/v1/admin/devices/{id}/rotation` | none | `204`, whether or not anything was pending |
+| `DELETE /api/v1/admin/devices/{id}/rotation` | none | `204`, whether or not anything was pending (`404` for an unknown device) |
 
 A `target` outside the three values is a `422`. An unknown device is a `404`. A
 disabled device, or one whose owner account is disabled, is a `409`; so is
@@ -711,10 +711,34 @@ device pages list each pending track with the time it was requested and any
 waiting reason. The admin devices page counts them in the **Devices pending
 rotation** tile.
 
-**A pending rotation never expires.** It ends only when the device completes it,
-an admin cancels it, or, for the certificate track, **Reset certificate**, a
-later renewal, or the certificate's expiry. A device that is off for a month
-rotates when it returns.
+**A pending rotation never expires.** It ends only when:
+
+- the device completes it: the first request signed with the new secret, or the
+  first presentation of the new certificate on the agent port;
+- an admin cancels it;
+- for the certificate track, an admin uses **Reset certificate**, or the device
+  provisions a new certificate on the main port after the old one has expired;
+- for the secret track, the owner uses **Rotate secret**.
+
+A renewal on its own, or the certificate's expiry on its own, does not end it. A
+certificate rotation can be completed by a renewal that was already pending when
+the rotation was requested: that certificate is promoted the first time the
+device presents it, and the promotion counts as the completion. A device that is
+off for a month rotates when it returns.
+
+**Restoring a database backup taken before a rotation locks out every device
+rotated since.** The restored database holds the old credential and the device
+holds the new one. For the secret track, re-enroll the device. For the
+certificate track, use **Reset certificate** on each device.
+
+**The client never sends a new secret over plain `http://` by default.** It
+refuses to send a new secret over an `http://` hop unless `run.insecure_provision`
+is set: it logs an ERROR and the rotation stays pending on the server. With the
+override set it sends the secret and logs a WARN every time. The check is on the
+hop the secret would take, so a device already committed to mTLS rotates over its
+agent port (https) even when its configured server URL is `http://`. The
+certificate track, and signing with a pending secret that already exists, are not
+gated: renewal already runs on the agent port, and a signature leaks no secret.
 
 **Cancel keeps an already-issued pending certificate.** Cancel clears the
 request and any pending secret, but a certificate the server has already issued
