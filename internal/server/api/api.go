@@ -87,6 +87,7 @@ func Build(mux *http.ServeMux, deps ServerDeps) {
 	registerAccountEmailOps(apiAPI, deps)
 	registerAPIKeyOps(apiAPI, deps)
 	registerAdminOps(apiAPI, deps)
+	registerAdminRotationOps(apiAPI, deps)
 	// Passkey ops depend on BOTH Passkey and Grants being wired (register/begin
 	// and /finish drive a grant redeem via Grants; account passkey management
 	// drives Passkey directly). Both are nil until the WebAuthn Relying Party
